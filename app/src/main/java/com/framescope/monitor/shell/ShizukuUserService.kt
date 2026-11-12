@@ -57,6 +57,7 @@ class ShizukuUserService : IShizukuService.Stub {
 
     private val executions = ConcurrentHashMap<String, Execution>()
     private val cancellationsBeforeStart = ConcurrentHashMap<String, Long>()
+    private val recentlyFinished = ConcurrentHashMap<String, Long>()
     private val executionLock = Any()
     private val destroyed = AtomicBoolean(false)
 
@@ -65,6 +66,7 @@ class ShizukuUserService : IShizukuService.Stub {
             if (!destroyed.compareAndSet(false, true)) return
             executions.values.forEach { it.cancel() }
             cancellationsBeforeStart.clear()
+            recentlyFinished.clear()
         }
     }
 
@@ -102,7 +104,11 @@ class ShizukuUserService : IShizukuService.Stub {
             pruneExpiredCancellations()
             when {
                 destroyed.get() -> ShellExecutionStatus.FAILURE
-                cancellationsBeforeStart.remove(executionId) != null -> ShellExecutionStatus.CANCELLED
+                cancellationsBeforeStart.remove(executionId) != null -> {
+                    rememberFinishedExecution(executionId)
+                    ShellExecutionStatus.CANCELLED
+                }
+                recentlyFinished.containsKey(executionId) -> ShellExecutionStatus.FAILURE
                 executions.putIfAbsent(executionId, execution) != null -> ShellExecutionStatus.FAILURE
                 else -> null
             }
@@ -200,7 +206,10 @@ class ShizukuUserService : IShizukuService.Stub {
             )
         } finally {
             execution.finish()
-            executions.remove(executionId, execution)
+            synchronized(executionLock) {
+                executions.remove(executionId, execution)
+                rememberFinishedExecution(executionId)
+            }
             join(stdoutThread, 250L)
             join(stderrThread, 250L)
             if (interrupted) Thread.currentThread().interrupt()
@@ -215,6 +224,8 @@ class ShizukuUserService : IShizukuService.Stub {
             val execution = executions[executionId]
             if (execution != null) {
                 execution.cancel()
+            } else if (recentlyFinished.containsKey(executionId)) {
+                false
             } else if (cancellationsBeforeStart.size < MAX_PENDING_CANCELLATIONS) {
                 cancellationsBeforeStart[executionId] = System.currentTimeMillis() + CANCELLATION_TTL_MS
                 true
@@ -275,6 +286,15 @@ class ShizukuUserService : IShizukuService.Stub {
     private fun pruneExpiredCancellations() {
         val now = System.currentTimeMillis()
         cancellationsBeforeStart.entries.removeAll { it.value <= now }
+        recentlyFinished.entries.removeAll { it.value <= now }
+    }
+
+    private fun rememberFinishedExecution(executionId: String) {
+        if (recentlyFinished.size >= MAX_RECORDED_COMPLETIONS) {
+            val oldest = recentlyFinished.entries.minByOrNull { it.value }
+            if (oldest != null) recentlyFinished.remove(oldest.key, oldest.value)
+        }
+        recentlyFinished[executionId] = System.currentTimeMillis() + CANCELLATION_TTL_MS
     }
 
     internal val activeExecutionCount: Int
@@ -288,6 +308,7 @@ class ShizukuUserService : IShizukuService.Stub {
         const val KEY_STDERR = "stderr"
         private const val MAX_OUTPUT_SIZE = 2 * 1024 * 1024 // 2 MB safety cap
         private const val MAX_PENDING_CANCELLATIONS = 4_096
+        private const val MAX_RECORDED_COMPLETIONS = 4_096
         private const val CANCELLATION_TTL_MS = 60_000L
     }
 }

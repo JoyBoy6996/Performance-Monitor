@@ -47,16 +47,19 @@ internal interface ShizukuPlatform {
 private object RealShizukuPlatform : ShizukuPlatform {
     override fun addRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener) =
         Shizuku.addRequestPermissionResultListener(listener)
-    override fun removeRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener) =
+    override fun removeRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener) {
         Shizuku.removeRequestPermissionResultListener(listener)
+    }
     override fun addBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener) =
         Shizuku.addBinderReceivedListener(listener)
-    override fun removeBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener) =
+    override fun removeBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener) {
         Shizuku.removeBinderReceivedListener(listener)
+    }
     override fun addBinderDeadListener(listener: Shizuku.OnBinderDeadListener) =
         Shizuku.addBinderDeadListener(listener)
-    override fun removeBinderDeadListener(listener: Shizuku.OnBinderDeadListener) =
+    override fun removeBinderDeadListener(listener: Shizuku.OnBinderDeadListener) {
         Shizuku.removeBinderDeadListener(listener)
+    }
     override fun pingBinder() = Shizuku.pingBinder()
     override fun checkSelfPermission() = Shizuku.checkSelfPermission()
     override fun requestPermission(requestCode: Int) = Shizuku.requestPermission(requestCode)

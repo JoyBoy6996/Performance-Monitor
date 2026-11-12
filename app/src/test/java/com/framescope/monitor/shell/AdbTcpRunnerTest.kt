@@ -413,7 +413,7 @@ class AdbTcpRunnerTest {
         }
 
         /** Verifies the host's signature exactly like `adbd` does. */
-        private fun verify(token: ByteArray, signature: ByteArray, blob: ByteArray?): Boolean {
+        private fun verify(token: ByteArray, signature: ByteArray, blob: ByteArray?): Boolean = runCatching {
             val key = blob ?: return false
             if (key.size != 524) return false
             val modulus = key.copyOfRange(8, 264).reversedArray().toUnsignedBigInteger()
@@ -441,8 +441,8 @@ class AdbTcpRunnerTest {
                 if (block[i + k] != digestInfo[k]) return false
             }
             val signed = block.copyOfRange(i + digestInfo.size, block.size)
-            return MessageDigest.getInstance("SHA-1").digest(token).contentEquals(signed)
-        }
+            MessageDigest.getInstance("SHA-1").digest(token).contentEquals(signed)
+        }.getOrDefault(false)
 
         /** Decodes the "<base64> <comment>" payload the host sends. */
         private fun decodePublicKey(payload: ByteArray): ByteArray? = runCatching {

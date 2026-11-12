@@ -450,7 +450,7 @@ class AdbTcpRunner(
                 throw ShellUnavailable("The command timed out after ${timeoutMs}ms.")
             }
 
-            return ShellResult(out = out, err = err, exitCode = exit)
+            return ShellResult(code = exit, out = out, err = err)
         }
 
         private data class ShellV2Output(val stdout: String, val stderr: String, val exitCode: Int)

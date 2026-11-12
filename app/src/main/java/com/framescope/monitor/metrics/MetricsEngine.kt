@@ -174,9 +174,7 @@ class MetricsEngine(
             return
         }
         val custom = settings.protectedPackages()
-        _protectedForeground.value = custom.contains(current) ||
-            ProtectedApps.isProtected(current) ||
-            ProtectedApps.matchesKnownKeywords(current)
+        _protectedForeground.value = ProtectedApps.isProtected(current, custom)
     }
 
     private fun appLabel(pkg: String?): String {

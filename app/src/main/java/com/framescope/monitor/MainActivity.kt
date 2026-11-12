@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi::class)
+
 package com.framescope.monitor
 
 import android.Manifest

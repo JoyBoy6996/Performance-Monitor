@@ -503,6 +503,7 @@ private fun ProbePanel(container: AppContainer) {
 private fun DiagnosticsRow(container: AppContainer) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val status by container.hub.status.collectAsState()
     var message by remember { mutableStateOf<String?>(null) }
     var running by remember { mutableStateOf(false) }
 

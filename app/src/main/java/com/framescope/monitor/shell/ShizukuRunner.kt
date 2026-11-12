@@ -79,10 +79,8 @@ class ShizukuRunner(
             isBound = true
 
             // Verify actual command execution before declaring READY
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).run {
-                kotlinx.coroutines.launch {
-                    verifyService(stub)
-                }
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                verifyService(stub)
             }
         }
 
@@ -287,10 +285,11 @@ class ShizukuRunner(
             Shizuku.removeBinderReceivedListener(binderReceivedListener)
             Shizuku.removeBinderDeadListener(binderDeadListener)
         }
-        if (isBound && context != null) {
+        val ctx = context
+        if (isBound && ctx != null) {
             runCatching {
                 val serviceArgs = Shizuku.UserServiceArgs(
-                    ComponentName(context.packageName, ShizukuUserService::class.java.name)
+                    ComponentName(ctx.packageName, ShizukuUserService::class.java.name)
                 )
                 Shizuku.unbindUserService(serviceArgs, userServiceConnection, true)
             }

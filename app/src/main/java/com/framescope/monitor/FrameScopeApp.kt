@@ -40,11 +40,11 @@ class FrameScopeApp : Application() {
                 app.hub.refresh()
             }
         }
+    }
 
-        override fun onTerminate() {
-            if (::container.isInitialized) container.cleanup()
-            super.onTerminate()
-        }
+    override fun onTerminate() {
+        if (::container.isInitialized) container.cleanup()
+        super.onTerminate()
     }
 }
 
@@ -72,12 +72,12 @@ class AppContainer(context: Context) {
                     overlay.start()
                 }
             }
-
-            fun cleanup() {
-                engine.stop()
-                hub.cleanup()
-                scope.cancel()
-            }
         }
+    }
+
+    fun cleanup() {
+        engine.stop()
+        hub.cleanup()
+        scope.cancel()
     }
 }

@@ -95,6 +95,7 @@ class AdbTcpRunner(
         keyOfferUsed = false
         failureCount = 0
         lastFailureAt = 0L
+        lastError = null
         _authState.value = if (keys.authorisationStored) AdbAuthState.STORED else AdbAuthState.UNKNOWN
         closeSession()
     }
@@ -183,7 +184,7 @@ class AdbTcpRunner(
     ): AdbSession {
         val cooling = System.currentTimeMillis() - lastFailureAt
         val requiredBackoff = (BASE_BACKOFF_MS * (1 shl minOf(failureCount, 4))).coerceIn(BASE_BACKOFF_MS, MAX_BACKOFF_MS)
-        if (!force && cooling < requiredBackoff && lastError != null) {
+        if (!force && lastFailureAt > 0L && cooling < requiredBackoff && lastError != null) {
             throw ShellUnavailable(lastError!!)
         }
 

@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         container?.let { app ->
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            app.scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 app.hub.refresh()
             }
         }

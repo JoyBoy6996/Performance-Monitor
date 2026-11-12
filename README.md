@@ -4,8 +4,8 @@ A Scene-style FPS meter for Android: live frame rate, frame time, jank and devic
 telemetry on top of any app - plus session recording, a full stats breakdown and a
 modern, responsive Material 3 interface.
 
-FrameScope runs with elevated **shell privileges exclusively through Shizuku UserService**
-and never needs root, so it plays nicely with banking and security apps.
+FrameScope runs shell commands exclusively through the official Shizuku UserService API.
+Privileged access is temporary and is available only while Shizuku is running.
 
 ---
 
@@ -28,24 +28,24 @@ so the graph is frame accurate), `dumpsys gfxinfo` as a fallback, `dumpsys batte
 
 ## Architecture: Shizuku UserService
 
-FrameScope uses the official Shizuku UserService API to execute privileged shell commands:
-* **Pure Shizuku Architecture**: No ADB daemon, no local TCP bridge, no root/su fallbacks.
-* **Privileged UserService Process**: Spawns an isolated `ShizukuUserService` via Shizuku's server running as UID 2000 (`shell`).
-* **Robust Command Execution Layer**: Supports stdout, stderr, exit codes, watchdog timeouts, cancellation cleanup, and execution verification.
-* **Automatic Lifecycle Management**: Handles binder reception, binder death, permission checks, and reconnection seamlessly.
+FrameScope uses the official Shizuku UserService API for privileged shell commands:
+* **Only Shizuku UserService**: No alternate privileged execution path.
+* **Verified connection**: Readiness requires a successful command through the connected UserService.
+* **Isolated execution state**: Each command has its own execution ID, output streams, timeout, and cancellation.
+* **Lifecycle-aware access**: Permission, Shizuku Binder, UserService connection, and command verification are tracked independently.
+* **Temporary shell access**: Android permission grants and Shizuku shell access are distinct; shell access ends when Shizuku stops.
 
 ---
 
 ## Setup
 
-1. Install [Shizuku](https://shizuku.rikka.app/) (available on GitHub or Google Play).
-2. Start Shizuku:
-   * **Via Wireless Debugging (Android 11+)**: Open the Shizuku app, tap "Pairing" under Wireless Debugging, enter the pairing code, and tap "Start".
-   * **Via ADB from a computer**:
-     ```bash
-     adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/tools/start.sh
-     ```
-3. Open FrameScope, go to **Settings -> Request permission**, and allow access.
+1. Install and start [Shizuku](https://shizuku.rikka.app/) using its official guide for your device and Android version.
+2. Open FrameScope and grant Shizuku permission in **Settings** when prompted.
+3. Wait for the UserService connection and command verification to complete. A prior successful setup is remembered, but shell access is unavailable whenever Shizuku is stopped; start Shizuku again and FrameScope reconnects.
+
+### Troubleshooting
+
+If privileged features are unavailable, check that Shizuku is running, grant FrameScope permission in Shizuku, and use **Settings -> Check status**. FrameScope reports permission, Binder, UserService, and command-verification status separately. Restarting Shizuku restores temporary shell access; it does not persistently grant Android permissions.
 
 ---
 
@@ -58,7 +58,7 @@ checks stay green:
 * No root, no Magisk, no KernelSU, no APatch;
 * **No AccessibilityService** and no DeviceAdminReceiver;
 * No hooking or TLS interception of any kind;
-* Only the standard Android `shell` user provided by Shizuku;
+* Only the standard Android `shell` user provided temporarily by Shizuku;
 * The floating overlay hides itself automatically when a banking, payment or
   security app is in the foreground (pre-populated list plus a live detector
   that scans the installed packages).
@@ -74,6 +74,8 @@ export ANDROID_HOME=/path/to/android-sdk
 ./gradlew assembleDebug
 # app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Run unit tests with `./gradlew testDebugUnitTest`.
 
 ---
 

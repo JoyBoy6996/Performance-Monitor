@@ -26,7 +26,7 @@
 
         <!-- Required by Shizuku: this is how the Shizuku server hands its
              binder to FrameScope. Without it Shizuku.pingBinder() is always
-             false and the Shizuku backend can never be selected. -->
+             false and the Shizuku UserService cannot be connected. -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"

@@ -11,6 +11,7 @@ import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
@@ -30,7 +31,7 @@ class FrameScopeApp : Application() {
             container.engine.androidContext = applicationContext
             container.engine.start()
         }.onFailure { CrashLog.write(this, it) }
-        // The backend check does network work. It runs in the background and a
+        // The Shizuku connection check runs in the background and a
         // failure there must never take the interface down with it.
         val app = runCatching { container }.getOrNull() ?: return
         app.scope.launch(Dispatchers.IO) {
@@ -38,6 +39,11 @@ class FrameScopeApp : Application() {
                 com.framescope.monitor.core.ProtectedApps.scanInstalled(applicationContext)
                 app.hub.refresh()
             }
+        }
+
+        override fun onTerminate() {
+            if (::container.isInitialized) container.cleanup()
+            super.onTerminate()
         }
     }
 }
@@ -65,6 +71,12 @@ class AppContainer(context: Context) {
                     resumeOverlay = false
                     overlay.start()
                 }
+            }
+
+            fun cleanup() {
+                engine.stop()
+                hub.cleanup()
+                scope.cancel()
             }
         }
     }

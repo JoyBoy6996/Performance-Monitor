@@ -78,7 +78,8 @@ class MetricsEngine(
                 val started = System.currentTimeMillis()
                 val enabled = settings.measurementEnabled.value
 
-                val fpsState = if (enabled) {
+                val privilegedReady = hub.status.value.state == AccessState.READY
+                val fpsState = if (enabled && privilegedReady) {
                     try {
                         kotlinx.coroutines.withTimeoutOrNull(3000L) {
                             fpsSampler.sample(settings.fpsThreshold.value)
@@ -89,8 +90,10 @@ class MetricsEngine(
                     } catch (e: Exception) {
                         null
                     }
-                } else {
+                } else if (!enabled) {
                     fpsSampler.reset()
+                    null
+                } else {
                     null
                 }
 
@@ -100,6 +103,9 @@ class MetricsEngine(
 
                 _diagnostic.value = when {
                     !enabled -> null
+                    !privilegedReady -> hub.status.value.detail.ifBlank {
+                        "Shizuku is unavailable. Cached metrics and sessions are preserved."
+                    }
                     else -> hub.lastError.value
                         ?: fpsState?.reason
                         ?: if (fpsState?.valid == false) "Waiting for frame presentation" else null
@@ -113,7 +119,7 @@ class MetricsEngine(
                 handleAutoRecord(currentApp)
 
                 slowCounter++
-                if (slowCounter % SLOW_EVERY == 0) {
+                if (privilegedReady && slowCounter % SLOW_EVERY == 0) {
                     val metrics = try {
                         kotlinx.coroutines.withTimeoutOrNull(2500L) {
                             systemSampler.sample()

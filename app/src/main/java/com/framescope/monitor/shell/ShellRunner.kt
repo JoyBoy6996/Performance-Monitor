@@ -1,21 +1,30 @@
 package com.framescope.monitor.shell
 
+enum class ShellExecutionStatus {
+    SUCCESS,
+    FAILURE,
+    TIMEOUT,
+    CANCELLED
+}
+
 /** Result of a single shell command execution. */
 data class ShellResult(
     val code: Int,
     val out: String,
-    val err: String = ""
+    val err: String = "",
+    val status: ShellExecutionStatus = if (code == 0) {
+        ShellExecutionStatus.SUCCESS
+    } else {
+        ShellExecutionStatus.FAILURE
+    },
+    val executionId: String? = null
 ) {
-    val ok: Boolean get() = code == 0
+    val ok: Boolean get() = status == ShellExecutionStatus.SUCCESS
     val text: String get() = if (out.isNotBlank()) out else err
 }
 
-/** A way of executing commands with elevated (shell / root) privileges. */
+/** The Shizuku shell execution contract. */
 interface ShellRunner {
-    val id: String
-    val label: String
-
-    /** Cheap check whether this backend can be used right now. */
     suspend fun isAvailable(): Boolean
 
     /** Extra detail shown in the UI when [isAvailable] is false. */

@@ -92,7 +92,7 @@ fun DashboardScreen(
     val measuring by container.settings.measurementEnabled.flow.collectAsState()
     val setupDone by container.settings.setupCompleted.flow.collectAsState()
 
-    val backendColor = if (status.state == AccessState.READY) {
+    val accessColor = if (status.state == AccessState.READY) {
         MaterialTheme.status.good
     } else {
         MaterialTheme.status.warn
@@ -104,8 +104,15 @@ fun DashboardScreen(
         bottomPadding = bottomPadding,
         actions = {
             StatusPill(
-                text = if (status.state == AccessState.READY) "Connected" else status.backendLabel,
-                color = backendColor,
+                text = when {
+                    status.commandVerified -> "Verified"
+                    !status.permissionGranted -> "Permission needed"
+                    !status.binderAvailable -> "Shizuku stopped"
+                    status.state == AccessState.UNAVAILABLE -> "Connection error"
+                    status.userServiceConnected -> "Verifying"
+                    else -> "Connecting"
+                },
+                color = accessColor,
                 modifier = Modifier.padding(end = Space.lg)
             )
         }
@@ -119,7 +126,7 @@ fun DashboardScreen(
                 AccessBanner(
                     title = if (setupDone) "Not connected right now" else "Privileged access needed",
                     detail = if (setupDone) {
-                        status.detail.ifBlank { "The bridge is not answering. Open the settings and re-check." }
+                        status.detail.ifBlank { "Shizuku is not answering. Open Settings to check the connection." }
                     } else {
                         status.detail.ifBlank { "Run the one-time setup to unlock real frame rate data." }
                     },
@@ -529,7 +536,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                         val result = container.hub.execOrNull(Diagnostics.command, 20_000)
                         val shell = result?.let { (it.out + "\n" + it.err).trim() }
                             ?.takeIf { it.isNotEmpty() }
-                            ?: "No privileged backend available. Run the setup first."
+                            ?: "Shizuku is unavailable. Start it and complete setup first."
                         val probe = container.engine.probeReport.value.trim()
                         val text = buildString {
                             append("--- status ---")
@@ -537,8 +544,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                             append("state: ")
                             append(status.state.name.lowercase())
                             append('\n')
-                            append("backend: ")
-                            append(status.backendLabel)
+                            append("privileged service: Shizuku UserService")
                             append('\n')
                             append("--- frame source ---")
                             append('\n')

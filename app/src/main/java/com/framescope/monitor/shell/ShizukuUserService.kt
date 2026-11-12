@@ -5,8 +5,11 @@ import android.os.Bundle
 import android.os.Process
 import androidx.annotation.Keep
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
 
 /**
@@ -23,108 +26,268 @@ class ShizukuUserService : IShizukuService.Stub {
 
     constructor(@Suppress("UNUSED_PARAMETER") context: Context) : super()
 
-    @Volatile
-    private var currentProcess: java.lang.Process? = null
+    private class Execution {
+        private var process: java.lang.Process? = null
+        private var finished = false
+        private var cancellationRequested = false
+
+        @Synchronized
+        fun attach(process: java.lang.Process): Boolean {
+            if (finished) return false
+            this.process = process
+            if (cancellationRequested) process.destroyForcibly()
+            return !cancellationRequested
+        }
+
+        @Synchronized
+        fun cancel(): Boolean {
+            if (finished) return false
+            cancellationRequested = true
+            process?.destroyForcibly()
+            return true
+        }
+
+        @Synchronized
+        fun finish(): Boolean {
+            finished = true
+            process = null
+            return cancellationRequested
+        }
+    }
+
+    private val executions = ConcurrentHashMap<String, Execution>()
+    private val cancellationsBeforeStart = ConcurrentHashMap<String, Long>()
+    private val executionLock = Any()
+    private val destroyed = AtomicBoolean(false)
 
     override fun destroy() {
-        runCatching { currentProcess?.destroyForcibly() }
-        exitProcess(0)
+        synchronized(executionLock) {
+            if (!destroyed.compareAndSet(false, true)) return
+            executions.values.forEach { it.cancel() }
+            cancellationsBeforeStart.clear()
+        }
     }
 
     override fun exit() {
         destroy()
+        exitProcess(0)
     }
 
     override fun getUid(): Int {
         return Process.myUid()
     }
 
-    override fun execute(command: String, timeoutMs: Long): Bundle {
-        val bundle = Bundle()
-        val effectiveTimeout = timeoutMs.coerceIn(100L, 120_000L)
-
-        val process: java.lang.Process = try {
-            ProcessBuilder("sh", "-c", command)
-                .redirectErrorStream(false)
-                .start()
-        } catch (e: Exception) {
-            bundle.putInt(KEY_EXIT_CODE, -1)
-            bundle.putString(KEY_STDOUT, "")
-            bundle.putString(KEY_STDERR, e.message ?: "Failed to start shell process")
-            return bundle
+    override fun execute(executionId: String, command: String, timeoutMs: Long): Bundle {
+        if (executionId.isBlank()) {
+            return resultBundle(
+                executionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Execution ID must not be blank"
+            )
+        }
+        if (destroyed.get()) {
+            return resultBundle(
+                executionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Shizuku UserService is shutting down"
+            )
         }
 
-        currentProcess = process
-
-        val stdoutBuffer = ByteArrayOutputStream()
-        val stderrBuffer = ByteArrayOutputStream()
-
-        val stdoutThread = Thread {
-            drainStream(process.inputStream, stdoutBuffer)
-        }.apply {
-            isDaemon = true
-            name = "shizuku-stdout"
-            start()
-        }
-
-        val stderrThread = Thread {
-            drainStream(process.errorStream, stderrBuffer)
-        }.apply {
-            isDaemon = true
-            name = "shizuku-stderr"
-            start()
-        }
-
-        // Close stdin so commands expecting EOF do not hang indefinitely
-        runCatching { process.outputStream.close() }
-
-        val completed = try {
-            process.waitFor(effectiveTimeout, TimeUnit.MILLISECONDS)
-        } catch (e: InterruptedException) {
-            false
-        }
-
-        val exitCode: Int
-        if (completed) {
-            exitCode = process.exitValue()
-            runCatching { stdoutThread.join(500) }
-            runCatching { stderrThread.join(500) }
-        } else {
-            exitCode = -1
-            runCatching { process.destroyForcibly() }
-            runCatching { stdoutThread.join(200) }
-            runCatching { stderrThread.join(200) }
-            synchronized(stderrBuffer) {
-                stderrBuffer.write("\nCommand timed out after ${effectiveTimeout}ms\n".toByteArray(Charsets.UTF_8))
+        val execution = Execution()
+        val registrationStatus = synchronized(executionLock) {
+            pruneExpiredCancellations()
+            when {
+                destroyed.get() -> ShellExecutionStatus.FAILURE
+                cancellationsBeforeStart.remove(executionId) != null -> ShellExecutionStatus.CANCELLED
+                executions.putIfAbsent(executionId, execution) != null -> ShellExecutionStatus.FAILURE
+                else -> null
             }
         }
+        if (registrationStatus != null) {
+            val message = when {
+                registrationStatus == ShellExecutionStatus.CANCELLED -> "Command cancelled"
+                destroyed.get() -> "Shizuku UserService is shutting down"
+                else -> "Execution ID is already active"
+            }
+            return resultBundle(executionId, registrationStatus, -1, "", message)
+        }
 
-        currentProcess = null
+        val effectiveTimeout = timeoutMs.coerceIn(100L, 120_000L)
+        var process: java.lang.Process? = null
+        val stdoutBuffer = ByteArrayOutputStream()
+        val stderrBuffer = ByteArrayOutputStream()
+        var stdoutThread: Thread? = null
+        var stderrThread: Thread? = null
+        var interrupted = false
+        try {
+            val startedProcess = ProcessBuilder("sh", "-c", command)
+                .redirectErrorStream(false)
+                .start()
+            process = startedProcess
+            if (!execution.attach(startedProcess)) {
+                startedProcess.destroyForcibly()
+            }
 
-        bundle.putInt(KEY_EXIT_CODE, exitCode)
-        bundle.putString(KEY_STDOUT, stdoutBuffer.toString("UTF-8"))
-        bundle.putString(KEY_STDERR, stderrBuffer.toString("UTF-8"))
-        return bundle
+            stdoutThread = Thread(
+                { drainStream(startedProcess.inputStream, stdoutBuffer) },
+                "shizuku-stdout-$executionId"
+            ).apply {
+                isDaemon = true
+                start()
+            }
+            stderrThread = Thread(
+                { drainStream(startedProcess.errorStream, stderrBuffer) },
+                "shizuku-stderr-$executionId"
+            ).apply {
+                isDaemon = true
+                start()
+            }
+            startedProcess.outputStream.close()
+
+            val completed = try {
+                startedProcess.waitFor(effectiveTimeout, TimeUnit.MILLISECONDS)
+            } catch (e: InterruptedException) {
+                interrupted = true
+                execution.cancel()
+                false
+            }
+            val cancelled = execution.finish()
+            if (!completed) {
+                startedProcess.destroyForcibly()
+                try {
+                    startedProcess.waitFor(1_000, TimeUnit.MILLISECONDS)
+                } catch (e: InterruptedException) {
+                    interrupted = true
+                }
+            }
+            join(stdoutThread, if (completed) 1_000L else 250L)
+            join(stderrThread, if (completed) 1_000L else 250L)
+
+            val status = when {
+                cancelled -> ShellExecutionStatus.CANCELLED
+                completed && startedProcess.exitValue() == 0 -> ShellExecutionStatus.SUCCESS
+                completed -> ShellExecutionStatus.FAILURE
+                else -> ShellExecutionStatus.TIMEOUT
+            }
+            val error = when (status) {
+                ShellExecutionStatus.CANCELLED -> appendMessage(stderrBuffer, "Command cancelled")
+                ShellExecutionStatus.TIMEOUT -> appendMessage(
+                    stderrBuffer,
+                    "Command timed out after ${effectiveTimeout}ms"
+                )
+                else -> stderrBuffer.toString("UTF-8")
+            }
+            return resultBundle(
+                executionId,
+                status,
+                if (completed) startedProcess.exitValue() else -1,
+                output(stdoutBuffer),
+                error
+            )
+        } catch (e: Exception) {
+            process?.destroyForcibly()
+            execution.finish()
+            return resultBundle(
+                executionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                output(stdoutBuffer),
+                e.message ?: "Failed to start shell process"
+            )
+        } finally {
+            execution.finish()
+            executions.remove(executionId, execution)
+            join(stdoutThread, 250L)
+            join(stderrThread, 250L)
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    override fun cancel(executionId: String): Boolean {
+        if (executionId.isBlank() || destroyed.get()) return false
+        return synchronized(executionLock) {
+            if (destroyed.get()) return@synchronized false
+            pruneExpiredCancellations()
+            val execution = executions[executionId]
+            if (execution != null) {
+                execution.cancel()
+            } else if (cancellationsBeforeStart.size < MAX_PENDING_CANCELLATIONS) {
+                cancellationsBeforeStart[executionId] = System.currentTimeMillis() + CANCELLATION_TTL_MS
+                true
+            } else {
+                false
+            }
+        }
     }
 
     private fun drainStream(input: InputStream, output: ByteArrayOutputStream) {
-        runCatching {
+        try {
             val buffer = ByteArray(8192)
             var bytesRead: Int
             while (input.read(buffer).also { bytesRead = it } > 0) {
                 synchronized(output) {
                     if (output.size() < MAX_OUTPUT_SIZE) {
-                        output.write(buffer, 0, bytesRead)
+                        val remaining = MAX_OUTPUT_SIZE - output.size()
+                        output.write(buffer, 0, minOf(bytesRead, remaining))
                     }
                 }
             }
+        } catch (_: IOException) {
+            // Closing a process stream during cancellation or timeout is expected.
         }
     }
 
+    private fun join(thread: Thread?, timeoutMs: Long) {
+        if (thread == null || thread === Thread.currentThread()) return
+        try {
+            thread.join(timeoutMs)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun appendMessage(buffer: ByteArrayOutputStream, message: String): String {
+        val contents = output(buffer)
+        return if (contents.isBlank()) message else "$contents\n$message"
+    }
+
+    private fun output(buffer: ByteArrayOutputStream): String =
+        synchronized(buffer) { buffer.toString("UTF-8") }
+
+    private fun resultBundle(
+        executionId: String,
+        status: ShellExecutionStatus,
+        exitCode: Int,
+        stdout: String,
+        stderr: String
+    ) = Bundle().apply {
+        putString(KEY_EXECUTION_ID, executionId)
+        putString(KEY_STATUS, status.name)
+        putInt(KEY_EXIT_CODE, exitCode)
+        putString(KEY_STDOUT, stdout)
+        putString(KEY_STDERR, stderr)
+    }
+
+    private fun pruneExpiredCancellations() {
+        val now = System.currentTimeMillis()
+        cancellationsBeforeStart.entries.removeAll { it.value <= now }
+    }
+
+    internal val activeExecutionCount: Int
+        get() = executions.size
+
     companion object {
+        const val KEY_EXECUTION_ID = "execution_id"
+        const val KEY_STATUS = "execution_status"
         const val KEY_EXIT_CODE = "exit_code"
         const val KEY_STDOUT = "stdout"
         const val KEY_STDERR = "stderr"
         private const val MAX_OUTPUT_SIZE = 2 * 1024 * 1024 // 2 MB safety cap
+        private const val MAX_PENDING_CANCELLATIONS = 4_096
+        private const val CANCELLATION_TTL_MS = 60_000L
     }
 }

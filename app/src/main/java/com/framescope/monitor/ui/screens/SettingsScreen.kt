@@ -69,6 +69,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val settings = container.settings
     val status by container.hub.status.collectAsState()
+    val setupCompleted by settings.setupCompleted.flow.collectAsState()
     val diagnostic by container.engine.diagnostic.collectAsState()
     val themeMode by settings.themeMode.flow.collectAsState()
     val dynamicColor by settings.dynamicColor.flow.collectAsState()
@@ -155,11 +156,22 @@ fun SettingsScreen(
                 SettingRow(
                     title = "Shizuku service",
                     supporting = status.detail.ifBlank {
-                        diagnostic ?: "Privileged shell access is provided exclusively via Shizuku UserService."
+                        if (setupCompleted) {
+                            "Setup was verified previously. Shell access is temporary and is available only while Shizuku is running."
+                        } else {
+                            diagnostic ?: "Privileged shell access is provided exclusively via Shizuku UserService."
+                        }
                     },
                     trailing = {
                         StatusPill(
-                            text = if (status.state == AccessState.READY) "Connected" else status.backendLabel,
+                            text = when {
+                                status.commandVerified -> "Verified"
+                                !status.permissionGranted -> "Permission needed"
+                                !status.binderAvailable -> "Shizuku stopped"
+                                status.state == AccessState.UNAVAILABLE -> "Connection error"
+                                status.userServiceConnected -> "Verifying"
+                                else -> "Connecting"
+                            },
                             color = if (status.state == AccessState.READY) {
                                 MaterialTheme.status.good
                             } else {
@@ -193,9 +205,23 @@ fun SettingsScreen(
                         Text("Check status", modifier = Modifier.padding(start = 6.dp))
                     }
                     OutlinedButton(
-                        onClick = { scope.launch { container.hub.requestPermission() } }
+                        enabled = !checking,
+                        onClick = {
+                            checking = true
+                            scope.launch {
+                                container.hub.requestPermission()
+                                container.hub.refresh()
+                                checking = false
+                            }
+                        }
                     ) {
-                        Text("Request permission")
+                        Text(
+                            when {
+                                status.permissionGranted -> "Reconnect"
+                                setupCompleted -> "Grant permission again"
+                                else -> "Request permission"
+                            }
+                        )
                     }
                 }
             }
@@ -208,8 +234,7 @@ fun SettingsScreen(
                 SetupOption(
                     title = "Start Shizuku",
                     badge = "Required",
-                    description = "Start Shizuku via Wireless Debugging (Android 11+) in the Shizuku app, or via ADB on a computer. Once started, grant FrameScope the Shizuku permission.",
-                    command = "adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/tools/start.sh",
+                    description = "Install and start Shizuku using the official guide for your device, then grant FrameScope permission above. FrameScope verifies a real UserService command before showing Connected. Shell access is temporary and ends when Shizuku stops; it does not persistently grant Android permissions.",
                     context = context
                 )
             }

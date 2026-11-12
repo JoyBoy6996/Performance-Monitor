@@ -10,7 +10,7 @@ class SystemSampler(private val hub: ShellHub) {
 
     private var lastCpu: LongArray? = null
 
-    suspend fun sample(): SystemMetrics {
+    suspend fun sample(): SystemMetrics? {
         val script = ShellCommands.batch(
             ShellCommands.cpuStat(),
             ShellCommands.memInfo(),
@@ -20,7 +20,9 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.cpuFreq(),
             ShellCommands.displayInfo()
         )
-        val out = hub.execOrNull(script)?.out.orEmpty()
+        val result = hub.execOrNull(script) ?: return null
+        if (!result.ok) return null
+        val out = result.out
         val parts = ShellCommands.split(out)
         fun part(index: Int): String = parts.getOrElse(index) { "" }
 

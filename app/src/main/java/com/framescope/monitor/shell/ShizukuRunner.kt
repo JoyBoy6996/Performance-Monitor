@@ -304,6 +304,7 @@ class ShizukuRunner private constructor(
         }
         _connectionDetails.update {
             it.copy(
+                binderAvailable = true,
                 permissionGranted = hasPermission,
                 userServiceConnected = if (hasPermission) it.userServiceConnected else false,
                 commandVerified = if (hasPermission) it.commandVerified else false

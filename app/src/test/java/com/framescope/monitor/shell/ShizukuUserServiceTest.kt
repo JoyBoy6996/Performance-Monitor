@@ -1,5 +1,6 @@
 package com.framescope.monitor.shell
 
+import android.os.Parcel
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import org.junit.runner.RunWith
@@ -24,6 +25,41 @@ class ShizukuUserServiceTest {
         assertEquals(7, result.getInt(ShizukuUserService.KEY_EXIT_CODE))
         assertEquals("stdout-data", result.getString(ShizukuUserService.KEY_STDOUT))
         assertEquals("stderr-data", result.getString(ShizukuUserService.KEY_STDERR))
+    }
+
+    @Test
+    fun truncatesBothOutputStreamsBeforeReturningBinderResult() {
+        val result = ShizukuUserService().execute(
+            "large-output",
+            "head -c 100000 /dev/zero | tr '\\0' x; head -c 100000 /dev/zero | tr '\\0' y >&2",
+            5_000
+        )
+        val stdout = result.getString(ShizukuUserService.KEY_STDOUT).orEmpty()
+        val stderr = result.getString(ShizukuUserService.KEY_STDERR).orEmpty()
+
+        assertTrue(stdout.length < ShizukuUserService.MAX_OUTPUT_BYTES_PER_STREAM + 100)
+        assertTrue(stderr.length < ShizukuUserService.MAX_OUTPUT_BYTES_PER_STREAM + 100)
+        assertTrue(stdout.contains("[output truncated after"))
+        assertTrue(stderr.contains("[output truncated after"))
+        val parcel = Parcel.obtain()
+        try {
+            parcel.writeBundle(result)
+            assertTrue(parcel.dataSize() < 256 * 1024)
+        } finally {
+            parcel.recycle()
+        }
+    }
+
+    @Test
+    fun rejectsOversizedCommandBeforeStartingProcess() {
+        val result = ShizukuUserService().execute(
+            "large-command",
+            "x".repeat(ShizukuUserService.MAX_COMMAND_LENGTH + 1),
+            1_000
+        )
+
+        assertEquals(ShellExecutionStatus.FAILURE.name, result.getString(ShizukuUserService.KEY_STATUS))
+        assertTrue(result.getString(ShizukuUserService.KEY_STDERR).orEmpty().contains("maximum length"))
     }
 
     @Test

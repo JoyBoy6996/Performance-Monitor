@@ -5,7 +5,10 @@ import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.DeadObjectException
 import android.os.IBinder
+import android.os.RemoteException
+import android.os.TransactionTooLargeException
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -106,6 +109,8 @@ class ShizukuRunnerTest {
         var probeDelayMs: Long = 0L,
         var shouldThrow: Boolean = false,
         var probeSucceeds: Boolean = true,
+        var commandException: RemoteException? = null,
+        var cancelException: RemoteException? = null,
         var commandHandler: ((String) -> Bundle)? = null
     ) : IShizukuService.Stub() {
 
@@ -140,6 +145,7 @@ class ShizukuRunnerTest {
             if (shouldThrow) {
                 throw RuntimeException("Remote IPC error")
             }
+            commandException?.let { throw it }
 
             if (delayMs > 0) {
                 Thread.sleep(delayMs)
@@ -166,6 +172,7 @@ class ShizukuRunnerTest {
 
         override fun cancel(executionId: String): Boolean {
             cancelledExecutions.add(executionId)
+            cancelException?.let { throw it }
             return true
         }
     }
@@ -282,6 +289,154 @@ class ShizukuRunnerTest {
         } catch (e: ShellUnavailable) {
             assertTrue(e.message?.contains("Remote IPC error") == true)
         }
+    }
+
+    @Test
+    fun rejectsOversizedCommandBeforeSendingBinderTransaction() = runBlocking {
+        val mock = MockShizukuService()
+        val runner = ShizukuRunner(mockService = mock)
+
+        try {
+            runner.exec("x".repeat(ShizukuUserService.MAX_COMMAND_LENGTH + 1), 2_000)
+            fail("Expected oversized command to be rejected")
+        } catch (e: ShellUnavailable) {
+            assertTrue(e.message?.contains("maximum length") == true)
+        }
+        assertEquals(listOf("echo __shizuku_ready__"), mock.executedCommands.toList())
+    }
+
+    @Test
+    fun transactionTooLargeIsReportedWithoutDroppingALiveConnection() = runBlocking {
+        val mock = MockShizukuService(
+            commandException = TransactionTooLargeException("binder buffer exhausted")
+        )
+        val runner = ShizukuRunner(mockService = mock)
+
+        try {
+            runner.exec("echo result", 2_000)
+            fail("Expected Binder parcel failure")
+        } catch (e: ShellUnavailable) {
+            assertTrue(e.message?.contains("parcel or buffer") == true)
+        }
+
+        assertEquals(ShizukuRunner.ConnectionState.READY, runner.connectionState.value)
+        mock.commandException = null
+        assertTrue(runner.exec("echo recovered", 2_000).ok)
+    }
+
+    @Test
+    fun deadObjectDuringCommandInvalidatesThatBindingAndReconnects() = runBlocking {
+        val platform = FakeShizukuPlatform()
+        val failedService = MockShizukuService(commandException = DeadObjectException("binder died"))
+        val runner = createLifecycleRunner(platform) { connection, index ->
+            connect(connection, if (index == 0) failedService else MockShizukuService())
+        }
+        awaitCondition { runner.connectionState.value == ShizukuRunner.ConnectionState.READY }
+        val oldConnection = platform.connections.single()
+        val oldDeathRecipient = runner.activeDeathRecipientForTest()
+
+        try {
+            runner.exec("echo fail", 2_000)
+            fail("Expected dead Binder failure")
+        } catch (e: ShellUnavailable) {
+            assertTrue(e.message?.contains("died during command") == true)
+        }
+        awaitCondition {
+            platform.connections.size == 2 &&
+                runner.connectionState.value == ShizukuRunner.ConnectionState.READY
+        }
+
+        oldConnection.onServiceDisconnected(null)
+        oldDeathRecipient?.binderDied()
+        assertEquals(ShizukuRunner.ConnectionState.READY, runner.connectionState.value)
+        assertTrue(runner.connectionDetails.value.commandVerified)
+        runner.cleanup()
+    }
+
+    @Test
+    fun deadObjectDuringCancellationAlsoInvalidatesOnlyThatBinding() = runBlocking {
+        val platform = FakeShizukuPlatform()
+        val failedService = MockShizukuService(
+            delayMs = 5_000,
+            cancelException = DeadObjectException("binder died while cancelling")
+        )
+        val runner = createLifecycleRunner(platform) { connection, index ->
+            connect(connection, if (index == 0) failedService else MockShizukuService())
+        }
+        awaitCondition { runner.connectionState.value == ShizukuRunner.ConnectionState.READY }
+
+        val command = async { runner.exec("sleep 20", 20_000) }
+        delay(100)
+        command.cancelAndJoin()
+        awaitCondition {
+            platform.connections.size == 2 &&
+                runner.connectionState.value == ShizukuRunner.ConnectionState.READY
+        }
+
+        assertEquals(1, failedService.cancelledExecutions.size)
+        assertTrue(runner.connectionDetails.value.commandVerified)
+        runner.cleanup()
+    }
+
+    @Test
+    fun remoteTransactionFailureReconnectsAndOldCallbacksStayStale() = runBlocking {
+        val platform = FakeShizukuPlatform()
+        val failedService = MockShizukuService(
+            commandException = RemoteException("transact returned false")
+        )
+        val runner = createLifecycleRunner(platform) { connection, index ->
+            connect(connection, if (index == 0) failedService else MockShizukuService())
+        }
+        awaitCondition { runner.connectionState.value == ShizukuRunner.ConnectionState.READY }
+        val oldConnection = platform.connections.single()
+
+        try {
+            runner.exec("echo fail", 2_000)
+            fail("Expected failed Binder transaction")
+        } catch (e: ShellUnavailable) {
+            assertTrue(e.message?.contains("Binder transaction failed") == true)
+        }
+        awaitCondition {
+            platform.connections.size == 2 &&
+                runner.connectionState.value == ShizukuRunner.ConnectionState.READY
+        }
+        oldConnection.onServiceDisconnected(null)
+
+        assertEquals(ShizukuRunner.ConnectionState.READY, runner.connectionState.value)
+        assertTrue(runner.connectionDetails.value.commandVerified)
+        runner.cleanup()
+    }
+
+    @Test
+    fun verificationProbesDoNotResetRepeatedCommandFailureRetryBudget() = runBlocking {
+        val platform = FakeShizukuPlatform()
+        val runner = createLifecycleRunner(platform) { connection, _ ->
+            connect(
+                connection,
+                MockShizukuService(commandException = DeadObjectException("binder died"))
+            )
+        }
+        awaitCondition { runner.connectionState.value == ShizukuRunner.ConnectionState.READY }
+
+        repeat(ShizukuRetryPolicy.MAX_ATTEMPTS + 1) { attempt ->
+            try {
+                runner.exec("echo fail", 2_000)
+                fail("Expected dead Binder failure")
+            } catch (_: ShellUnavailable) {
+                // Each command fails after that binding's verification probe succeeds.
+            }
+            if (attempt < ShizukuRetryPolicy.MAX_ATTEMPTS) {
+                awaitCondition {
+                    platform.connections.size == attempt + 2 &&
+                        runner.connectionState.value == ShizukuRunner.ConnectionState.READY
+                }
+            }
+        }
+
+        awaitCondition { runner.connectionState.value == ShizukuRunner.ConnectionState.ERROR }
+        delay(50)
+        assertEquals(ShizukuRetryPolicy.MAX_ATTEMPTS + 1, platform.connections.size)
+        runner.cleanup()
     }
 
     @Test

@@ -4,7 +4,10 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.os.DeadObjectException
 import android.os.IBinder
+import android.os.RemoteException
+import android.os.TransactionTooLargeException
 import com.framescope.monitor.BuildConfig
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -470,7 +473,6 @@ class ShizukuRunner private constructor(
                 _connectionDetails.update { it.copy(userServiceConnected = true, commandVerified = true) }
                 _connectionState.value = ConnectionState.READY
                 _errorMessage.value = null
-                retryAttempts = 0
                 retryJob?.cancel()
                 retryJob = null
             } else {
@@ -676,6 +678,11 @@ class ShizukuRunner private constructor(
     }
 
     override suspend fun exec(command: String, timeoutMs: Long): ShellResult = withContext(Dispatchers.IO) {
+        if (command.length > ShizukuUserService.MAX_COMMAND_LENGTH) {
+            throw ShellUnavailable(
+                "Command exceeds the maximum length of ${ShizukuUserService.MAX_COMMAND_LENGTH} characters."
+            )
+        }
         if (mockService == null) checkAndBind()
         val (activeServiceOrNull, activeGeneration) = synchronized(lifecycleLock) {
             service to activeBinding?.generation
@@ -696,13 +703,25 @@ class ShizukuRunner private constructor(
             throw e
         } catch (e: ShellUnavailable) {
             throw e
+        } catch (e: DeadObjectException) {
+            val message = "Shizuku UserService died during command execution: ${e.message.orEmpty()}"
+            handleCommandConnectionFailure(activeService, activeGeneration, message)
+            throw ShellUnavailable(message)
+        } catch (e: TransactionTooLargeException) {
+            val message = "Shizuku Binder transaction exceeded parcel or buffer limits: ${e.message.orEmpty()}"
+            throw ShellUnavailable(message)
+        } catch (e: RemoteException) {
+            val message = "Shizuku command Binder transaction failed: ${e.message.orEmpty()}"
+            handleCommandConnectionFailure(activeService, activeGeneration, message)
+            throw ShellUnavailable(message)
         } catch (e: Exception) {
+            val message = "Shizuku command connection failed: ${e.message.orEmpty()}"
             handleCommandConnectionFailure(
                 activeService,
                 activeGeneration,
-                "Shizuku command connection failed: ${e.message}"
+                message
             )
-            throw ShellUnavailable(e.message ?: "Shizuku command connection failed.")
+            throw ShellUnavailable(message)
         }
         if (response == null) {
             return@withContext ShellResult(
@@ -721,10 +740,24 @@ class ShizukuRunner private constructor(
         val status = response.getString(ShizukuUserService.KEY_STATUS)
             ?.let { value -> ShellExecutionStatus.entries.firstOrNull { it.name == value } }
             ?: throw ShellUnavailable("Shizuku returned an invalid command result.")
+        val stdout = response.getString(ShizukuUserService.KEY_STDOUT, "").orEmpty()
+        val stderr = response.getString(ShizukuUserService.KEY_STDERR, "").orEmpty()
+        if (stdout.length > ShizukuUserService.MAX_RESULT_TEXT_CHARS ||
+            stderr.length > ShizukuUserService.MAX_RESULT_TEXT_CHARS
+        ) {
+            val message = "Shizuku returned an oversized command result."
+            handleCommandConnectionFailure(activeService, activeGeneration, message)
+            throw ShellUnavailable(message)
+        }
+        synchronized(lifecycleLock) {
+            if (service === activeService && activeBinding?.generation == activeGeneration) {
+                retryAttempts = 0
+            }
+        }
         ShellResult(
             code = response.getInt(ShizukuUserService.KEY_EXIT_CODE, -1),
-            out = response.getString(ShizukuUserService.KEY_STDOUT, "").orEmpty(),
-            err = response.getString(ShizukuUserService.KEY_STDERR, "").orEmpty(),
+            out = stdout,
+            err = stderr,
             status = status,
             executionId = executionId
         )
@@ -758,8 +791,8 @@ class ShizukuRunner private constructor(
                         commandExecutor.execute {
                             try {
                                 activeService.cancel(executionId)
-                            } catch (_: Exception) {
-                                // The service may have disconnected during cancellation.
+                            } catch (e: Exception) {
+                                handleCancellationFailure(activeService, e)
                             }
                         }
                     } catch (_: Exception) {
@@ -786,6 +819,31 @@ class ShizukuRunner private constructor(
             handleBindingDisconnect(attempt, message)
         } else if (mockService != null && service === activeService) {
             handleServiceDisconnection(message)
+        }
+    }
+
+    private fun handleCancellationFailure(activeService: IShizukuService, error: Exception) {
+        val generation = synchronized(lifecycleLock) {
+            activeBinding?.takeIf { service === activeService }?.generation
+        }
+        val (message, invalidatesConnection) = when (error) {
+            is DeadObjectException ->
+                "Shizuku UserService died while cancelling a command: ${error.message.orEmpty()}" to true
+            is TransactionTooLargeException ->
+                "Shizuku Binder cancellation transaction exceeded parcel or buffer limits: ${error.message.orEmpty()}" to false
+            is RemoteException ->
+                "Shizuku command cancellation Binder transaction failed: ${error.message.orEmpty()}" to true
+            else ->
+                "Shizuku command cancellation failed: ${error.message.orEmpty()}" to true
+        }
+        if (invalidatesConnection) {
+            handleCommandConnectionFailure(activeService, generation, message)
+        } else {
+            synchronized(lifecycleLock) {
+                if (activeBinding?.generation == generation && service === activeService) {
+                    _errorMessage.value = message
+                }
+            }
         }
     }
 

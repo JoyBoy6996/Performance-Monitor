@@ -82,11 +82,29 @@ class ShizukuUserService : IShizukuService.Stub {
     override fun execute(executionId: String, command: String, timeoutMs: Long): Bundle {
         if (executionId.isBlank()) {
             return resultBundle(
-                executionId,
+                executionId.take(MAX_EXECUTION_ID_LENGTH),
                 ShellExecutionStatus.FAILURE,
                 -1,
                 "",
                 "Execution ID must not be blank"
+            )
+        }
+        if (executionId.length > MAX_EXECUTION_ID_LENGTH) {
+            return resultBundle(
+                executionId.take(MAX_EXECUTION_ID_LENGTH),
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Execution ID exceeds the maximum length of $MAX_EXECUTION_ID_LENGTH characters"
+            )
+        }
+        if (command.length > MAX_COMMAND_LENGTH) {
+            return resultBundle(
+                executionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Command exceeds the maximum length of $MAX_COMMAND_LENGTH characters"
             )
         }
         if (destroyed.get()) {
@@ -124,8 +142,8 @@ class ShizukuUserService : IShizukuService.Stub {
 
         val effectiveTimeout = timeoutMs.coerceIn(100L, 120_000L)
         var process: java.lang.Process? = null
-        val stdoutBuffer = ByteArrayOutputStream()
-        val stderrBuffer = ByteArrayOutputStream()
+        val stdoutBuffer = CapturedOutput(MAX_OUTPUT_BYTES_PER_STREAM)
+        val stderrBuffer = CapturedOutput(MAX_OUTPUT_BYTES_PER_STREAM)
         var stdoutThread: Thread? = null
         var stderrThread: Thread? = null
         var interrupted = false
@@ -185,13 +203,13 @@ class ShizukuUserService : IShizukuService.Stub {
                     stderrBuffer,
                     "Command timed out after ${effectiveTimeout}ms"
                 )
-                else -> stderrBuffer.toString("UTF-8")
+                else -> stderrBuffer.asString()
             }
             return resultBundle(
                 executionId,
                 status,
                 if (completed) startedProcess.exitValue() else -1,
-                output(stdoutBuffer),
+                stdoutBuffer.asString(),
                 error
             )
         } catch (e: Exception) {
@@ -201,7 +219,7 @@ class ShizukuUserService : IShizukuService.Stub {
                 executionId,
                 ShellExecutionStatus.FAILURE,
                 -1,
-                output(stdoutBuffer),
+                stdoutBuffer.asString(),
                 e.message ?: "Failed to start shell process"
             )
         } finally {
@@ -217,7 +235,7 @@ class ShizukuUserService : IShizukuService.Stub {
     }
 
     override fun cancel(executionId: String): Boolean {
-        if (executionId.isBlank() || destroyed.get()) return false
+        if (executionId.isBlank() || executionId.length > MAX_EXECUTION_ID_LENGTH || destroyed.get()) return false
         return synchronized(executionLock) {
             if (destroyed.get()) return@synchronized false
             pruneExpiredCancellations()
@@ -235,17 +253,34 @@ class ShizukuUserService : IShizukuService.Stub {
         }
     }
 
-    private fun drainStream(input: InputStream, output: ByteArrayOutputStream) {
+    private class CapturedOutput(private val limitBytes: Int) {
+        private val buffer = ByteArrayOutputStream(limitBytes)
+        private var truncated = false
+
+        @Synchronized
+        fun append(bytes: ByteArray, length: Int) {
+            val remaining = limitBytes - buffer.size()
+            if (remaining > 0) buffer.write(bytes, 0, minOf(length, remaining))
+            if (length > remaining) truncated = true
+        }
+
+        @Synchronized
+        fun asString(): String {
+            val contents = buffer.toString("UTF-8")
+            return if (truncated) {
+                "$contents\n[output truncated after $limitBytes bytes]"
+            } else {
+                contents
+            }
+        }
+    }
+
+    private fun drainStream(input: InputStream, output: CapturedOutput) {
         try {
             val buffer = ByteArray(8192)
             var bytesRead: Int
             while (input.read(buffer).also { bytesRead = it } > 0) {
-                synchronized(output) {
-                    if (output.size() < MAX_OUTPUT_SIZE) {
-                        val remaining = MAX_OUTPUT_SIZE - output.size()
-                        output.write(buffer, 0, minOf(bytesRead, remaining))
-                    }
-                }
+                output.append(buffer, bytesRead)
             }
         } catch (_: IOException) {
             // Closing a process stream during cancellation or timeout is expected.
@@ -261,13 +296,10 @@ class ShizukuUserService : IShizukuService.Stub {
         }
     }
 
-    private fun appendMessage(buffer: ByteArrayOutputStream, message: String): String {
-        val contents = output(buffer)
+    private fun appendMessage(buffer: CapturedOutput, message: String): String {
+        val contents = buffer.asString()
         return if (contents.isBlank()) message else "$contents\n$message"
     }
-
-    private fun output(buffer: ByteArrayOutputStream): String =
-        synchronized(buffer) { buffer.toString("UTF-8") }
 
     private fun resultBundle(
         executionId: String,
@@ -276,11 +308,11 @@ class ShizukuUserService : IShizukuService.Stub {
         stdout: String,
         stderr: String
     ) = Bundle().apply {
-        putString(KEY_EXECUTION_ID, executionId)
+        putString(KEY_EXECUTION_ID, executionId.take(MAX_EXECUTION_ID_LENGTH))
         putString(KEY_STATUS, status.name)
         putInt(KEY_EXIT_CODE, exitCode)
-        putString(KEY_STDOUT, stdout)
-        putString(KEY_STDERR, stderr)
+        putString(KEY_STDOUT, stdout.take(MAX_RESULT_TEXT_CHARS))
+        putString(KEY_STDERR, stderr.take(MAX_RESULT_TEXT_CHARS))
     }
 
     private fun pruneExpiredCancellations() {
@@ -306,7 +338,11 @@ class ShizukuUserService : IShizukuService.Stub {
         const val KEY_EXIT_CODE = "exit_code"
         const val KEY_STDOUT = "stdout"
         const val KEY_STDERR = "stderr"
-        private const val MAX_OUTPUT_SIZE = 2 * 1024 * 1024 // 2 MB safety cap
+        private const val MAX_EXECUTION_ID_LENGTH = 128
+        internal const val MAX_COMMAND_LENGTH = 32 * 1024
+        // Parcel strings use UTF-16, so this keeps both output fields well below Binder's transaction limit.
+        internal const val MAX_OUTPUT_BYTES_PER_STREAM = 32 * 1024
+        internal const val MAX_RESULT_TEXT_CHARS = MAX_OUTPUT_BYTES_PER_STREAM + 256
         private const val MAX_PENDING_CANCELLATIONS = 4_096
         private const val MAX_RECORDED_COMPLETIONS = 4_096
         private const val CANCELLATION_TTL_MS = 60_000L

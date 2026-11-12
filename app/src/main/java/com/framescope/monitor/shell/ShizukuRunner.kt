@@ -1,144 +1,306 @@
 package com.framescope.monitor.shell
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.os.ParcelFileDescriptor
+import android.os.IBinder
+import com.framescope.monitor.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import moe.shizuku.server.IShizukuService
 import rikka.shizuku.Shizuku
-import java.io.InputStream
 
 /**
- * Runs commands through a running Shizuku service, which grants us the `shell`
- * (adb level) user without rooting the device.
+ * Executes privileged commands exclusively through the official Shizuku UserService API.
  *
- * This is exactly the privilege level aShell / aShell You operate at, so
- * anything those apps can read, FrameScope can read too.
+ * Implements full lifecycle management:
+ * 1. Shizuku binder tracking (received, dead)
+ * 2. Permission requests and result callbacks
+ * 3. UserService binding, unbinding, and remote death observation
+ * 4. Verification of actual command execution before marking state as READY
+ * 5. Reusable command execution with timeouts, stdout/stderr extraction, and cancellation cleanup
  */
-class ShizukuRunner : ShellRunner {
+class ShizukuRunner(
+    private val context: Context? = null,
+    private var mockService: IShizukuService? = null
+) : ShellRunner {
 
-    enum class PermissionState { UNKNOWN, GRANTED, DENIED, NOT_RUNNING }
+    enum class ConnectionState {
+        NOT_RUNNING,
+        PERMISSION_DENIED,
+        CONNECTING,
+        READY,
+        ERROR
+    }
 
     override val id = "shizuku"
     override val label = "Shizuku (shell)"
 
-    private val _permissionState = MutableStateFlow(PermissionState.UNKNOWN)
-    val permissionState: StateFlow<PermissionState> = _permissionState.asStateFlow()
+    private val mutex = Mutex()
+
+    private val _connectionState = MutableStateFlow(ConnectionState.NOT_RUNNING)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    @Volatile
+    private var service: IShizukuService? = mockService
+
+    @Volatile
+    private var isBound = false
+
+    private val deathRecipient = IBinder.DeathRecipient {
+        service = null
+        isBound = false
+        _connectionState.value = ConnectionState.NOT_RUNNING
+        _errorMessage.value = "Shizuku UserService died unexpectedly"
+    }
+
+    private val userServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            if (binder == null) {
+                _connectionState.value = ConnectionState.ERROR
+                _errorMessage.value = "Received null binder from Shizuku UserService"
+                return
+            }
+
+            runCatching { binder.linkToDeath(deathRecipient, 0) }
+
+            val stub = IShizukuService.Stub.asInterface(binder)
+            service = stub
+            isBound = true
+
+            // Verify actual command execution before declaring READY
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).run {
+                kotlinx.coroutines.launch {
+                    verifyService(stub)
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+            isBound = false
+            _connectionState.value = ConnectionState.NOT_RUNNING
+            _errorMessage.value = "Shizuku UserService disconnected"
+        }
+    }
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, resultCode ->
         if (requestCode != REQUEST_CODE) return@OnRequestPermissionResultListener
-        _permissionState.value = if (resultCode == PackageManager.PERMISSION_GRANTED) {
-            PermissionState.GRANTED
+        if (resultCode == PackageManager.PERMISSION_GRANTED) {
+            _errorMessage.value = null
+            bindUserService()
         } else {
-            PermissionState.DENIED
+            _connectionState.value = ConnectionState.PERMISSION_DENIED
+            _errorMessage.value = "Shizuku permission denied by user"
         }
-    }
-
-    private val binderDeadListener = Shizuku.OnBinderDeadListener {
-        _permissionState.value = PermissionState.NOT_RUNNING
     }
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
-        updateStateFromBinder()
+        checkAndBind()
+    }
+
+    private val binderDeadListener = Shizuku.OnBinderDeadListener {
+        service = null
+        isBound = false
+        _connectionState.value = ConnectionState.NOT_RUNNING
+        _errorMessage.value = "Shizuku service is not running"
     }
 
     init {
+        if (mockService == null) {
+            runCatching {
+                Shizuku.addRequestPermissionResultListener(permissionListener)
+                Shizuku.addBinderReceivedListener(binderReceivedListener)
+                Shizuku.addBinderDeadListener(binderDeadListener)
+            }
+            checkAndBind()
+        } else {
+            _connectionState.value = ConnectionState.READY
+        }
+    }
+
+    fun setMockServiceForTest(mock: IShizukuService?) {
+        this.mockService = mock
+        this.service = mock
+        _connectionState.value = if (mock != null) ConnectionState.READY else ConnectionState.NOT_RUNNING
+    }
+
+    private fun checkAndBind() {
+        if (mockService != null) {
+            _connectionState.value = ConnectionState.READY
+            return
+        }
+
+        val pingOk = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+        if (!pingOk) {
+            _connectionState.value = ConnectionState.NOT_RUNNING
+            _errorMessage.value = "Shizuku is not running"
+            return
+        }
+
+        val hasPermission = runCatching {
+            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
+
+        if (!hasPermission) {
+            _connectionState.value = ConnectionState.PERMISSION_DENIED
+            _errorMessage.value = "Shizuku permission not granted"
+            return
+        }
+
+        bindUserService()
+    }
+
+    private fun bindUserService() {
+        if (isBound && service != null) return
+        val ctx = context ?: return
+
+        _connectionState.value = ConnectionState.CONNECTING
+
+        val serviceArgs = Shizuku.UserServiceArgs(
+            ComponentName(ctx.packageName, ShizukuUserService::class.java.name)
+        )
+            .daemon(false)
+            .processNameSuffix("service")
+            .debuggable(BuildConfig.DEBUG)
+            .version(BuildConfig.VERSION_CODE)
+
         runCatching {
-            Shizuku.addRequestPermissionResultListener(permissionListener)
-            Shizuku.addBinderDeadListener(binderDeadListener)
-            Shizuku.addBinderReceivedListener(binderReceivedListener)
-        }
-        updateStateFromBinder()
-    }
-
-    private fun updateStateFromBinder() {
-        _permissionState.value = when {
-            !Shizuku.pingBinder() -> PermissionState.NOT_RUNNING
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED -> PermissionState.GRANTED
-            else -> PermissionState.DENIED
+            Shizuku.bindUserService(serviceArgs, userServiceConnection)
+        }.onFailure { e ->
+            _connectionState.value = ConnectionState.ERROR
+            _errorMessage.value = "Failed to bind Shizuku UserService: ${e.message}"
         }
     }
 
-    override suspend fun isAvailable(): Boolean {
-        if (!Shizuku.pingBinder()) return false
-        return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+    private suspend fun verifyService(stub: IShizukuService) {
+        val verificationProbe = runCatching {
+            val bundle = stub.execute("echo $VERIFY_PROBE_TOKEN", 4_000)
+            val stdout = bundle.getString(ShizukuUserService.KEY_STDOUT, "")
+            val exitCode = bundle.getInt(ShizukuUserService.KEY_EXIT_CODE, -1)
+            exitCode == 0 && stdout.contains(VERIFY_PROBE_TOKEN)
+        }.getOrDefault(false)
+
+        if (verificationProbe) {
+            _connectionState.value = ConnectionState.READY
+            _errorMessage.value = null
+        } else {
+            _connectionState.value = ConnectionState.ERROR
+            _errorMessage.value = "Shizuku UserService command execution probe failed"
+        }
     }
 
-    override suspend fun unavailableReason(): String = when {
-        !Shizuku.pingBinder() ->
-            "Shizuku is not running. Start it once with ADB (see Setup) or from aShell / aShell You."
-        Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED ->
-            "FrameScope still needs the Shizuku permission. Tap 'Request permission' in Setup."
-        else -> ""
-    }
-
-    /** Shows the Shizuku permission dialog. Returns true when permission is dispatched or already granted. */
-    suspend fun requestPermission(): Boolean = withContext(Dispatchers.Main) {
-        if (!Shizuku.pingBinder()) {
-            _permissionState.value = PermissionState.NOT_RUNNING
-            return@withContext false
+    override suspend fun isAvailable(): Boolean = mutex.withLock {
+        if (mockService != null) return@withLock true
+        if (_connectionState.value != ConnectionState.READY || service == null) {
+            checkAndBind()
+            return@withLock _connectionState.value == ConnectionState.READY && service != null
         }
-        if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
-            _permissionState.value = PermissionState.GRANTED
-            return@withContext true
-        }
-        Shizuku.requestPermission(REQUEST_CODE)
         true
     }
 
-    override suspend fun exec(command: String, timeoutMs: Long): ShellResult = withContext(Dispatchers.IO) {
-        if (!Shizuku.pingBinder()) throw ShellUnavailable("Shizuku is not running")
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            throw ShellUnavailable("Shizuku permission not granted")
+    override suspend fun unavailableReason(): String = when (_connectionState.value) {
+        ConnectionState.NOT_RUNNING ->
+            "Shizuku is not running. Please start Shizuku on your phone."
+        ConnectionState.PERMISSION_DENIED ->
+            "Shizuku permission has not been granted to FrameScope."
+        ConnectionState.CONNECTING ->
+            "Connecting to Shizuku UserService..."
+        ConnectionState.ERROR ->
+            _errorMessage.value ?: "Shizuku UserService connection error"
+        ConnectionState.READY -> ""
+    }
+
+    suspend fun requestPermission(): Boolean = withContext(Dispatchers.Main) {
+        if (mockService != null) {
+            _connectionState.value = ConnectionState.READY
+            return@withContext true
         }
-        val binder = Shizuku.getBinder() ?: throw ShellUnavailable("Shizuku binder unavailable")
-        val service = IShizukuService.Stub.asInterface(binder)
 
-        val remote = service.newProcess(arrayOf("sh", "-c", command), null, "/")
-        try {
-            withTimeout(timeoutMs + 2000L) {
-                val outTask = async(Dispatchers.IO) { readAll(remote.inputStream) }
-                val errTask = async(Dispatchers.IO) { readAll(remote.errorStream) }
-                // We never write to stdin, closing it makes the remote process see EOF.
-                runCatching { remote.outputStream?.close() }
+        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
+            _connectionState.value = ConnectionState.NOT_RUNNING
+            _errorMessage.value = "Shizuku is not running"
+            return@withContext false
+        }
 
-                val code = withTimeoutOrNull(timeoutMs) {
-                    remote.waitForTimeout(timeoutMs, "ms")
-                    remote.exitValue()
-                } ?: -1
+        if (runCatching { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false)) {
+            bindUserService()
+            return@withContext true
+        }
 
-                val out = outTask.await()
-                val err = errTask.await()
-                ShellResult(code, out, err)
+        runCatching {
+            Shizuku.requestPermission(REQUEST_CODE)
+            true
+        }.getOrDefault(false)
+    }
+
+    suspend fun refresh(): ConnectionState = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            checkAndBind()
+            val current = service
+            if (current != null) {
+                verifyService(current)
             }
-        } finally {
-            runCatching { remote.destroy() }
+            _connectionState.value
         }
     }
 
-    private fun readAll(pfd: ParcelFileDescriptor?): String {
-        if (pfd == null) return ""
-        return runCatching {
-            ParcelFileDescriptor.AutoCloseInputStream(pfd).use { input: InputStream ->
-                val buffer = ByteArray(8192)
-                val sb = StringBuilder()
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read <= 0) break
-                    sb.append(String(buffer, 0, read, Charsets.UTF_8))
-                }
-                sb.toString()
+    override suspend fun exec(command: String, timeoutMs: Long): ShellResult = withContext(Dispatchers.IO) {
+        val activeService = service ?: run {
+            checkAndBind()
+            service ?: throw ShellUnavailable(unavailableReason().ifBlank { "Shizuku UserService not available" })
+        }
+
+        val resultBundle = try {
+            withTimeoutOrNull(timeoutMs + 3_000L) {
+                activeService.execute(command, timeoutMs)
+            } ?: throw ShellUnavailable("Command timed out after ${timeoutMs}ms")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ShellUnavailable) {
+            throw e
+        } catch (e: Exception) {
+            _errorMessage.value = e.message
+            throw ShellUnavailable(e.message ?: "Failed to execute command via Shizuku UserService")
+        }
+
+        val exitCode = resultBundle.getInt(ShizukuUserService.KEY_EXIT_CODE, -1)
+        val stdout = resultBundle.getString(ShizukuUserService.KEY_STDOUT, "")
+        val stderr = resultBundle.getString(ShizukuUserService.KEY_STDERR, "")
+
+        ShellResult(code = exitCode, out = stdout, err = stderr)
+    }
+
+    fun cleanup() {
+        runCatching {
+            Shizuku.removeRequestPermissionResultListener(permissionListener)
+            Shizuku.removeBinderReceivedListener(binderReceivedListener)
+            Shizuku.removeBinderDeadListener(binderDeadListener)
+        }
+        if (isBound && context != null) {
+            runCatching {
+                val serviceArgs = Shizuku.UserServiceArgs(
+                    ComponentName(context.packageName, ShizukuUserService::class.java.name)
+                )
+                Shizuku.unbindUserService(serviceArgs, userServiceConnection, true)
             }
-        }.getOrElse { "" }
+        }
+        service = null
+        isBound = false
     }
 
     companion object {
         const val REQUEST_CODE = 4101
+        private const val VERIFY_PROBE_TOKEN = "__shizuku_ready__"
     }
 }

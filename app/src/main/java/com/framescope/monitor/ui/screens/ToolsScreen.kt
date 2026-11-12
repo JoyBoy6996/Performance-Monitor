@@ -183,7 +183,7 @@ fun ToolsScreen(
                             scope.launch {
                                 val result = container.hub.execOrNull(DIAGNOSTIC_COMMAND)
                                 diagnosticsOutput = if (result == null) {
-                                    "No privileged backend available. Run the setup first."
+                                    "Shizuku is not connected. Please start Shizuku and grant permission."
                                 } else {
                                     (result.out + result.err).trim()
                                 }
@@ -220,7 +220,7 @@ fun ToolsScreen(
         item {
             Panel {
                 Text(
-                    text = "Run any command with the privileged backend that is currently active.",
+                    text = "Run any command with elevated Shizuku shell privileges.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -246,7 +246,7 @@ fun ToolsScreen(
                             scope.launch {
                                 val result = container.hub.execOrNull(consoleInput.trim())
                                 consoleOutput = if (result == null) {
-                                    "No privileged backend available. Run the setup first."
+                                    "Shizuku is not connected. Please start Shizuku and grant permission."
                                 } else {
                                     (result.out + result.err).trim().ifEmpty { "exit code ${result.code}" }
                                 }
@@ -331,7 +331,7 @@ private fun CommandPanel(
                     busy = true
                     val result = container.hub.execOrNull(command)
                     output = if (result == null) {
-                        "No privileged backend available. Run the setup first."
+                        "Shizuku is not connected. Please start Shizuku and grant permission."
                     } else {
                         (result.out + result.err).trim().ifEmpty { "no output" }
                     }

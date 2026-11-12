@@ -7,15 +7,12 @@ import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.metrics.MetricsEngine
 import com.framescope.monitor.metrics.SessionStore
 import com.framescope.monitor.overlay.OverlayController
-import com.framescope.monitor.shell.AdbKeyStore
-import com.framescope.monitor.shell.AdbTcpRunner
 import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
-import java.io.File
 
 /** Application entry point and dependency container. */
 class FrameScopeApp : Application() {
@@ -39,15 +36,7 @@ class FrameScopeApp : Application() {
         app.scope.launch(Dispatchers.IO) {
             runCatching {
                 com.framescope.monitor.core.ProtectedApps.scanInstalled(applicationContext)
-                app.hub.applyAdbEndpoint(
-                    app.settings.adbHost.value,
-                    app.settings.adbPort.value
-                )
-                app.hub.refresh(
-                    preferred = app.settings.accessMode.value,
-                    adbPort = app.settings.adbPort.value,
-                    allowAdbBootstrap = app.settings.keepAdbBridge.value
-                )
+                app.hub.refresh()
             }
         }
     }
@@ -56,13 +45,7 @@ class FrameScopeApp : Application() {
 class AppContainer(context: Context) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val settings = AppSettings(context)
-    // The ADB host key lives in the app's private storage so the phone only asks
-    // for "Allow USB debugging?" once.
-    val hub = ShellHub(
-        adb = AdbTcpRunner(
-            keys = AdbKeyStore(File(context.filesDir, "adb"), context)
-        )
-    )
+    val hub = ShellHub(context.applicationContext)
     val store = SessionStore(context)
     val engine = MetricsEngine(hub, settings, store)
     val overlay = OverlayController(context.applicationContext)

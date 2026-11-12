@@ -42,12 +42,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
 import androidx.core.content.FileProvider
-import com.framescope.monitor.core.AccessMode
 import com.framescope.monitor.core.Backup
 import com.framescope.monitor.core.ProtectedApps
 import com.framescope.monitor.core.ThemeMode
 import com.framescope.monitor.shell.AccessState
-import com.framescope.monitor.shell.AdbAuthState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.MonoField
@@ -71,10 +69,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val settings = container.settings
     val status by container.hub.status.collectAsState()
-    val authState by container.hub.adbAuthState.collectAsState()
-    val fingerprint = container.hub.adbFingerprint
     val diagnostic by container.engine.diagnostic.collectAsState()
-    val accessMode by settings.accessMode.flow.collectAsState()
     val themeMode by settings.themeMode.flow.collectAsState()
     val dynamicColor by settings.dynamicColor.flow.collectAsState()
     val protectApps by settings.protectBankApps.flow.collectAsState()
@@ -92,10 +87,6 @@ fun SettingsScreen(
     }
     var checking by remember { mutableStateOf(false) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
-    var adbHostText by remember { mutableStateOf(settings.adbHost.value) }
-    var adbPortText by remember { mutableStateOf(settings.adbPort.value.toString()) }
-    var keepBridge by remember { mutableStateOf(settings.keepAdbBridge.value) }
-    var bridgeMessage by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -162,9 +153,9 @@ fun SettingsScreen(
         item {
             Panel {
                 SettingRow(
-                    title = "Backend",
+                    title = "Shizuku service",
                     supporting = status.detail.ifBlank {
-                        diagnostic ?: "Shell level access is required for real frame rate data."
+                        diagnostic ?: "Privileged shell access is provided exclusively via Shizuku UserService."
                     },
                     trailing = {
                         StatusPill(
@@ -178,25 +169,6 @@ fun SettingsScreen(
                     }
                 )
                 PanelDivider()
-                Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
-                    Text(
-                        text = "Access mode",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.size(Space.sm))
-                    SegmentedOptions(
-                        options = listOf("Auto", "Shizuku", "Adb", "Root"),
-                        selected = accessMode.lowercase().replaceFirstChar { it.uppercase() },
-                        onSelect = { picked ->
-                            val mode = AccessMode.entries.firstOrNull {
-                                it.name.equals(picked, ignoreCase = true)
-                            }
-                            settings.accessMode.value = (mode ?: AccessMode.AUTO).name
-                        }
-                    )
-                }
-                PanelDivider()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -208,15 +180,7 @@ fun SettingsScreen(
                         onClick = {
                             checking = true
                             scope.launch {
-                                container.hub.applyAdbEndpoint(
-                                    settings.adbHost.value,
-                                    settings.adbPort.value
-                                )
-                                container.hub.forceRecheck(
-                                    preferred = settings.accessMode.value,
-                                    adbPort = settings.adbPort.value,
-                                    allowAdbBootstrap = settings.keepAdbBridge.value
-                                )
+                                container.hub.refresh()
                                 checking = false
                             }
                         }
@@ -226,204 +190,26 @@ fun SettingsScreen(
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )
-                        Text("Re-check", modifier = Modifier.padding(start = 6.dp))
+                        Text("Check status", modifier = Modifier.padding(start = 6.dp))
                     }
                     OutlinedButton(
-                        onClick = { scope.launch { container.hub.shizukuRunner?.requestPermission() } }
+                        onClick = { scope.launch { container.hub.requestPermission() } }
                     ) {
-                        Text("Request Shizuku")
+                        Text("Request permission")
                     }
                 }
             }
         }
 
-        item {
-            Panel {
-                SettingRow(
-                    title = "Debugging authorisation",
-                    supporting = when (authState) {
-                        AdbAuthState.STORED ->
-                            "The phone keeps this key, so the \"Allow USB debugging?\" prompt " +
-                                "will not come back - not after a reconnect and not after a reboot."
-                        AdbAuthState.PROMPT_SENT ->
-                            "Waiting for you: unlock the phone, tick \"Always allow from this " +
-                                "computer\" and confirm the prompt. FrameScope keeps the key on " +
-                                "the phone afterwards."
-                        AdbAuthState.UNKNOWN ->
-                            "Not confirmed yet. The prompt appears once, on the phone."
-                    },
-                    trailing = {
-                        StatusPill(
-                            text = when (authState) {
-                                AdbAuthState.STORED -> "Permanent"
-                                AdbAuthState.PROMPT_SENT -> "Pending"
-                                AdbAuthState.UNKNOWN -> "Unknown"
-                            },
-                            color = if (authState == AdbAuthState.STORED) {
-                                MaterialTheme.status.good
-                            } else {
-                                MaterialTheme.status.warn
-                            }
-                        )
-                    }
-                )
-                PanelDivider()
-                Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
-                    Text(
-                        text = "This phone's fingerprint",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.size(Space.sm))
-                    MonoField(
-                        value = fingerprint,
-                        onValueChange = {},
-                        label = "Fingerprint",
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.size(Space.sm))
-                    Text(
-                        text = "The phone prints the same fingerprint in its prompt. If they " +
-                            "match, the prompt belongs to FrameScope.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-
-        item {
-            Panel {
-                SettingRow(
-                    title = "ADB endpoint",
-                    supporting = "Where the phone's own ADB bridge is listening. Leave it at " +
-                        "127.0.0.1 and 5555 unless you are pointing FrameScope at another " +
-                        "machine."
-                )
-                PanelDivider()
-                Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
-                        MonoField(
-                            value = adbHostText,
-                            onValueChange = {
-                                adbHostText = it.trim()
-                                settings.adbHost.value = it.trim()
-                            },
-                            label = "Host, for example 127.0.0.1",
-                            modifier = Modifier.weight(1f)
-                        )
-                        MonoField(
-                            value = adbPortText,
-                            onValueChange = {
-                                adbPortText = it.filter { c -> c.isDigit() }.take(5)
-                                adbPortText.toIntOrNull()?.let { port ->
-                                    settings.adbPort.value = port
-                                }
-                            },
-                            label = "Port",
-                            modifier = Modifier.width(104.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        item {
-            Panel {
-                SettingRow(
-                    title = "Find the bridge on this phone",
-                    supporting = "Looks for the ADB service that Wireless debugging started on " +
-                        "this phone and moves it to a fixed port. Accept the \"Allow USB " +
-                        "debugging?\" prompt when it appears."
-                )
-                PanelDivider()
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(Space.lg),
-                    horizontalArrangement = Arrangement.spacedBy(Space.sm)
-                ) {
-                    FilledTonalButton(
-                        enabled = !checking,
-                        onClick = {
-                            checking = true
-                            bridgeMessage = "Looking for the ADB service on this phone..."
-                            scope.launch {
-                                bridgeMessage = container.hub.findBridgeOnPhone(settings.adbPort.value)
-                                checking = false
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text("Find the bridge", modifier = Modifier.padding(start = 6.dp))
-                    }
-                }
-                val message = bridgeMessage
-                if (message != null) {
-                    Text(
-                        text = message,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = Space.lg, end = Space.lg, bottom = Space.lg)
-                    )
-                }
-            }
-        }
-
-        item {
-            Panel {
-                SettingRow(
-                    title = "Keep the bridge alive",
-                    supporting = "After a reboot the phone stops listening for ADB " +
-                        "connections. With root or Shizuku, FrameScope switches it back on " +
-                        "by itself, so the one-time setup stays done. The bridge runs on the " +
-                        "phone itself, so it works with Wi-Fi, with mobile data, or with both off.",
-                    trailing = {
-                        Switch(
-                            checked = keepBridge,
-                            onCheckedChange = {
-                                keepBridge = it
-                                settings.keepAdbBridge.value = it
-                            }
-                        )
-                    }
-                )
-            }
-        }
-
-        item { SectionHeader("One-time setup") }
+        item { SectionHeader("Shizuku setup") }
 
         item {
             Panel {
                 SetupOption(
-                    title = "Option A - Shizuku",
-                    badge = "Recommended",
-                    description = "Start Shizuku once, then grant FrameScope the Shizuku permission. " +
-                        "aShell and aShell You use the same Shizuku backend.",
+                    title = "Start Shizuku",
+                    badge = "Required",
+                    description = "Start Shizuku via Wireless Debugging (Android 11+) in the Shizuku app, or via ADB on a computer. Once started, grant FrameScope the Shizuku permission.",
                     command = "adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/tools/start.sh",
-                    context = context
-                )
-                PanelDivider()
-                SetupOption(
-                    title = "Option B - local ADB bridge, no computer needed",
-                    description = "Turn on Wireless debugging in Developer options, then tap " +
-                        "\"Find the bridge\" below. FrameScope looks for the ADB service the phone " +
-                        "started itself and moves it to a fixed port, so the bridge lives on the " +
-                        "phone and works with Wi-Fi off, on mobile data, or with both. Accept the " +
-                        "\"Allow USB debugging?\" prompt once.",
-                    footnote = "No computer, no root and no Shizuku needed. After a reboot, turn " +
-                        "Wireless debugging on again and FrameScope reconnects by itself.",
-                    context = context
-                )
-                PanelDivider()
-                SetupOption(
-                    title = "Option C - root",
-                    description = "If the device is rooted, FrameScope detects su automatically. Rooting is " +
-                        "the option most likely to be flagged by banking apps, so prefer Shizuku.",
                     context = context
                 )
             }

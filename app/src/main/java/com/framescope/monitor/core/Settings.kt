@@ -7,7 +7,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-enum class AccessMode { AUTO, SHIZUKU, ADB, ROOT }
 enum class OverlayStyle { PILL, COMPACT, CLASSIC, DETAILED, RTSS }
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
@@ -64,18 +63,6 @@ class Pref<T> internal constructor(
 class AppSettings(context: Context) {
 
     private val sp = context.getSharedPreferences("framescope", Context.MODE_PRIVATE)
-
-    val accessMode = Pref(sp, "access_mode", AccessMode.AUTO.name)
-    val adbHost = Pref(sp, "adb_host", "127.0.0.1")
-    val adbPort = Pref(sp, "adb_port", 5555)
-
-    /**
-     * Repairs the ADB bridge by itself after a reboot.
-     *
-     * Needs root or Shizuku, because switching the phone's daemon into TCP
-     * mode is something the shell identity is allowed to do.
-     */
-    val keepAdbBridge = Pref(sp, "keep_adb_bridge", true)
 
     /**
      * The master switch for the measurement.
@@ -166,7 +153,6 @@ class AppSettings(context: Context) {
     }
 
     private fun allPrefs(): List<Pref<*>> = listOf(
-        accessMode, adbHost, adbPort, keepAdbBridge,
         overlayEnabled, overlayStyle, overlayRows, overlayOpacity, overlayScale,
         overlayX, overlayY, overlayShowGraph, overlayGraphHeight, overlayClickThrough,
         protectBankApps, protectedApps,

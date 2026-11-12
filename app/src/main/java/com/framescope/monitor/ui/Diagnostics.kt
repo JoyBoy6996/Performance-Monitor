@@ -29,12 +29,8 @@ object Diagnostics {
         "echo '--- gfxinfo frame stats ---'",
         "if [ -n \"\$PKG\" ]; then dumpsys gfxinfo \"\$PKG\" framestats 2>/dev/null | " +
             "grep -m4 -E 'Flags,|FrameCompleted' | cut -c1-170; fi",
-        "echo '--- authorised keys on the phone ---'",
-        "if grep -q framescope@localhost /data/misc/adb/adb_keys 2>/dev/null; then " +
-            "echo 'the framescope key is stored on the phone'; " +
-            "elif ls -l /data/misc/adb/adb_keys 2>/dev/null; then " +
-            "echo 'the framescope key is NOT stored on the phone'; " +
-            "else echo 'the key store cannot be read from the shell'; fi"
+        "echo '--- privileged identity ---'",
+        "id 2>/dev/null || whoami 2>/dev/null"
     ).joinToString("; ")
 
     /** Puts the text on the clipboard so it can be pasted into a chat. */

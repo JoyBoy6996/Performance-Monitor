@@ -51,7 +51,6 @@ import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.shell.AccessState
-import com.framescope.monitor.shell.AdbAuthState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.BarMeter
 import com.framescope.monitor.ui.components.FpsGauge
@@ -92,7 +91,6 @@ fun DashboardScreen(
     LaunchedEffect(Unit) { crash = CrashLog.last(context) }
     val measuring by container.settings.measurementEnabled.flow.collectAsState()
     val setupDone by container.settings.setupCompleted.flow.collectAsState()
-    val authState by container.hub.adbAuthState.collectAsState()
 
     val backendColor = if (status.state == AccessState.READY) {
         MaterialTheme.status.good
@@ -133,18 +131,6 @@ fun DashboardScreen(
                 AccessBanner(
                     title = "No frame data yet",
                     detail = diagnostic.orEmpty(),
-                    onOpenSettings = onOpenSettings
-                )
-            }
-        }
-
-        if (authState == AdbAuthState.PROMPT_SENT) {
-            item {
-                AccessBanner(
-                    title = "Confirm the prompt on the phone",
-                    detail = "Unlock the phone, tick \"Always allow from this computer\" and " +
-                        "confirm \"Allow USB debugging?\". FrameScope then keeps the key on " +
-                        "the phone, so the prompt will not come back.",
                     onOpenSettings = onOpenSettings
                 )
             }
@@ -545,13 +531,13 @@ private fun DiagnosticsRow(container: AppContainer) {
                             ?: "No privileged backend available. Run the setup first."
                         val probe = container.engine.probeReport.value.trim()
                         val text = buildString {
-                            append("--- authorisation ---")
+                            append("--- status ---")
                             append('\n')
                             append("state: ")
-                            append(container.hub.adbAuthState.value.name.lowercase())
+                            append(status.state.name.lowercase())
                             append('\n')
-                            append("fingerprint: ")
-                            append(container.hub.adbFingerprint)
+                            append("backend: ")
+                            append(status.backendLabel)
                             append('\n')
                             append("--- frame source ---")
                             append('\n')

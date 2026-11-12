@@ -52,11 +52,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         container?.let { app ->
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                app.hub.refresh(
-                    preferred = app.settings.accessMode.value,
-                    adbPort = app.settings.adbPort.value,
-                    allowAdbBootstrap = app.settings.keepAdbBridge.value
-                )
+                app.hub.refresh()
             }
         }
     }

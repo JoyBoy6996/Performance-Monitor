@@ -56,8 +56,8 @@ class ShellHub(
         }
     }
 
-    suspend fun refresh(): AccessStatus = withContext(Dispatchers.IO) {
-        val state = shizukuRunner.refresh()
+    suspend fun refresh(forceReconnect: Boolean = false): AccessStatus = withContext(Dispatchers.IO) {
+        val state = shizukuRunner.refresh(forceReconnect)
         _status.value = accessStatus(
             state,
             shizukuRunner.connectionDetails.value,

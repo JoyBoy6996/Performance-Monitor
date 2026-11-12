@@ -192,7 +192,7 @@ fun SettingsScreen(
                         onClick = {
                             checking = true
                             scope.launch {
-                                container.hub.refresh()
+                                container.hub.refresh(forceReconnect = true)
                                 checking = false
                             }
                         }
@@ -210,7 +210,7 @@ fun SettingsScreen(
                             checking = true
                             scope.launch {
                                 container.hub.requestPermission()
-                                container.hub.refresh()
+                                container.hub.refresh(forceReconnect = true)
                                 checking = false
                             }
                         }

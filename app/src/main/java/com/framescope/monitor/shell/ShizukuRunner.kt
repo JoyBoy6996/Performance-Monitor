@@ -12,6 +12,7 @@ import java.util.concurrent.Executors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -29,10 +30,67 @@ import rikka.shizuku.Shizuku
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-class ShizukuRunner(
+internal interface ShizukuPlatform {
+    fun addRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener)
+    fun removeRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener)
+    fun addBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener)
+    fun removeBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener)
+    fun addBinderDeadListener(listener: Shizuku.OnBinderDeadListener)
+    fun removeBinderDeadListener(listener: Shizuku.OnBinderDeadListener)
+    fun pingBinder(): Boolean
+    fun checkSelfPermission(): Int
+    fun requestPermission(requestCode: Int)
+    fun bindUserService(args: Shizuku.UserServiceArgs, connection: ServiceConnection)
+    fun unbindUserService(args: Shizuku.UserServiceArgs, connection: ServiceConnection, remove: Boolean)
+}
+
+private object RealShizukuPlatform : ShizukuPlatform {
+    override fun addRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener) =
+        Shizuku.addRequestPermissionResultListener(listener)
+    override fun removeRequestPermissionResultListener(listener: Shizuku.OnRequestPermissionResultListener) =
+        Shizuku.removeRequestPermissionResultListener(listener)
+    override fun addBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener) =
+        Shizuku.addBinderReceivedListener(listener)
+    override fun removeBinderReceivedListener(listener: Shizuku.OnBinderReceivedListener) =
+        Shizuku.removeBinderReceivedListener(listener)
+    override fun addBinderDeadListener(listener: Shizuku.OnBinderDeadListener) =
+        Shizuku.addBinderDeadListener(listener)
+    override fun removeBinderDeadListener(listener: Shizuku.OnBinderDeadListener) =
+        Shizuku.removeBinderDeadListener(listener)
+    override fun pingBinder() = Shizuku.pingBinder()
+    override fun checkSelfPermission() = Shizuku.checkSelfPermission()
+    override fun requestPermission(requestCode: Int) = Shizuku.requestPermission(requestCode)
+    override fun bindUserService(args: Shizuku.UserServiceArgs, connection: ServiceConnection) =
+        Shizuku.bindUserService(args, connection)
+    override fun unbindUserService(args: Shizuku.UserServiceArgs, connection: ServiceConnection, remove: Boolean) =
+        Shizuku.unbindUserService(args, connection, remove)
+}
+
+internal object ShizukuRetryPolicy {
+    const val MAX_ATTEMPTS = 5
+    private const val BASE_DELAY_MS = 1_000L
+    private const val MAX_DELAY_MS = 30_000L
+
+    fun delayMillis(attempt: Int): Long =
+        (BASE_DELAY_MS * (1L shl (attempt - 1).coerceIn(0, 30)))
+            .coerceAtMost(MAX_DELAY_MS)
+}
+
+class ShizukuRunner private constructor(
     private val context: Context? = null,
-    private var mockService: IShizukuService? = null
+    private var mockService: IShizukuService?,
+    private val shizukuPlatform: ShizukuPlatform,
+    private val retryDelayMillis: (Int) -> Long
 ) : ShellRunner {
+
+    constructor(context: Context? = null, mockService: IShizukuService? = null) :
+        this(context, mockService, RealShizukuPlatform, ShizukuRetryPolicy::delayMillis)
+
+    internal constructor(
+        context: Context?,
+        shizukuPlatform: ShizukuPlatform,
+        retryDelayMillis: (Int) -> Long = ShizukuRetryPolicy::delayMillis
+    ) : this(context, null, shizukuPlatform, retryDelayMillis)
 
     enum class ConnectionState {
         NOT_RUNNING,
@@ -56,11 +114,12 @@ class ShizukuRunner(
         Thread(task, "framescope-shizuku-command").apply { isDaemon = true }
     }
     private val activeCommands = ConcurrentHashMap<String, IShizukuService>()
-    private var retryJob: kotlinx.coroutines.Job? = null
-    private var bindingRequested = false
-    private var serviceBound = false
-    private var linkedBinder: IBinder? = null
-    private var linkedDeathRecipient: IBinder.DeathRecipient? = null
+    private var retryJob: Job? = null
+    private var retryAttempts = 0
+    private var nextBindingGeneration = 0L
+    private var activeBinding: BindingAttempt? = null
+    private var bindingReleaseInProgress = false
+    private var reconnectAfterRelease = false
     @Volatile
     private var cleanedUp = false
 
@@ -76,56 +135,20 @@ class ShizukuRunner(
     @Volatile
     private var service: IShizukuService? = mockService
 
-    private val userServiceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            if (binder == null) {
-                handleServiceDisconnection("Shizuku UserService returned a null binder")
-                return
-            }
-
-            val deathRecipient = IBinder.DeathRecipient { handleUserServiceDeath(binder) }
-            try {
-                binder.linkToDeath(deathRecipient, 0)
-            } catch (e: Exception) {
-                handleServiceDisconnection("Could not monitor Shizuku UserService binder: ${e.message}")
-                return
-            }
-
-            val stub = IShizukuService.Stub.asInterface(binder)
-            synchronized(lifecycleLock) {
-                if (cleanedUp) {
-                    try {
-                        binder.unlinkToDeath(deathRecipient, 0)
-                    } catch (_: NoSuchElementException) {
-                        // Binder already removed the recipient after death.
-                    }
-                    return
-                }
-                unlinkDeathRecipientLocked()
-                linkedBinder = binder
-                linkedDeathRecipient = deathRecipient
-                bindingRequested = false
-                service = stub
-                _connectionDetails.update {
-                    it.copy(userServiceConnected = true, commandVerified = false)
-                }
-                _connectionState.value = ConnectionState.CONNECTING
-                _errorMessage.value = null
-            }
-            connectionScope.launch { verifyService(stub) }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            handleServiceDisconnection("Shizuku UserService disconnected")
-        }
-
-        override fun onBindingDied(name: ComponentName?) {
-            handleServiceDisconnection("Shizuku UserService binding died")
-        }
-
-        override fun onNullBinding(name: ComponentName?) {
-            handleServiceDisconnection("Shizuku UserService returned a null binding")
-        }
+    private inner class BindingAttempt(
+        val generation: Long,
+        val args: Shizuku.UserServiceArgs
+    ) {
+        lateinit var connection: ServiceConnection
+        var bindingAccepted = false
+        var bindingCallInProgress = false
+        var callbackObserved = false
+        var releaseRequested = false
+        var removeWhenReleased = false
+        var released = false
+        var binder: IBinder? = null
+        var deathRecipient: IBinder.DeathRecipient? = null
+        var verificationJob: Job? = null
     }
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, resultCode ->
@@ -133,7 +156,7 @@ class ShizukuRunner(
     }
 
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
-        checkAndBind()
+        checkAndBind(allowExhaustedRetry = true, forceAttempt = true)
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
@@ -146,7 +169,7 @@ class ShizukuRunner(
             _connectionDetails.update { it.copy(permissionGranted = true) }
             _connectionState.value = ConnectionState.CONNECTING
             _errorMessage.value = "Shizuku permission granted. Connecting to UserService."
-            bindUserService()
+            if (context != null) checkAndBind(allowExhaustedRetry = true, forceAttempt = true)
         } else {
             handlePermissionDenied(
                 "Shizuku permission was denied. Grant FrameScope access in Shizuku to continue."
@@ -155,36 +178,46 @@ class ShizukuRunner(
     }
 
     internal fun handleShizukuBinderDeath() {
-        synchronized(lifecycleLock) {
+        if (mockService == null && runCatching { shizukuPlatform.pingBinder() }.getOrDefault(false)) return
+        val attempt = synchronized(lifecycleLock) {
+            val current = activeBinding
+            if (current != null) detachAttemptLocked(current)
+            service = null
             _connectionDetails.update {
                 it.copy(binderAvailable = false, userServiceConnected = false, commandVerified = false)
             }
-            unlinkDeathRecipientLocked()
-            service = null
             _connectionState.value = ConnectionState.NOT_RUNNING
             _errorMessage.value = "Shizuku is not running. Start Shizuku to restore privileged operations."
+            retryJob?.cancel()
+            retryJob = null
+            current
         }
-        releaseServiceBinding()
+        attempt?.let { releaseAttempt(it, remove = false) }
     }
 
     private fun handlePermissionDenied(message: String) {
-        synchronized(lifecycleLock) {
+        val attempt = synchronized(lifecycleLock) {
+            val current = activeBinding
+            if (current != null) detachAttemptLocked(current)
             _connectionDetails.update {
                 it.copy(permissionGranted = false, userServiceConnected = false, commandVerified = false)
             }
             service = null
             _connectionState.value = ConnectionState.PERMISSION_DENIED
             _errorMessage.value = message
+            retryJob?.cancel()
+            retryJob = null
+            current
         }
-        releaseServiceBinding()
+        attempt?.let { releaseAttempt(it, remove = false) }
     }
 
     init {
         if (mockService == null) {
             try {
-                Shizuku.addRequestPermissionResultListener(permissionListener)
-                Shizuku.addBinderReceivedListener(binderReceivedListener)
-                Shizuku.addBinderDeadListener(binderDeadListener)
+                shizukuPlatform.addRequestPermissionResultListener(permissionListener)
+                shizukuPlatform.addBinderReceivedListener(binderReceivedListener)
+                shizukuPlatform.addBinderDeadListener(binderDeadListener)
             } catch (e: Exception) {
                 markConnectionError("Could not register Shizuku lifecycle listeners: ${e.message}")
             }
@@ -204,6 +237,12 @@ class ShizukuRunner(
             _connectionState.value = ConnectionState.NOT_RUNNING
         }
     }
+
+    internal fun activeBindingGenerationForTest(): Long? =
+        synchronized(lifecycleLock) { activeBinding?.generation }
+
+    internal fun activeDeathRecipientForTest(): IBinder.DeathRecipient? =
+        synchronized(lifecycleLock) { activeBinding?.deathRecipient }
 
     private fun verifyMockService(mock: IShizukuService) {
         val executionId = UUID.randomUUID().toString()
@@ -226,39 +265,38 @@ class ShizukuRunner(
         _errorMessage.value = if (verified) null else "Shizuku command verification failed."
     }
 
-    private fun checkAndBind() {
+    private fun checkAndBind(
+        allowExhaustedRetry: Boolean = false,
+        forceAttempt: Boolean = false
+    ) {
         if (mockService != null || cleanedUp) return
 
         val binderAvailable = try {
-            Shizuku.pingBinder()
-        } catch (_: IllegalStateException) {
+            shizukuPlatform.pingBinder()
+        } catch (_: Exception) {
             false
-        } catch (_: SecurityException) {
-            false
-        }
-        _connectionDetails.update {
-            it.copy(
-                binderAvailable = binderAvailable,
-                userServiceConnected = if (binderAvailable) it.userServiceConnected else false,
-                commandVerified = if (binderAvailable) it.commandVerified else false
-            )
         }
         if (!binderAvailable) {
-            synchronized(lifecycleLock) {
+            val attempt = synchronized(lifecycleLock) {
+                val current = activeBinding
+                if (current != null) detachAttemptLocked(current)
                 service = null
-                unlinkDeathRecipientLocked()
+                _connectionDetails.update {
+                    it.copy(binderAvailable = false, userServiceConnected = false, commandVerified = false)
+                }
+                _connectionState.value = ConnectionState.NOT_RUNNING
+                _errorMessage.value = "Shizuku is not running. Start Shizuku to restore privileged operations."
+                retryJob?.cancel()
+                retryJob = null
+                current
             }
-            releaseServiceBinding()
-            _connectionState.value = ConnectionState.NOT_RUNNING
-            _errorMessage.value = "Shizuku is not running. Start Shizuku to restore privileged operations."
+            attempt?.let { releaseAttempt(it, remove = false) }
             return
         }
 
         val hasPermission = try {
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
-        } catch (_: IllegalStateException) {
-            false
-        } catch (_: SecurityException) {
+            shizukuPlatform.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        } catch (_: Exception) {
             false
         }
         _connectionDetails.update {
@@ -272,113 +310,239 @@ class ShizukuRunner(
             handlePermissionDenied("Grant FrameScope Shizuku permission to enable privileged operations.")
             return
         }
+        synchronized(lifecycleLock) {
+            if (cleanedUp) return
+            if (bindingReleaseInProgress) {
+                if (forceAttempt) reconnectAfterRelease = true
+                return
+            }
+            if (activeBinding != null || (_connectionState.value == ConnectionState.READY && service != null)) return
+            if (retryJob?.isActive == true) {
+                if (!forceAttempt) return
+                retryJob?.cancel()
+                retryJob = null
+            }
+            if (retryAttempts >= ShizukuRetryPolicy.MAX_ATTEMPTS && !allowExhaustedRetry) {
+                _connectionState.value = ConnectionState.ERROR
+                _errorMessage.value = "Shizuku UserService connection failed after ${ShizukuRetryPolicy.MAX_ATTEMPTS} retries."
+                return
+            }
+        }
         bindUserService()
     }
 
     private fun bindUserService() {
         val ctx = context ?: return
-        synchronized(lifecycleLock) {
-            if (cleanedUp || bindingRequested || serviceBound) return
-            bindingRequested = true
-            _connectionState.value = ConnectionState.CONNECTING
-            _errorMessage.value = null
-        }
-
-        val args = Shizuku.UserServiceArgs(
-            ComponentName(ctx.packageName, ShizukuUserService::class.java.name)
-        )
-            .daemon(false)
-            .processNameSuffix("service")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
-
+        val args = createUserServiceArgs(ctx)
+        val attempt = newBindingAttempt(args) ?: return
         try {
-            Shizuku.bindUserService(args, userServiceConnection)
-            synchronized(lifecycleLock) {
-                if (bindingRequested || service != null) serviceBound = true
-            }
+            shizukuPlatform.bindUserService(args, attempt.connection)
+            completeBindingCall(attempt, accepted = true)
         } catch (e: Exception) {
-            synchronized(lifecycleLock) {
-                bindingRequested = false
-                serviceBound = false
-            }
-            markConnectionError("Failed to bind Shizuku UserService: ${e.message}")
-            scheduleReconnect()
+            completeBindingCall(attempt, accepted = false)
+            failBindingAttempt(attempt, "Failed to bind Shizuku UserService: ${e.message}")
         }
     }
 
-    private suspend fun verifyService(stub: IShizukuService) {
+    private fun newBindingAttempt(args: Shizuku.UserServiceArgs): BindingAttempt? =
+        synchronized(lifecycleLock) {
+            if (cleanedUp || activeBinding != null || bindingReleaseInProgress) return@synchronized null
+            val attempt = BindingAttempt(++nextBindingGeneration, args)
+            attempt.connection = object : ServiceConnection {
+                override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                    noteBindingCallback(attempt)
+                    handleServiceConnected(attempt, binder)
+                }
+
+                override fun onServiceDisconnected(name: ComponentName?) {
+                    noteBindingCallback(attempt)
+                    handleBindingDisconnect(attempt, "Shizuku UserService disconnected")
+                }
+
+                override fun onBindingDied(name: ComponentName?) {
+                    noteBindingCallback(attempt)
+                    handleBindingDisconnect(attempt, "Shizuku UserService binding died")
+                }
+
+                override fun onNullBinding(name: ComponentName?) {
+                    noteBindingCallback(attempt)
+                    failBindingAttempt(attempt, "Shizuku UserService returned a null binding")
+                }
+            }
+            attempt.bindingCallInProgress = true
+            activeBinding = attempt
+            _connectionState.value = ConnectionState.CONNECTING
+            _errorMessage.value = null
+            attempt
+        }
+
+    private fun noteBindingCallback(attempt: BindingAttempt) {
+        synchronized(lifecycleLock) { attempt.callbackObserved = true }
+    }
+
+    private fun completeBindingCall(attempt: BindingAttempt, accepted: Boolean) {
+        val releaseRequested = synchronized(lifecycleLock) {
+            attempt.bindingCallInProgress = false
+            attempt.bindingAccepted = accepted
+            if (attempt.releaseRequested) attempt.removeWhenReleased else null
+        }
+        if (releaseRequested != null) {
+            releaseAttempt(attempt, remove = releaseRequested)
+        }
+    }
+
+    private fun handleServiceConnected(attempt: BindingAttempt, binder: IBinder?) {
+        if (binder == null) {
+            failBindingAttempt(attempt, "Shizuku UserService returned a null binder")
+            return
+        }
+        synchronized(lifecycleLock) {
+            if (activeBinding !== attempt || cleanedUp) return
+            if (attempt.binder === binder && (attempt.verificationJob?.isActive == true ||
+                    _connectionState.value == ConnectionState.READY)
+            ) return
+        }
+
+        val deathRecipient = IBinder.DeathRecipient {
+            handleUserServiceDeath(attempt, binder)
+        }
+        try {
+            binder.linkToDeath(deathRecipient, 0)
+        } catch (e: Exception) {
+            failBindingAttempt(attempt, "Could not monitor Shizuku UserService binder: ${e.message}")
+            return
+        }
+
+        val stub = IShizukuService.Stub.asInterface(binder)
+        synchronized(lifecycleLock) {
+            if (activeBinding !== attempt || cleanedUp) {
+                unlinkBinder(binder, deathRecipient)
+                return
+            }
+            if (attempt.binder === binder && (attempt.verificationJob?.isActive == true ||
+                    _connectionState.value == ConnectionState.READY)
+            ) {
+                unlinkBinder(binder, deathRecipient)
+                return
+            }
+            unlinkAttemptDeathRecipientLocked(attempt)
+            attempt.binder = binder
+            attempt.deathRecipient = deathRecipient
+            service = stub
+            _connectionDetails.update {
+                it.copy(userServiceConnected = true, commandVerified = false)
+            }
+            _connectionState.value = ConnectionState.CONNECTING
+            _errorMessage.value = null
+            attempt.verificationJob = connectionScope.launch { verifyService(attempt, stub) }
+        }
+    }
+
+    private suspend fun verifyService(attempt: BindingAttempt, stub: IShizukuService) {
         val executionId = UUID.randomUUID().toString()
         val verificationProbe = try {
-            val result = stub.execute(executionId, "echo $VERIFY_PROBE_TOKEN", PROBE_TIMEOUT_MS)
-            result.getString(ShizukuUserService.KEY_EXECUTION_ID) == executionId &&
+            val result = withTimeoutOrNull(PROBE_TIMEOUT_MS + REMOTE_TIMEOUT_GRACE_MS) {
+                executeRemote(stub, executionId, "echo $VERIFY_PROBE_TOKEN", PROBE_TIMEOUT_MS)
+            }
+            result != null &&
+                result.getString(ShizukuUserService.KEY_EXECUTION_ID) == executionId &&
                 result.getString(ShizukuUserService.KEY_STATUS) == ShellExecutionStatus.SUCCESS.name &&
                 result.getInt(ShizukuUserService.KEY_EXIT_CODE, -1) == 0 &&
                 result.getString(ShizukuUserService.KEY_STDOUT, "").orEmpty().contains(VERIFY_PROBE_TOKEN)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            if (service === stub) {
-                markConnectionError("Shizuku UserService command verification failed: ${e.message}")
-            }
-            false
+            failBindingAttempt(
+                attempt,
+                "Shizuku UserService command verification failed: ${e.message}"
+            )
+            return
         }
 
+        var failed = false
         synchronized(lifecycleLock) {
-            if (service !== stub || cleanedUp) return
+            if (activeBinding !== attempt || service !== stub || cleanedUp) return
             if (verificationProbe) {
                 _connectionDetails.update { it.copy(userServiceConnected = true, commandVerified = true) }
                 _connectionState.value = ConnectionState.READY
                 _errorMessage.value = null
-            } else if (_connectionState.value != ConnectionState.ERROR) {
-                _connectionDetails.update { it.copy(commandVerified = false) }
-                _connectionState.value = ConnectionState.ERROR
-                _errorMessage.value = "Shizuku connected, but the shell command verification failed."
+                retryAttempts = 0
+                retryJob?.cancel()
+                retryJob = null
+            } else {
+                failed = true
             }
+        }
+        if (failed) {
+            failBindingAttempt(attempt, "Shizuku connected, but the shell command verification failed.")
         }
     }
 
-    private fun handleUserServiceDeath(deadBinder: IBinder) {
-        val isCurrent = synchronized(lifecycleLock) {
-            if (linkedBinder !== deadBinder) return
-            unlinkDeathRecipientLocked()
-            service = null
-            bindingRequested = false
-            _connectionDetails.update { it.copy(userServiceConnected = false, commandVerified = false) }
-            _connectionState.value = ConnectionState.CONNECTING
-            _errorMessage.value = "Shizuku UserService stopped. Reconnecting..."
-            true
+    private fun handleUserServiceDeath(attempt: BindingAttempt, deadBinder: IBinder) {
+        synchronized(lifecycleLock) {
+            if (activeBinding !== attempt || attempt.binder !== deadBinder) return
         }
-        if (isCurrent) {
-            releaseServiceBinding()
-            scheduleReconnect()
-        }
+        failBindingAttempt(attempt, "Shizuku UserService stopped. Reconnecting...")
     }
 
     internal fun handleServiceDisconnection(message: String = "Shizuku UserService disconnected") {
-        synchronized(lifecycleLock) {
-            unlinkDeathRecipientLocked()
-            service = null
-            bindingRequested = false
-            _connectionDetails.update { it.copy(userServiceConnected = false, commandVerified = false) }
-            _connectionState.value = if (_connectionDetails.value.binderAvailable) {
-                ConnectionState.CONNECTING
-            } else {
-                ConnectionState.NOT_RUNNING
+        val attempt = synchronized(lifecycleLock) { activeBinding }
+        if (attempt != null) {
+            handleBindingDisconnect(attempt, message)
+        } else {
+            synchronized(lifecycleLock) {
+                service = null
+                _connectionDetails.update { it.copy(userServiceConnected = false, commandVerified = false) }
+                _connectionState.value = if (_connectionDetails.value.binderAvailable) {
+                    ConnectionState.CONNECTING
+                } else {
+                    ConnectionState.NOT_RUNNING
+                }
+                _errorMessage.value = "$message. Reconnecting..."
             }
-            _errorMessage.value = "$message. Reconnecting..."
+            if (mockService == null) scheduleReconnect()
         }
-        releaseServiceBinding()
-        scheduleReconnect()
+    }
+
+    private fun handleBindingDisconnect(attempt: BindingAttempt, message: String) {
+        failBindingAttempt(attempt, "$message. Reconnecting...")
+    }
+
+    private fun failBindingAttempt(attempt: BindingAttempt, message: String) {
+        val shouldRetry = synchronized(lifecycleLock) {
+            if (activeBinding !== attempt) return
+            detachAttemptLocked(attempt)
+            service = null
+            _connectionDetails.update { it.copy(userServiceConnected = false, commandVerified = false) }
+            val recoverable = _connectionDetails.value.binderAvailable &&
+                _connectionDetails.value.permissionGranted
+            _connectionState.value = if (recoverable) ConnectionState.CONNECTING else ConnectionState.ERROR
+            _errorMessage.value = message
+            recoverable
+        }
+        releaseAttempt(attempt, remove = false)
+        if (shouldRetry) scheduleReconnect()
     }
 
     private fun scheduleReconnect() {
         synchronized(lifecycleLock) {
             if (cleanedUp || mockService != null || retryJob?.isActive == true) return
+            if (!_connectionDetails.value.binderAvailable || !_connectionDetails.value.permissionGranted) return
+            if (retryAttempts >= ShizukuRetryPolicy.MAX_ATTEMPTS) {
+                _connectionState.value = ConnectionState.ERROR
+                _errorMessage.value =
+                    "Shizuku UserService connection failed after ${ShizukuRetryPolicy.MAX_ATTEMPTS} retries."
+                return
+            }
+            retryAttempts += 1
+            val delayMs = retryDelayMillis(retryAttempts)
             retryJob = connectionScope.launch {
-                while (!cleanedUp && service == null) {
-                    delay(RECONNECT_DELAY_MS)
-                    checkAndBind()
-                    if (_connectionState.value == ConnectionState.PERMISSION_DENIED) break
+                delay(delayMs)
+                synchronized(lifecycleLock) {
+                    retryJob = null
+                    if (cleanedUp || activeBinding != null) return@launch
                 }
+                checkAndBind(allowExhaustedRetry = true, forceAttempt = true)
             }
         }
     }
@@ -389,34 +553,65 @@ class ShizukuRunner(
         _errorMessage.value = message
     }
 
-    private fun unlinkDeathRecipientLocked() {
-        val binder = linkedBinder
-        val recipient = linkedDeathRecipient
-        if (binder != null && recipient != null) {
-            try {
-                binder.unlinkToDeath(recipient, 0)
-            } catch (_: NoSuchElementException) {
-                // Binder already removed the recipient after death.
-            }
-        }
-        linkedBinder = null
-        linkedDeathRecipient = null
+    private fun detachAttemptLocked(attempt: BindingAttempt): Boolean {
+        if (activeBinding !== attempt) return false
+        activeBinding = null
+        bindingReleaseInProgress = true
+        attempt.verificationJob?.cancel()
+        unlinkAttemptDeathRecipientLocked(attempt)
+        return true
     }
 
-    private fun releaseServiceBinding() {
-        val ctx = context ?: return
-        val shouldUnbind = synchronized(lifecycleLock) {
-            val active = serviceBound || bindingRequested
-            serviceBound = false
-            bindingRequested = false
-            active
+    private fun unlinkAttemptDeathRecipientLocked(attempt: BindingAttempt) {
+        val binder = attempt.binder
+        val recipient = attempt.deathRecipient
+        if (binder != null && recipient != null) {
+            unlinkBinder(binder, recipient)
         }
-        if (!shouldUnbind) return
+        attempt.binder = null
+        attempt.deathRecipient = null
+    }
+
+    private fun unlinkBinder(binder: IBinder, recipient: IBinder.DeathRecipient) {
         try {
-            Shizuku.unbindUserService(createUserServiceArgs(ctx), userServiceConnection, true)
+            binder.unlinkToDeath(recipient, 0)
+        } catch (_: NoSuchElementException) {
+            // Binder already removed the recipient after death.
+        }
+    }
+
+    private fun releaseAttempt(attempt: BindingAttempt, remove: Boolean) {
+        val shouldUnbind = synchronized(lifecycleLock) {
+            if (attempt.released) return
+            attempt.releaseRequested = true
+            attempt.removeWhenReleased = attempt.removeWhenReleased || remove
+            if (attempt.bindingCallInProgress) return
+            attempt.released = true
+            attempt.bindingAccepted || attempt.callbackObserved
+        }
+        try {
+            if (shouldUnbind) {
+                shizukuPlatform.unbindUserService(
+                    attempt.args,
+                    attempt.connection,
+                    attempt.removeWhenReleased
+                )
+            }
         } catch (e: Exception) {
             if (!cleanedUp) {
                 _errorMessage.value = "Could not release the previous Shizuku UserService binding: ${e.message}"
+            }
+        } finally {
+            val reconnect = synchronized(lifecycleLock) {
+                bindingReleaseInProgress = false
+                val shouldReconnect = reconnectAfterRelease && !cleanedUp
+                reconnectAfterRelease = false
+                shouldReconnect
+            }
+            if (reconnect) {
+                connectionScope.launch {
+                    checkAndBind(allowExhaustedRetry = true, forceAttempt = true)
+                }
             }
         }
     }
@@ -446,24 +641,22 @@ class ShizukuRunner(
 
     suspend fun requestPermission(): Boolean = withContext(Dispatchers.Main) {
         if (mockService != null) return@withContext _connectionState.value == ConnectionState.READY
-        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
-            _connectionDetails.update { it.copy(binderAvailable = false) }
-            _connectionState.value = ConnectionState.NOT_RUNNING
-            _errorMessage.value = "Shizuku is not running. Start Shizuku before granting access."
+        if (!runCatching { shizukuPlatform.pingBinder() }.getOrDefault(false)) {
+            checkAndBind()
             return@withContext false
         }
 
         val alreadyGranted = runCatching {
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            shizukuPlatform.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         }.getOrDefault(false)
         if (alreadyGranted) {
             _connectionDetails.update { it.copy(permissionGranted = true, binderAvailable = true) }
-            bindUserService()
+            checkAndBind(allowExhaustedRetry = true, forceAttempt = true)
             return@withContext true
         }
 
         try {
-            Shizuku.requestPermission(REQUEST_CODE)
+            shizukuPlatform.requestPermission(REQUEST_CODE)
             true
         } catch (e: Exception) {
             markConnectionError("Could not request Shizuku permission: ${e.message}")
@@ -471,20 +664,19 @@ class ShizukuRunner(
         }
     }
 
-    suspend fun refresh(): ConnectionState = withContext(Dispatchers.IO) {
+    suspend fun refresh(forceReconnect: Boolean = false): ConnectionState = withContext(Dispatchers.IO) {
         mutex.withLock {
-            checkAndBind()
-            val current = service
-            if (current != null && _connectionState.value != ConnectionState.READY) {
-                verifyService(current)
-            }
+            checkAndBind(allowExhaustedRetry = forceReconnect, forceAttempt = forceReconnect)
             _connectionState.value
         }
     }
 
     override suspend fun exec(command: String, timeoutMs: Long): ShellResult = withContext(Dispatchers.IO) {
         if (mockService == null) checkAndBind()
-        val activeService = service
+        val (activeServiceOrNull, activeGeneration) = synchronized(lifecycleLock) {
+            service to activeBinding?.generation
+        }
+        val activeService = activeServiceOrNull
             ?: throw ShellUnavailable(unavailableReason().ifBlank { "Shizuku UserService is not available." })
         if (_connectionState.value != ConnectionState.READY) {
             throw ShellUnavailable(unavailableReason().ifBlank { "Shizuku UserService is not verified." })
@@ -501,9 +693,11 @@ class ShizukuRunner(
         } catch (e: ShellUnavailable) {
             throw e
         } catch (e: Exception) {
-            if (service === activeService) {
-                handleServiceDisconnection("Shizuku command connection failed: ${e.message}")
-            }
+            handleCommandConnectionFailure(
+                activeService,
+                activeGeneration,
+                "Shizuku command connection failed: ${e.message}"
+            )
             throw ShellUnavailable(e.message ?: "Shizuku command connection failed.")
         }
         if (response == null) {
@@ -574,24 +768,52 @@ class ShizukuRunner(
         }
     }
 
+    private fun handleCommandConnectionFailure(
+        activeService: IShizukuService,
+        generation: Long?,
+        message: String
+    ) {
+        val attempt = synchronized(lifecycleLock) {
+            activeBinding?.takeIf {
+                it.generation == generation && service === activeService
+            }
+        }
+        if (attempt != null) {
+            handleBindingDisconnect(attempt, message)
+        } else if (mockService != null && service === activeService) {
+            handleServiceDisconnection(message)
+        }
+    }
+
     fun cleanup() {
-        synchronized(lifecycleLock) {
+        val attempt = synchronized(lifecycleLock) {
             if (cleanedUp) return
             cleanedUp = true
             retryJob?.cancel()
-            unlinkDeathRecipientLocked()
+            retryJob = null
+            val current = activeBinding
+            if (current != null) detachAttemptLocked(current)
             service = null
             _connectionDetails.value = ConnectionDetails()
             _connectionState.value = ConnectionState.NOT_RUNNING
+            current
         }
         try {
-            Shizuku.removeRequestPermissionResultListener(permissionListener)
-            Shizuku.removeBinderReceivedListener(binderReceivedListener)
-            Shizuku.removeBinderDeadListener(binderDeadListener)
+            shizukuPlatform.removeRequestPermissionResultListener(permissionListener)
         } catch (_: Exception) {
             // Shizuku may already be stopped while application resources are being released.
         }
-        releaseServiceBinding()
+        try {
+            shizukuPlatform.removeBinderReceivedListener(binderReceivedListener)
+        } catch (_: Exception) {
+            // Shizuku may already be stopped while application resources are being released.
+        }
+        try {
+            shizukuPlatform.removeBinderDeadListener(binderDeadListener)
+        } catch (_: Exception) {
+            // Shizuku may already be stopped while application resources are being released.
+        }
+        attempt?.let { releaseAttempt(it, remove = true) }
         activeCommands.forEach { (executionId, activeService) ->
             try {
                 commandExecutor.execute {
@@ -624,6 +846,5 @@ class ShizukuRunner(
         private const val MIN_COMMAND_TIMEOUT_MS = 100L
         private const val MAX_COMMAND_TIMEOUT_MS = 120_000L
         private const val REMOTE_TIMEOUT_GRACE_MS = 3_000L
-        private const val RECONNECT_DELAY_MS = 1_000L
     }
 }

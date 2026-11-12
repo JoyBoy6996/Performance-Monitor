@@ -31,7 +31,7 @@ import org.robolectric.RobolectricTestRunner
 class ShizukuRunnerTest {
 
     private class MockShizukuService(
-        var uid: Int = 2000,
+        private val mockUid: Int = 2000,
         var defaultExitCode: Int = 0,
         var defaultStdout: String = "",
         var defaultStderr: String = "",
@@ -47,7 +47,7 @@ class ShizukuRunnerTest {
         override fun destroy() {}
         override fun exit() {}
 
-        override fun getUid(): Int = uid
+        override fun getUid(): Int = mockUid
 
         override fun execute(executionId: String, command: String, timeoutMs: Long): Bundle {
             executedCommands.add(command)

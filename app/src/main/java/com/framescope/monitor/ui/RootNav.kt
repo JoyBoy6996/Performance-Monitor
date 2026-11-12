@@ -63,7 +63,8 @@ enum class AppTab(val label: String, val icon: ImageVector) {
 fun FrameScopeRoot(
     container: AppContainer,
     widthSizeClass: WindowWidthSizeClass,
-    onRequestOverlayPermission: () -> Unit
+    onRequestOverlayPermission: () -> Unit,
+    onRequestScreenRecord: () -> Unit = {}
 ) {
     var tab by rememberSaveable { mutableStateOf(AppTab.MONITOR) }
     var openSession by remember { mutableStateOf<SessionRecord?>(null) }
@@ -124,6 +125,7 @@ fun FrameScopeRoot(
                             tab = current,
                             container = container,
                             onRequestOverlayPermission = onRequestOverlayPermission,
+                            onRequestScreenRecord = onRequestScreenRecord,
                             bottomPadding = bottomPadding,
                             onOpenSettings = { tab = AppTab.SETUP },
                             onOpenSession = { openSession = it }
@@ -158,6 +160,7 @@ private fun TabContent(
     tab: AppTab,
     container: AppContainer,
     onRequestOverlayPermission: () -> Unit,
+    onRequestScreenRecord: () -> Unit,
     bottomPadding: androidx.compose.ui.unit.Dp,
     onOpenSettings: () -> Unit,
     onOpenSession: (SessionRecord) -> Unit
@@ -166,7 +169,8 @@ private fun TabContent(
         AppTab.MONITOR -> DashboardScreen(
             container = container,
             onOpenSettings = onOpenSettings,
-            bottomPadding = bottomPadding
+            bottomPadding = bottomPadding,
+            onRequestScreenRecord = onRequestScreenRecord
         )
         AppTab.OVERLAY -> OverlayScreen(
             container = container,

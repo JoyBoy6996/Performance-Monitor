@@ -73,7 +73,8 @@ import kotlin.math.roundToInt
 fun DashboardScreen(
     container: AppContainer,
     onOpenSettings: () -> Unit,
-    bottomPadding: Dp = 24.dp
+    bottomPadding: Dp = 24.dp,
+    onRequestScreenRecord: () -> Unit = {}
 ) {
     val fps by container.engine.fps.collectAsState()
     val system by container.engine.system.collectAsState()
@@ -204,7 +205,15 @@ fun DashboardScreen(
                 avgCpu = live.avgCpu,
                 threshold = threshold,
                 onToggleRecording = {
-                    if (recording) container.engine.stopRecording() else container.engine.startRecording()
+                    if (recording) {
+                        container.engine.stopRecording()
+                        val stopIntent = android.content.Intent(context, com.framescope.monitor.recorder.ScreenRecorderService::class.java).apply {
+                            action = com.framescope.monitor.recorder.ScreenRecorderService.ACTION_STOP
+                        }
+                        context.startService(stopIntent)
+                    } else {
+                        onRequestScreenRecord()
+                    }
                 }
             )
         }

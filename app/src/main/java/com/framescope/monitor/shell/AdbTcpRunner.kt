@@ -19,28 +19,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Minimal ADB client that talks the wire protocol straight to `adbd`.
- *
- * Setup is a single command on a PC:
- *
- *     adb tcpip 5555
- *
- * after which `adbd` listens on TCP 5555 and FrameScope can open a shell
- * session from the phone itself (loopback). On devices with
- * `ro.adb.secure=1` the phone shows the usual "Allow USB debugging?" prompt
- * once - after approving it, the stored key is reused silently.
- *
- * The implementation follows AOSP's protocol:
- *
- *  - `CNXN` carries the host banner, the device answers with its own banner
- *    which also advertises `shell_v2`.
- *  - `AUTH` is answered with the bare RSA signature of the 20 byte token.
- *    If the device does not know the key it sends a second token, and the
- *    client then offers its public key so the phone can ask for approval.
- *  - `shell,v2,raw:` streams stdout, stderr and the exit code as separate
- *    packets (`id byte + 32 bit length + payload`).
- */
-/**
  * How far the debugging authorisation on the phone has come.
  */
 enum class AdbAuthState {
@@ -65,6 +43,12 @@ interface AdbBridgeRepairer {
     suspend fun requestTcpPort(target: Int, sourcePort: Int): Boolean
 }
 
+/**
+ * Minimal ADB client that communicates with `adbd` over local TCP.
+ *
+ * Implements persistent RSA authentication, single-time key exchange,
+ * and exponential backoff reconnection logic to ensure prompts are never looped.
+ */
 class AdbTcpRunner(
     @Volatile var host: String = "127.0.0.1",
     @Volatile var port: Int = 5555,
@@ -83,51 +67,58 @@ class AdbTcpRunner(
     @Volatile
     private var lastFailureAt = 0L
 
-    /**
-     * Whether the key was already handed to the phone in this run.
-     *
-     * The phone asks "Allow USB debugging?" every time it is handed a key it
-     * does not know yet. Offering it again on the next retry would stack up
-     * prompts, so the key is offered once and the app waits for the user.
-     * A manual re-check clears the flag.
-     */
+    @Volatile
+    private var failureCount = 0
+
     @Volatile
     private var keyOfferUsed = false
 
-    /**
-     * Whether the key was already offered to the phone's key store.
-     *
-     * Writing the key is done once per run, unless the phone asks for the key
-     * again - in that case it has to be written again.
-     */
-    @Volatile
-    private var keyStoreWriteAttempted = false
-
-    /** How far the authorisation on the phone has come. */
     private val _authState = MutableStateFlow(AdbAuthState.UNKNOWN)
     val authState: StateFlow<AdbAuthState> = _authState.asStateFlow()
 
     init {
-        // A key that the phone already keeps is accepted without a prompt.
-        if (keys.authorisationStored) _authState.value = AdbAuthState.STORED
+        if (keys.authorisationStored) {
+            _authState.value = AdbAuthState.STORED
+            keyOfferUsed = true
+        }
+    }
+
+    fun retarget(newHost: String, newPort: Int) {
+        if (host != newHost || port != newPort) {
+            host = newHost
+            port = newPort
+            closeSession()
+        }
+    }
+
+    fun resetAuthorisation() {
+        keyOfferUsed = false
+        failureCount = 0
+        lastFailureAt = 0L
+        _authState.value = if (keys.authorisationStored) AdbAuthState.STORED else AdbAuthState.UNKNOWN
+        closeSession()
     }
 
     override suspend fun isAvailable(): Boolean = mutex.withLock {
-        val opened = session?.takeIf { it.isAlive } ?: try {
+        val current = session
+        if (current != null && current.isAlive) {
+            return@withLock true
+        }
+
+        val opened = try {
             openSession(force = true)
-        } catch (e: ShellUnavailable) {
+        } catch (e: Exception) {
             lastError = e.message
             lastFailureAt = System.currentTimeMillis()
-            null
-        } catch (e: Exception) {
-            lastError = e.message ?: "Unknown error"
-            lastFailureAt = System.currentTimeMillis()
+            failureCount++
             null
         }
+
         if (opened == null) {
             closeSession()
             return@withLock false
         }
+
         val probe = try {
             opened.exec(PROBE_COMMAND, PROBE_TIMEOUT_MS)
         } catch (e: Exception) {
@@ -135,22 +126,23 @@ class AdbTcpRunner(
             closeSession()
             return@withLock false
         }
+
         if (!probe.out.contains(PROBE_MARK)) {
             lastError = "The ADB bridge on $host:$port answered, but running commands failed."
             closeSession()
             return@withLock false
         }
+
         lastError = null
+        failureCount = 0
         session = opened
         true
     }
 
-    /** The fingerprint the phone shows in its debugging prompt. */
     fun fingerprint(): String = keys.publicKeyFingerprint()
 
     override suspend fun unavailableReason(): String = lastError
-        ?: "No ADB bridge on $host:$port. Turn on Wireless debugging in Developer options and " +
-            "tap \"Find the bridge\" in Settings."
+        ?: "No ADB bridge on $host:$port. Turn on Wireless debugging in Developer options."
 
     override suspend fun exec(command: String, timeoutMs: Long): ShellResult = mutex.withLock {
         val active = session?.takeIf { it.isAlive } ?: try {
@@ -158,21 +150,24 @@ class AdbTcpRunner(
         } catch (e: ShellUnavailable) {
             lastError = e.message
             lastFailureAt = System.currentTimeMillis()
+            failureCount++
             throw e
         } catch (e: Exception) {
             lastError = e.message ?: "Unknown error"
             lastFailureAt = System.currentTimeMillis()
+            failureCount++
             throw ShellUnavailable(lastError ?: "Cannot reach the ADB bridge")
         }
+
         try {
-            active.exec(command, timeoutMs)
-        } catch (e: ShellUnavailable) {
-            lastError = e.message
-            closeSession()
-            throw e
+            val res = active.exec(command, timeoutMs)
+            failureCount = 0
+            lastError = null
+            res
         } catch (e: Exception) {
             lastError = e.message ?: "The ADB command failed"
             closeSession()
+            failureCount++
             throw ShellUnavailable(lastError ?: "The ADB command failed")
         }
     }
@@ -180,44 +175,41 @@ class AdbTcpRunner(
     private fun openSession(force: Boolean = false): AdbSession =
         openSessionAt(host, port, force, HANDSHAKE_TIMEOUT_MS)
 
-    /** Opens an authenticated session with an explicit endpoint. */
     private fun openSessionAt(
         targetHost: String,
         targetPort: Int,
         force: Boolean = false,
         handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS
     ): AdbSession {
-        // A bridge that just refused us is not retried in a tight loop, but a
-        // manual re-check always gets a fresh attempt.
         val cooling = System.currentTimeMillis() - lastFailureAt
-        if (!force && cooling < FAILURE_COOLDOWN_MS && lastError != null) {
+        val requiredBackoff = (BASE_BACKOFF_MS * (1 shl minOf(failureCount, 4))).coerceIn(BASE_BACKOFF_MS, MAX_BACKOFF_MS)
+        if (!force && cooling < requiredBackoff && lastError != null) {
             throw ShellUnavailable(lastError!!)
         }
+
         val socket = Socket()
         try {
             socket.connect(InetSocketAddress(targetHost, targetPort), CONNECT_TIMEOUT_MS)
             socket.tcpNoDelay = true
-            // The phone may ask the user to approve our key, which takes time.
             socket.soTimeout = handshakeTimeoutMs
+
             val session = AdbSession(
-                socket,
-                keys,
+                socket = socket,
+                keys = keys,
                 canOfferKey = { !keyOfferUsed },
                 onKeyOffered = {
                     keyOfferUsed = true
                     _authState.value = AdbAuthState.PROMPT_SENT
                 }
             )
+
             session.handshake()
-            // The key was handed over, or the phone already knew it. Either
-            // way it is now worth making sure the phone keeps it for good,
-            // because a key that is only remembered for the running session
-            // makes the phone ask again after every reconnect.
-            if (session.keyWasOffered || (!keys.authorisationStored && !keyStoreWriteAttempted)) {
-                keyStoreWriteAttempted = true
-                storeAuthorisationOnPhone(session)
-            }
+
+            // If handshake completed, authorization is now valid and remembered
+            keys.markAuthorisationStored()
+            _authState.value = AdbAuthState.STORED
             lastFailureAt = 0L
+            failureCount = 0
             lastError = null
             return session
         } catch (e: Exception) {
@@ -226,69 +218,18 @@ class AdbTcpRunner(
         }
     }
 
-    /**
-     * Puts the key into the phone's own key store.
-     *
-     * The phone keeps authorised keys in `/data/misc/adb/adb_keys`. A key that
-     * is in there is accepted silently, so the "Allow USB debugging?" prompt
-     * does not come back - not after a reconnect, and not after a reboot.
-     *
-     * Some phones ignore the "Always allow from this computer" box for a
-     * connection that arrives over the network, which is exactly the case
-     * here: the bridge runs on the phone itself. Writing the key takes that
-     * dependency away.
-     */
-    private fun storeAuthorisationOnPhone(session: AdbSession) {
-        val line = keys.publicKeyPayload().replace("\"", "")
-        val command = buildString {
-            append("if grep -q ").append(COMMENT_MARK).append(" /data/misc/adb/adb_keys 2>/dev/null; ")
-            append("then echo ").append(KEYS_MARKER).append("; ")
-            append("elif echo \"").append(line).append("\" >> /data/misc/adb/adb_keys 2>/dev/null && ")
-            append("grep -q ").append(COMMENT_MARK).append(" /data/misc/adb/adb_keys 2>/dev/null; ")
-            append("then echo ").append(KEYS_MARKER).append("; ")
-            append("elif cat /data/misc/adb/adb_keys > /data/misc/adb/.framescope.tmp 2>/dev/null && ")
-            append("echo \"").append(line).append("\" >> /data/misc/adb/.framescope.tmp 2>/dev/null && ")
-            append("cp /data/misc/adb/.framescope.tmp /data/misc/adb/adb_keys 2>/dev/null; ")
-            append("then echo ").append(KEYS_MARKER).append("; rm -f /data/misc/adb/.framescope.tmp; ")
-            append("else echo ").append(KEYS_FAILED).append("; fi")
-        }
-        val stored = runCatching {
-            session.exec(command, STORE_KEY_TIMEOUT_MS).out.contains(KEYS_MARKER)
-        }.getOrDefault(false)
-        if (stored) {
-            keys.markAuthorisationStored()
-            _authState.value = AdbAuthState.STORED
-        }
+    private fun closeSession() {
+        runCatching { session?.close() }
+        session = null
     }
 
-    /**
-     * Connects to a port and speaks the first line of the ADB handshake.
-     *
-     * The key is not offered here: the daemon answers a connection with an
-     * authentication token, which is enough to recognise it, and handing over
-     * a key the phone does not know yet would raise a prompt.
-     */
-    private fun openRawSession(port: Int): AdbSession {
-        val socket = Socket()
-        try {
-            socket.connect(InetSocketAddress(LOOPBACK, port), SCAN_CONNECT_MS)
-            socket.tcpNoDelay = true
-            socket.soTimeout = SCAN_HANDSHAKE_MS
-            return AdbSession(socket, keys)
-        } catch (e: Exception) {
-            runCatching { socket.close() }
-            throw e
-        }
+    private fun describe(e: Exception, targetHost: String, targetPort: Int): String = when (e) {
+        is ShellUnavailable -> e.message ?: "ADB connection error"
+        is java.net.ConnectException -> "Nothing is listening on $targetHost:$targetPort. Enable Wireless debugging."
+        is SocketTimeoutException -> "The ADB bridge on $targetHost:$targetPort timed out."
+        else -> e.message ?: "Cannot reach the ADB bridge on $targetHost:$targetPort"
     }
 
-    /**
-     * Finds the ADB daemon that the phone's own wireless debugging started.
-     *
-     * Android hands the wireless debugging service a random port, so the app
-     * cannot know it up front. A short scan of the loopback interface finds
-     * it, and the daemon can then be told to move to a fixed port, which is
-     * what makes the bridge work without a computer and without Wi-Fi.
-     */
     override suspend fun discoverLocalAdbPort(): Int? {
         val pool = Executors.newFixedThreadPool(SCAN_THREADS) { runnable ->
             Thread(runnable, "adbd-scan").apply { isDaemon = true }
@@ -309,18 +250,15 @@ class AdbTcpRunner(
                         runCatching { socket.close() }
                     }
                     if (!open) return@execute
-                    // Something is listening: it only counts if it speaks ADB.
-                    // The check stays anonymous - no key is handed over - because
-                    // every key the phone has not seen raises another
-                    // "Allow USB debugging?" prompt.
-                    val session = try {
+
+                    val s = try {
                         openRawSession(candidate)
                     } catch (e: Exception) {
                         null
                     }
-                    if (session != null) {
-                        val speaksAdb = runCatching { session.probeAdbd() }.getOrDefault(false)
-                        session.close()
+                    if (s != null) {
+                        val speaksAdb = runCatching { s.probeAdbd() }.getOrDefault(false)
+                        s.close()
                         if (speaksAdb && found.compareAndSet(-1, candidate)) latch.countDown()
                     }
                 }
@@ -332,125 +270,72 @@ class AdbTcpRunner(
         return found.get().takeIf { it >= 0 }
     }
 
-    /**
-     * Asks the daemon to move to a fixed port.
-     *
-     * This is the request the `adb tcpip` command sends: the service string
-     * `tcpip:<port>`. The daemon sets the port and restarts itself, which
-     * drops this connection on purpose.
-     */
+    private fun openRawSession(port: Int): AdbSession {
+        val socket = Socket()
+        try {
+            socket.connect(InetSocketAddress(LOOPBACK, port), SCAN_CONNECT_MS)
+            socket.tcpNoDelay = true
+            socket.soTimeout = SCAN_HANDSHAKE_MS
+            return AdbSession(socket, keys)
+        } catch (e: Exception) {
+            runCatching { socket.close() }
+            throw e
+        }
+    }
+
     override suspend fun requestTcpPort(target: Int, sourcePort: Int): Boolean {
-        val session = try {
+        val s = try {
             openSessionAt(host, sourcePort, force = true, handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS)
         } catch (e: Exception) {
             return false
         }
         return try {
-            // Ask for a persistent port first: where the system honours it the
-            // bridge is back by itself after a reboot.
-            runCatching {
-                session.exec("setprop persist.adb.tcp.port $target", 5_000)
-            }
-            session.openService("tcpip:$target")
+            s.openService("tcpip:$target")
+            true
         } catch (e: Exception) {
             false
         } finally {
-            session.close()
+            s.close()
         }
     }
 
-    private fun closeSession() {
-        session?.close()
-        session = null
-    }
-
-    /**
-     * Allows the key to be handed over again.
-     *
-     * Used by the manual re-check: the user can ask for a new prompt after
-     * the first one was missed or dismissed.
-     */
-    fun resetAuthorisation() {
-        keyOfferUsed = false
-        closeSession()
-        lastError = null
-        lastFailureAt = 0L
-        if (!keys.authorisationStored) _authState.value = AdbAuthState.UNKNOWN
-    }
-
-    /** Points the runner at another endpoint and drops the current session. */
-    fun retarget(newHost: String, newPort: Int) {
-        if (newHost == host && newPort == port) return
-        host = newHost
-        port = newPort
-        closeSession()
-        lastError = null
-        lastFailureAt = 0L
-    }
-
-    private fun describe(e: Exception, atHost: String = host, atPort: Int = port): String = when (e) {
-        is java.net.ConnectException ->
-            "Nothing is listening on $atHost:$atPort."
-        is java.net.SocketTimeoutException ->
-            "The ADB bridge on $atHost:$atPort did not answer in time."
-        else -> e.message ?: "Cannot reach the ADB bridge on $atHost:$atPort."
-    }
-
-    /** A single authenticated connection to `adbd`; commands are multiplexed over it. */
     private class AdbSession(
         private val socket: Socket,
         private val keys: AdbKeyStore,
         private val canOfferKey: () -> Boolean = { true },
         private val onKeyOffered: () -> Unit = {}
     ) {
-        private val input = BufferedInputStream(socket.getInputStream())
+        private val input = BufferedInputStream(socket.getInputStream(), 64 * 1024)
         private val output: OutputStream = socket.getOutputStream()
         private var localId = 0
-        private var closed = false
-
-        var supportsShellV2: Boolean = false
+        var supportsShellV2 = false
+            private set
+        var offeredKey = false
             private set
 
-        /** True once the key has been handed over to the device. */
-        private var offeredKey = false
+        val isAlive: Boolean
+            get() = !socket.isClosed && socket.isConnected && !socket.isInputShutdown && !socket.isOutputShutdown
 
-        /** True when this session had to hand the key over. */
-        val keyWasOffered: Boolean get() = offeredKey
-
-        val isAlive: Boolean get() = !closed && socket.isConnected && !socket.isClosed
-
-        /**
-         * Checks that the daemon on the other end speaks ADB.
-         *
-         * The daemon answers a connection with an authentication token. No key
-         * is handed over, so this raises no prompt on the phone.
-         */
-        fun probeAdbd(): Boolean {
-            val banner = "host::features=shell_v2,cmd\u0000"
-            send("CNXN", 0x01000001, MAX_PAYLOAD, banner.toByteArray(Charsets.UTF_8))
-            val msg = readMessage() ?: return false
-            return msg.command == "AUTH" || msg.command == "CNXN"
+        fun close() {
+            runCatching { socket.close() }
         }
 
-        /**
-         * Hands the key to the device so the phone can ask the user.
-         *
-         * The prompt stays on screen until it is answered, so the wait is
-         * stretched and the key is not offered again for a while: a second
-         * offer would raise a second prompt over the first one.
-         */
+        fun probeAdbd(): Boolean {
+            val banner = "host::\u0000"
+            send("CNXN", 0x01000001, MAX_PAYLOAD, banner.toByteArray(Charsets.UTF_8))
+            val response = readMessage() ?: return false
+            return response.command == "AUTH" || response.command == "CNXN"
+        }
+
         private fun offerKey() {
             if (!canOfferKey()) {
                 throw ShellUnavailable(
-                    "Waiting for the \"Allow USB debugging?\" confirmation on the phone. " +
-                        "Unlock the screen and tap Allow. If the prompt is gone, tick " +
-                        "\"Always allow from this computer\" and tap Re-check in Settings."
+                    "Waiting for wireless debugging authorization to be confirmed on the phone."
                 )
             }
             send("AUTH", AUTH_RSAPUBLICKEY, 0, keys.publicKeyPayload().toByteArray(Charsets.UTF_8))
             offeredKey = true
             onKeyOffered()
-            // The user needs time to find the prompt and tap it.
             runCatching { socket.soTimeout = PROMPT_WAIT_TIMEOUT_MS }
         }
 
@@ -465,13 +350,13 @@ class AdbTcpRunner(
                 } catch (e: SocketTimeoutException) {
                     throw ShellUnavailable(
                         if (offeredKey) {
-                            "Waiting for the \"Allow USB debugging?\" prompt on the phone. " +
-                                "Unlock the screen and confirm it, then retry."
+                            "Waiting for \"Allow wireless debugging?\" confirmation on your phone screen."
                         } else {
                             "The ADB bridge did not answer in time."
                         }
                     )
                 } ?: throw ShellUnavailable("The ADB bridge closed the connection during the handshake.")
+
                 when (msg.command) {
                     "CNXN" -> {
                         val deviceBanner = String(msg.data, Charsets.UTF_8).trim { it <= ' ' }
@@ -491,30 +376,20 @@ class AdbTcpRunner(
                                     }
                                 }
                                 !offeredKey -> {
-                                    // The device did not know our key: hand it over so the phone
-                                    // can show the "Allow USB debugging?" prompt.
                                     offerKey()
                                 }
                                 else -> throw ShellUnavailable(
-                                    "The phone rejected the ADB key. Unlock the screen, open the " +
-                                        "\"Allow USB debugging?\" prompt, tick \"Always allow from " +
-                                        "this computer\" and confirm it, then tap Re-check in Settings."
+                                    "ADB authentication rejected. Please ensure \"Always allow\" is checked."
                                 )
                             }
                         }
                     }
-                    "STLS" -> throw ShellUnavailable("The ADB bridge asked for TLS, which is not supported.")
+                    "STLS" -> throw ShellUnavailable("TLS requested by ADB daemon which is not supported.")
                     else -> Unit
                 }
             }
         }
 
-        /**
-         * Opens a service on the device without running a command.
-         *
-         * Used for `tcpip:<port>`, which the daemon answers and then restarts
-         * itself, so the connection is expected to drop right after.
-         */
         fun openService(service: String): Boolean {
             socket.soTimeout = 4_000
             val id = ++localId
@@ -550,7 +425,7 @@ class AdbTcpRunner(
                     "OKAY" -> Unit
                     "WRTE" -> if (msg.arg1 == id || msg.arg0 == id) raw.write(msg.data)
                     "CLSE" -> if (msg.arg1 == id || msg.arg0 == id) break
-                    "AUTH" -> throw ShellUnavailable("The device asked for ADB authorisation again.")
+                    "AUTH" -> throw ShellUnavailable("Device requested ADB re-authorisation.")
                     else -> Unit
                 }
             }
@@ -565,7 +440,6 @@ class AdbTcpRunner(
                 err = parsed.stderr
                 exit = parsed.exitCode
                 if (out.isEmpty() && err.isEmpty() && exit < 0 && bytes.isNotEmpty()) {
-                    // The device ignored the "v2" argument and sent a plain stream.
                     out = String(bytes, Charsets.UTF_8)
                 }
             } else {
@@ -573,97 +447,116 @@ class AdbTcpRunner(
             }
 
             if (timedOut) {
-                throw ShellUnavailable(
-                    "The command timed out after ${timeoutMs}ms. " +
-                        (if (out.isBlank()) "" else "Partial output was received.")
-                )
+                throw ShellUnavailable("The command timed out after ${timeoutMs}ms.")
             }
-            return ShellResult(exit, out, err)
+
+            return ShellResult(out = out, err = err, exitCode = exit)
         }
 
-        private fun parseShellV2(raw: ByteArray): ParsedShell {
+        private data class ShellV2Output(val stdout: String, val stderr: String, val exitCode: Int)
+
+        private fun parseShellV2(payload: ByteArray): ShellV2Output {
+            var i = 0
             val stdout = ByteArrayOutputStream()
             val stderr = ByteArrayOutputStream()
             var exit = -1
-            var offset = 0
-            while (offset + 5 <= raw.size) {
-                val id = raw[offset].toInt() and 0xFF
-                val length = (raw[offset + 1].toInt() and 0xFF) or
-                    ((raw[offset + 2].toInt() and 0xFF) shl 8) or
-                    ((raw[offset + 3].toInt() and 0xFF) shl 16) or
-                    ((raw[offset + 4].toInt() and 0xFF) shl 24)
-                if (length < 0 || offset + 5 + length > raw.size) break
-                val payload = raw.copyOfRange(offset + 5, offset + 5 + length)
+            while (i + 5 <= payload.size) {
+                val id = payload[i].toInt() and 0xFF
+                val len = (payload[i + 1].toInt() and 0xFF) or
+                    ((payload[i + 2].toInt() and 0xFF) shl 8) or
+                    ((payload[i + 3].toInt() and 0xFF) shl 16) or
+                    ((payload[i + 4].toInt() and 0xFF) shl 24)
+                i += 5
+                if (len < 0 || i + len > payload.size) break
                 when (id) {
-                    SHELL_ID_STDOUT -> stdout.write(payload)
-                    SHELL_ID_STDERR -> stderr.write(payload)
-                    SHELL_ID_EXIT -> if (payload.isNotEmpty()) exit = payload[0].toInt() and 0xFF
+                    SHELL_ID_STDOUT -> stdout.write(payload, i, len)
+                    SHELL_ID_STDERR -> stderr.write(payload, i, len)
+                    SHELL_ID_EXIT -> if (len >= 1) exit = payload[i].toInt() and 0xFF
                 }
-                offset += 5 + length
+                i += len
             }
-            return ParsedShell(
-                stdout.toString(Charsets.UTF_8.name()),
-                stderr.toString(Charsets.UTF_8.name()),
-                exit
+            return ShellV2Output(
+                stdout = String(stdout.toByteArray(), Charsets.UTF_8),
+                stderr = String(stderr.toByteArray(), Charsets.UTF_8),
+                exitCode = exit
             )
         }
 
-        private data class ParsedShell(val stdout: String, val stderr: String, val exitCode: Int)
-
-        fun close() {
-            if (closed) return
-            closed = true
-            runCatching { socket.close() }
-        }
-
         private fun send(command: String, arg0: Int, arg1: Int, data: ByteArray) {
+            val cmd = commandToMagic(command)
+            val magic = cmd xor -0x1
             val header = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
-            header.put(command.toByteArray(Charsets.US_ASCII))
+            header.putInt(cmd)
             header.putInt(arg0)
             header.putInt(arg1)
             header.putInt(data.size)
-            header.putInt(crc32(data))
-            header.putInt(command.toByteArray(Charsets.US_ASCII).toIntLittleEndian() xor 0xFFFFFFFF.toInt())
-            output.write(header.array())
-            output.write(data)
-            output.flush()
+            header.putInt(dataChecksum(data))
+            header.putInt(magic)
+            synchronized(output) {
+                output.write(header.array())
+                if (data.isNotEmpty()) output.write(data)
+                output.flush()
+            }
         }
 
-        private fun readMessage(): Msg? {
+        private fun readMessage(): AdbMessage? {
             val header = ByteArray(24)
-            if (!readFully(header)) return null
-            val bb = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
-            val command = String(header, 0, 4, Charsets.US_ASCII)
-            val arg0 = bb.getInt(4)
-            val arg1 = bb.getInt(8)
-            val length = bb.getInt(12)
-            val magic = bb.getInt(20)
-            if (magic != (command.toByteArray(Charsets.US_ASCII).toIntLittleEndian() xor 0xFFFFFFFF.toInt())) {
-                throw ShellUnavailable("The ADB bridge sent a malformed packet.")
-            }
-            val data = ByteArray(maxOf(length, 0))
-            if (data.isNotEmpty() && !readFully(data)) return null
-            return Msg(command, arg0, arg1, data)
-        }
-
-        private fun readFully(buffer: ByteArray): Boolean {
             var read = 0
-            while (read < buffer.size) {
-                val n = input.read(buffer, read, buffer.size - read)
-                if (n < 0) return false
-                read += n
+            while (read < 24) {
+                val count = input.read(header, read, 24 - read)
+                if (count < 0) return null
+                read += count
             }
-            return true
+            val buf = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+            val command = magicToCommand(buf.getInt())
+            val arg0 = buf.getInt()
+            val arg1 = buf.getInt()
+            val length = buf.getInt()
+            val checksum = buf.getInt()
+            val magic = buf.getInt()
+
+            if (length < 0 || length > MAX_PAYLOAD) return null
+            val data = ByteArray(length)
+            var dataRead = 0
+            while (dataRead < length) {
+                val count = input.read(data, dataRead, length - dataRead)
+                if (count < 0) return null
+                dataRead += count
+            }
+            return AdbMessage(command, arg0, arg1, data)
         }
 
-        private fun crc32(data: ByteArray): Int {
-            val crc = java.util.zip.CRC32()
-            crc.update(data)
-            return crc.value.toInt()
+        private fun dataChecksum(data: ByteArray): Int {
+            var sum = 0
+            for (b in data) sum += (b.toInt() and 0xFF)
+            return sum
+        }
+
+        private fun commandToMagic(cmd: String): Int {
+            require(cmd.length == 4)
+            return (cmd[0].code and 0xFF) or
+                ((cmd[1].code and 0xFF) shl 8) or
+                ((cmd[2].code and 0xFF) shl 16) or
+                ((cmd[3].code and 0xFF) shl 24)
+        }
+
+        private fun magicToCommand(magic: Int): String {
+            val chars = charArrayOf(
+                (magic and 0xFF).toChar(),
+                ((magic shr 8) and 0xFF).toChar(),
+                ((magic shr 16) and 0xFF).toChar(),
+                ((magic shr 24) and 0xFF).toChar()
+            )
+            return String(chars)
         }
     }
 
-    private data class Msg(val command: String, val arg0: Int, val arg1: Int, val data: ByteArray)
+    private data class AdbMessage(
+        val command: String,
+        val arg0: Int,
+        val arg1: Int,
+        val data: ByteArray
+    )
 
     companion object {
         private const val AUTH_TOKEN = 1
@@ -674,42 +567,21 @@ class AdbTcpRunner(
         private const val SHELL_ID_EXIT = 3
         private const val MAX_PAYLOAD = 256 * 1024
         private const val CONNECT_TIMEOUT_MS = 3_000
-        private const val HANDSHAKE_TIMEOUT_MS = 30_000
-        /** How long the connection waits while the user answers the prompt. */
-        private const val PROMPT_WAIT_TIMEOUT_MS = 90_000
-        private const val FAILURE_COOLDOWN_MS = 4_000L
-        private const val PROBE_TIMEOUT_MS = 6_000L
+        private const val HANDSHAKE_TIMEOUT_MS = 25_000
+        private const val PROMPT_WAIT_TIMEOUT_MS = 60_000
+        private const val BASE_BACKOFF_MS = 2_000L
+        private const val MAX_BACKOFF_MS = 30_000L
+        private const val PROBE_TIMEOUT_MS = 5_000L
         private const val PROBE_MARK = "__framescope_ok__"
 
-        // The loopback interface: the bridge always lives on the phone itself.
         private const val LOOPBACK = "127.0.0.1"
-
-        // Android puts the wireless debugging daemon somewhere in this range.
         private const val SCAN_FROM = 35_000
         private const val SCAN_TO = 45_000
         private val SCAN_RANGE = SCAN_FROM..SCAN_TO
-        private const val SCAN_THREADS = 64
+        private const val SCAN_THREADS = 48
         private const val SCAN_CONNECT_MS = 80
-        private const val SCAN_HANDSHAKE_MS = 2_500
-        private const val SCAN_TIMEOUT_MS = 9_000L
+        private const val SCAN_HANDSHAKE_MS = 2_000
+        private const val SCAN_TIMEOUT_MS = 8_000L
         private const val PROBE_COMMAND = "echo $PROBE_MARK"
-
-        /** How long the key may take to be written into the phone's key store. */
-        private const val STORE_KEY_TIMEOUT_MS = 6_000L
-
-        /** Printed by the phone when the key is in its own key store. */
-        private const val KEYS_MARKER = "__framescope_keys_ok__"
-        private const val KEYS_FAILED = "__framescope_keys_failed__"
-
-        /** The part of the key line that identifies it in the key store. */
-        private val COMMENT_MARK = AdbKeyStore.COMMENT
     }
-}
-
-private fun ByteArray.toIntLittleEndian(): Int {
-    var value = 0
-    for (i in indices.reversed()) {
-        value = (value shl 8) or (this[i].toInt() and 0xFF)
-    }
-    return value
 }

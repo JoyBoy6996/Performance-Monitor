@@ -59,7 +59,7 @@ class AppContainer(context: Context) {
     // for "Allow USB debugging?" once.
     val hub = ShellHub(
         adb = AdbTcpRunner(
-            keys = AdbKeyStore(File(context.filesDir, "adb"))
+            keys = AdbKeyStore(File(context.filesDir, "adb"), context)
         )
     )
     val store = SessionStore(context)

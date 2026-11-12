@@ -1,7 +1,10 @@
 package com.framescope.monitor
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -14,33 +17,40 @@ import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.core.content.ContextCompat
 import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.core.ThemeMode
+import com.framescope.monitor.recorder.ScreenRecorderService
 import com.framescope.monitor.ui.FrameScopeRoot
 import com.framescope.monitor.ui.collectAsStateValue
 import com.framescope.monitor.ui.theme.FrameScopeTheme
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    /**
-     * The container, or null when the application failed to build it.
-     *
-     * A failure there used to take the whole app down and leave nothing but a
-     * black screen, with no way to find out what went wrong.
-     */
     private val container get() = runCatching { (application as FrameScopeApp).container }.getOrNull()
 
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private val audioPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     private val overlayPermission =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
+
+    private val mediaProjectionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK && result.data != null) {
+                val serviceIntent = Intent(this, ScreenRecorderService::class.java).apply {
+                    action = ScreenRecorderService.ACTION_START
+                    putExtra(ScreenRecorderService.EXTRA_RESULT_CODE, result.resultCode)
+                    putExtra(ScreenRecorderService.EXTRA_DATA, result.data)
+                }
+                ContextCompat.startForegroundService(this, serviceIntent)
+                container?.engine?.startRecording()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Respect the system "remove animations" setting for the decorative motion.
         val motionEnabled = runCatching {
             Settings.Global.getFloat(
                 contentResolver,
@@ -51,6 +61,10 @@ class MainActivity : ComponentActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            audioPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
 
         val app = container
@@ -78,7 +92,8 @@ class MainActivity : ComponentActivity() {
                 FrameScopeRoot(
                     container = app,
                     widthSizeClass = windowSize.widthSizeClass,
-                    onRequestOverlayPermission = { requestOverlayPermission() }
+                    onRequestOverlayPermission = { requestOverlayPermission() },
+                    onRequestScreenRecord = { requestScreenRecording() }
                 )
             }
         }
@@ -93,6 +108,13 @@ class MainActivity : ComponentActivity() {
                 Uri.parse("package:$packageName")
             )
             overlayPermission.launch(intent)
+        }
+    }
+
+    fun requestScreenRecording() {
+        val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+        if (mediaProjectionManager != null) {
+            mediaProjectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
         }
     }
 }

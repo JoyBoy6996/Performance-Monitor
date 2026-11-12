@@ -1,11 +1,13 @@
 package com.framescope.monitor.shell
 
+import android.content.Context
+import android.content.SharedPreferences
 import java.io.File
 import java.math.BigInteger
-import java.security.MessageDigest
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.MessageDigest
 import java.security.Signature
 import java.security.interfaces.RSAPrivateCrtKey
 import java.security.spec.PKCS8EncodedKeySpec
@@ -13,38 +15,27 @@ import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
 
 /**
- * Host side of the ADB key exchange.
+ * Host side of the ADB key exchange with persistent RSA key storage.
  *
- * `adbd` does not accept a normal X.509 key. It expects the 524 byte "Android
- * pubkey" blob that the platform's own `adb` tool uses, base64 encoded. The
- * layout (little endian integers, matching AOSP
- * `libcrypto_utils/android_pubkey.cpp`) is:
+ * `adbd` expects the 524-byte Android pubkey blob (little-endian integers, matching
+ * AOSP libcrypto_utils/android_pubkey.cpp), base64 encoded.
  *
- * ```
- * uint32   modulus size in words        (64 for a 2048 bit key)
- * uint32   n0inv = -1 / n[0] mod 2^32
- * byte[256] modulus, little endian
- * byte[256] rr = R^2 mod n, little endian
- * uint32   public exponent
- * ```
- *
- * The same key also has to survive app restarts, otherwise the phone asks for
- * "Allow USB debugging?" on every launch, so the pair is kept in the app's
- * private storage.
+ * To avoid repeating the "Allow USB debugging?" prompt after every connection, app restart,
+ * or reboot, the RSA key pair is generated exactly ONCE and preserved persistently in both
+ * internal storage files and SharedPreferences.
  */
-class AdbKeyStore(private val directory: File) {
+class AdbKeyStore(
+    private val directory: File,
+    private val context: Context? = null
+) {
 
     private val privateFile = File(directory, "adb_host_key.pk8")
     private val publicFile = File(directory, "adb_host_key.pk8.pub")
-
-    /**
-     * Remembers that the phone keeps this key.
-     *
-     * The stamp is written after the key was found in the phone's own key
-     * store, so the app knows it will not have to ask for the debugging
-     * permission again.
-     */
     private val storedStamp = File(directory, "authorised.stamp")
+
+    private val sp: SharedPreferences? by lazy {
+        context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
 
     @Volatile
     private var keyPair: KeyPair? = null
@@ -57,27 +48,74 @@ class AdbKeyStore(private val directory: File) {
     val hasKey: Boolean get() = runCatching { ensure() }.isSuccess
 
     private fun load() {
-        if (!privateFile.exists() || !publicFile.exists()) return
-        val privateKey = KeyFactory.getInstance("RSA")
-            .generatePrivate(PKCS8EncodedKeySpec(privateFile.readBytes()))
-        val publicKey = KeyFactory.getInstance("RSA")
-            .generatePublic(X509EncodedKeySpec(publicFile.readBytes()))
-        keyPair = KeyPair(publicKey, privateKey)
+        // 1. Try loading from files first
+        if (privateFile.exists() && publicFile.exists()) {
+            runCatching {
+                val privateKey = KeyFactory.getInstance("RSA")
+                    .generatePrivate(PKCS8EncodedKeySpec(privateFile.readBytes()))
+                val publicKey = KeyFactory.getInstance("RSA")
+                    .generatePublic(X509EncodedKeySpec(publicFile.readBytes()))
+                keyPair = KeyPair(publicKey, privateKey)
+                return
+            }
+        }
+
+        // 2. Fallback to SharedPreferences if file was absent or corrupted
+        val privBase64 = sp?.getString(KEY_PRIVATE, null)
+        val pubBase64 = sp?.getString(KEY_PUBLIC, null)
+        if (!privBase64.isNullOrBlank() && !pubBase64.isNullOrBlank()) {
+            runCatching {
+                val privBytes = Base64.getDecoder().decode(privBase64)
+                val pubBytes = Base64.getDecoder().decode(pubBase64)
+                val privateKey = KeyFactory.getInstance("RSA")
+                    .generatePrivate(PKCS8EncodedKeySpec(privBytes))
+                val publicKey = KeyFactory.getInstance("RSA")
+                    .generatePublic(X509EncodedKeySpec(pubBytes))
+                val pair = KeyPair(publicKey, privateKey)
+                keyPair = pair
+                // Restore files on disk
+                runCatching {
+                    directory.mkdirs()
+                    privateFile.writeBytes(privBytes)
+                    publicFile.writeBytes(pubBytes)
+                }
+            }
+        }
     }
 
-    private fun ensure(): KeyPair {
+    fun ensure(): KeyPair {
         keyPair?.let { return it }
         synchronized(this) {
             keyPair?.let { return it }
+
+            // Check load once more under lock
+            load()
+            keyPair?.let { return it }
+
+            // Generate RSA 2048 key pair ONCE
             val generator = KeyPairGenerator.getInstance("RSA")
             generator.initialize(2048)
             val pair = generator.generateKeyPair()
             keyPair = pair
+
+            val privBytes = pair.private.encoded
+            val pubBytes = pair.public.encoded
+
+            // Persist to disk files
             runCatching {
                 directory.mkdirs()
-                privateFile.writeBytes(pair.private.encoded)
-                publicFile.writeBytes(pair.public.encoded)
+                privateFile.writeBytes(privBytes)
+                publicFile.writeBytes(pubBytes)
             }
+
+            // Persist to SharedPreferences backup
+            runCatching {
+                sp?.edit()
+                    ?.putString(KEY_PRIVATE, Base64.getEncoder().encodeToString(privBytes))
+                    ?.putString(KEY_PUBLIC, Base64.getEncoder().encodeToString(pubBytes))
+                    ?.apply()
+            }
+
             return pair
         }
     }
@@ -93,10 +131,6 @@ class AdbKeyStore(private val directory: File) {
 
     /**
      * The fingerprint the phone shows in its "Allow USB debugging?" dialog.
-     *
-     * The platform hashes the DER encoded public key and prints it as pairs of
-     * hex digits, so the app can show the same string and the user can tell
-     * at a glance whether the prompt on the screen belongs to FrameScope.
      */
     fun publicKeyFingerprint(): String {
         val digest = MessageDigest.getInstance("MD5").digest(ensure().public.encoded)
@@ -105,12 +139,9 @@ class AdbKeyStore(private val directory: File) {
 
     /**
      * True when the phone was seen keeping this key in its own key store.
-     *
-     * A key that lives there is accepted silently, so the "Allow USB
-     * debugging?" prompt never comes back - not after a reconnect and not
-     * after a reboot.
      */
-    val authorisationStored: Boolean get() = storedStamp.exists()
+    val authorisationStored: Boolean
+        get() = storedStamp.exists() || (sp?.getBoolean(KEY_AUTHORISED, false) == true)
 
     /** Records that the phone keeps this key. */
     fun markAuthorisationStored() {
@@ -118,11 +149,17 @@ class AdbKeyStore(private val directory: File) {
             directory.mkdirs()
             storedStamp.writeText(publicKeyFingerprint())
         }
+        runCatching {
+            sp?.edit()?.putBoolean(KEY_AUTHORISED, true)?.apply()
+        }
     }
 
     /** Forgets that the phone keeps this key. */
     fun clearAuthorisationStored() {
         runCatching { storedStamp.delete() }
+        runCatching {
+            sp?.edit()?.putBoolean(KEY_AUTHORISED, false)?.apply()
+        }
     }
 
     /** The raw 524 byte Android public key blob. */
@@ -150,10 +187,7 @@ class AdbKeyStore(private val directory: File) {
     }
 
     /**
-     * Signs the authentication token the way `adbd` expects it: a plain
-     * SHA1withRSA signature over the raw token bytes. The device verifies it
-     * with `RSA_verify(NID_sha1, token, ...)` against the key it stores, so the
-     * payload of the AUTH message must be the bare signature and nothing else.
+     * Signs the authentication token with SHA1withRSA.
      */
     fun sign(token: ByteArray): ByteArray? = runCatching {
         val signature = Signature.getInstance("SHA1withRSA")
@@ -188,5 +222,10 @@ class AdbKeyStore(private val directory: File) {
         private const val ENCODED_SIZE = 4 + 4 + MODULUS_SIZE + MODULUS_SIZE + 4
         const val COMMENT = "framescope@localhost"
         private val TWO_POW_32 = BigInteger.ONE.shiftLeft(32)
+
+        private const val PREFS_NAME = "framescope_adb_keystore"
+        private const val KEY_PRIVATE = "rsa_private_pkcs8"
+        private const val KEY_PUBLIC = "rsa_public_x509"
+        private const val KEY_AUTHORISED = "is_authorised"
     }
 }

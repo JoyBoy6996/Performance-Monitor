@@ -21,9 +21,8 @@ data class AccessStatus(
  * Owns the available privilege backends and picks the best one that works.
  *
  * Order of preference: Shizuku -> local ADB bridge -> root -> basic.
- *
- * The hub also remembers why the last command failed, so the interface can
- * explain an empty dashboard instead of showing a row of dashes.
+ * When Shizuku is installed and running, it is always prioritized over local ADB
+ * to avoid unnecessary ADB prompts.
  */
 class ShellHub(
     private val shizuku: ShellRunner = ShizukuRunner(),
@@ -45,6 +44,9 @@ class ShellHub(
     @Volatile
     private var lastProbeAt = 0L
 
+    @Volatile
+    private var consecutiveFailures = 0
+
     /** The Shizuku backend, when that is the one in use. */
     val shizukuRunner: ShizukuRunner? get() = shizuku as? ShizukuRunner
 
@@ -53,9 +55,6 @@ class ShellHub(
 
     /**
      * How far the debugging authorisation on the phone has come.
-     *
-     * The interface uses it to tell the user whether the "Allow USB
-     * debugging?" prompt is still going to come back.
      */
     val adbAuthState: StateFlow<AdbAuthState> =
         adbRunner?.authState ?: MutableStateFlow(AdbAuthState.UNKNOWN)
@@ -65,11 +64,6 @@ class ShellHub(
 
     /**
      * Re-checks every backend and refreshes [status].
-     *
-     * When the ADB bridge is the wanted backend but the phone has no listener
-     * on the port - which is what a reboot leaves behind - the bridge is
-     * switched back on with root or Shizuku. That is what makes the setup a
-     * one-time thing: the app repairs the bridge by itself afterwards.
      */
     suspend fun refresh(
         preferred: String? = null,
@@ -84,22 +78,25 @@ class ShellHub(
     ): AccessStatus {
         lastProbeAt = System.currentTimeMillis()
         val mode = preferred?.lowercase()
+
+        // Order: Shizuku is always prioritized first in AUTO mode
         val candidates: List<ShellRunner> = when (mode) {
             "shizuku" -> listOf(shizuku)
             "adb" -> listOf(adb)
             "root" -> listOf(root)
             else -> listOf(shizuku, adb, root)
         }
+
         for (candidate in candidates) {
             var available = runCatching { candidate.isAvailable() }.getOrDefault(false)
             if (!available && candidate === adb && allowAdbBootstrap) {
-                // No listener on the port. Root or Shizuku can switch it back
-                // on, so the user never has to run the setup twice.
+                // If ADB is requested and not available, try to repair or bootstrap
                 available = ensureAdbBridge(adbPort)
             }
             if (available) {
                 active = candidate
                 _lastError.value = null
+                consecutiveFailures = 0
                 _status.value = AccessStatus(
                     backendId = candidate.id,
                     backendLabel = candidate.label,
@@ -110,6 +107,7 @@ class ShellHub(
                 return _status.value
             }
         }
+
         active = null
         val detail = when (mode) {
             "shizuku" -> shizuku.unavailableReason()
@@ -131,8 +129,7 @@ class ShellHub(
 
     /**
      * Looks for the ADB daemon the phone started itself and turns it into a
-     * fixed bridge, so the app can be used without a computer and without
-     * Wi-Fi. Returns a line for the interface.
+     * fixed bridge.
      */
     suspend fun findBridgeOnPhone(port: Int): String = withContext(Dispatchers.IO) {
         findBridgeOnPhoneBlocking(port)
@@ -142,30 +139,23 @@ class ShellHub(
         val repairer = adb as? AdbBridgeRepairer
             ?: return "This build cannot repair the bridge."
         val discovered = runCatching { repairer.discoverLocalAdbPort() }.getOrNull()
-            ?: return "No ADB daemon on this phone. Turn on Wireless debugging in " +
-                "Developer options, then try again."
+            ?: return "No ADB daemon on this phone. Turn on Wireless debugging in Developer options, then try again."
         val switched = runCatching { repairer.requestTcpPort(port, discovered) }.getOrDefault(false)
         if (!switched) {
             return "The ADB daemon on port $discovered refused to move to port $port."
         }
-        delay(2_500)
+        delay(2_000)
         val working = runCatching { adb.isAvailable() }.getOrDefault(false)
         return if (working) {
-            "The bridge is up on port $port. It works with Wi-Fi off and reconnects by itself."
+            "The bridge is up on port $port. It reconnects automatically."
         } else {
             "The bridge was moved to port $port but has not answered yet. Re-check in a moment."
         }
     }
 
-    /** Points the ADB backend at another endpoint. */
-    /**
-     * A manual re-check.
-     *
-     * It clears the "the key was already offered" flag, so the phone can ask
-     * for the debugging permission again after the prompt was missed.
-     */
     suspend fun forceRecheck(preferred: String?, adbPort: Int, allowAdbBootstrap: Boolean) {
         (adb as? AdbTcpRunner)?.resetAuthorisation()
+        consecutiveFailures = 0
         refresh(preferred = preferred, adbPort = adbPort, allowAdbBootstrap = allowAdbBootstrap)
     }
 
@@ -178,24 +168,31 @@ class ShellHub(
         withContext(Dispatchers.IO) { execBlocking(command, timeoutMs) }
 
     private suspend fun execBlocking(command: String, timeoutMs: Long): ShellResult {
-        val runner = active ?: throw ShellUnavailable(
-            _lastError.value ?: "No privileged backend available"
-        )
+        val runner = active ?: run {
+            // Lazy refresh if no runner is currently selected
+            val status = refreshBlocking(null, 5555, false)
+            active ?: throw ShellUnavailable(status.detail.ifBlank { "No privileged backend available" })
+        }
+
         return try {
             val result = runner.exec(command, timeoutMs)
             _lastError.value = null
+            consecutiveFailures = 0
             result
         } catch (e: Exception) {
             _lastError.value = e.message ?: "The command failed"
-            // The active backend died - look for another one, but not on every single
-            // failure, otherwise a broken bridge gets probed in a tight loop.
-            if (System.currentTimeMillis() - lastProbeAt > PROBE_COOLDOWN_MS) {
+            consecutiveFailures++
+
+            // Exponential backoff cooldown before probing again
+            val backoffMs = (BASE_COOLDOWN_MS * (1 shl minOf(consecutiveFailures - 1, 4))).coerceIn(BASE_COOLDOWN_MS, MAX_COOLDOWN_MS)
+            if (System.currentTimeMillis() - lastProbeAt > backoffMs) {
                 refresh()
                 val fallback = active
                 if (fallback != null && fallback !== runner) {
                     val retry = runCatching { fallback.exec(command, timeoutMs) }.getOrNull()
                     if (retry != null) {
                         _lastError.value = null
+                        consecutiveFailures = 0
                         return retry
                     }
                 }
@@ -209,17 +206,6 @@ class ShellHub(
             runCatching { execBlocking(command, timeoutMs) }.getOrNull()
         }
 
-    /**
-     * Brings the phone's own ADB bridge back up.
-     *
-     * `adb tcpip` only lasts until the next reboot, after which nothing is
-     * listening on the port any more. The shell identity that `adb` uses can
-     * set the property itself, so with root or Shizuku the app restarts the
-     * daemon in TCP mode and the bridge is back.
-     *
-     * The bridge lives on the loopback interface, so it works with Wi-Fi off,
-     * on mobile data, or on any network at all.
-     */
     suspend fun ensureAdbBridge(port: Int): Boolean = withContext(Dispatchers.IO) {
         ensureAdbBridgeBlocking(port)
     }
@@ -227,9 +213,6 @@ class ShellHub(
     private suspend fun ensureAdbBridgeBlocking(port: Int): Boolean {
         if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
 
-        // The phone's own wireless debugging starts the ADB daemon on a random
-        // port. Find it and ask it to move to a fixed port, which makes the
-        // bridge work with no computer and no Wi-Fi involved.
         val repairer = adb as? AdbBridgeRepairer
         if (repairer != null) {
             val discovered = runCatching { repairer.discoverLocalAdbPort() }.getOrNull()
@@ -238,7 +221,7 @@ class ShellHub(
                     repairer.requestTcpPort(port, discovered)
                 }.getOrDefault(false)
                 if (switched) {
-                    delay(2_500)
+                    delay(2_000)
                     if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
                 }
             }
@@ -247,6 +230,7 @@ class ShellHub(
         val helper = listOf(root, shizuku).firstOrNull {
             runCatching { it.isAvailable() }.getOrDefault(false)
         } ?: return false
+
         runCatching {
             helper.exec(
                 "setprop persist.adb.tcp.port $port; " +
@@ -255,14 +239,15 @@ class ShellHub(
                 8_000
             )
         }
-        repeat(6) {
-            delay(700)
+        repeat(5) {
+            delay(800)
             if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
         }
         return false
     }
 
     companion object {
-        private const val PROBE_COOLDOWN_MS = 5_000L
+        private const val BASE_COOLDOWN_MS = 3_000L
+        private const val MAX_COOLDOWN_MS = 30_000L
     }
 }

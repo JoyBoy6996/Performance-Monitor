@@ -5,20 +5,28 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import com.framescope.monitor.FrameScopeApp
 import com.framescope.monitor.MainActivity
 import com.framescope.monitor.R
+import com.framescope.monitor.core.AppSettings
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.OverlayStyle
 import com.framescope.monitor.core.SystemMetrics
@@ -27,14 +35,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
- * Floating overlay that shows live FPS and device telemetry on top of any app.
- *
- * Plain Android views are used on purpose: they cost almost nothing to draw,
- * which matters when the phone is already rendering a game at 120 fps.
+ * Floating telemetry overlay that displays real-time FPS and system stats on top of any app.
  */
 class OverlayService : Service() {
 
@@ -50,29 +55,46 @@ class OverlayService : Service() {
     private var graphView: GraphView? = null
     private val rowViews = mutableMapOf<String, TextView>()
     private val rowLabels = mutableMapOf<String, TextView>()
+
     private var expanded = true
     private var dragStartX = 0f
     private var dragStartY = 0f
     private var startX = 0f
     private var startY = 0f
     private var dragging = false
-    private var builtRows = ""
+
     private var currentStyle = OverlayStyle.CLASSIC
-    private var currentScale = 1f
-    private var graphVisible = true
+    private var currentScale = 1.0f
+    private var currentOpacity = 0.88f
+    private var currentRows = ""
+    private var showGraph = true
     private var graphHeight = 54
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         createChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
+
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
         buildOverlay()
         observe()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            removeOverlay()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -81,28 +103,111 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
-        root?.let { runCatching { windowManager.removeView(it) } }
-        root = null
+        removeOverlay()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun removeOverlay() {
+        root?.let { view ->
+            runCatching { windowManager.removeView(view) }
+        }
+        root = null
+    }
+
     private fun buildOverlay() {
-        val app = applicationContext as FrameScopeApp
+        if (!Settings.canDrawOverlays(this)) return
+
+        val app = applicationContext as? FrameScopeApp ?: return
         val settings = app.container.settings
-        val style = runCatching {
+
+        currentStyle = runCatching {
             OverlayStyle.valueOf(settings.overlayStyle.value)
         }.getOrDefault(OverlayStyle.CLASSIC)
+        currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
+        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
+        currentRows = settings.overlayRows.value
+        showGraph = settings.overlayShowGraph.value
+        graphHeight = settings.overlayGraphHeight.value
 
-        if (style == OverlayStyle.PILL) {
-            buildPill(settings)
-            return
+        rowViews.clear()
+        rowLabels.clear()
+        removeOverlay()
+
+        when (currentStyle) {
+            OverlayStyle.PILL -> buildPill(settings)
+            OverlayStyle.RTSS -> buildRtss(settings)
+            else -> buildStandard(settings)
+        }
+    }
+
+    private fun buildPill(settings: AppSettings) {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val padH = OverlayViews.dp(this@OverlayService, 12f * currentScale)
+            val padV = OverlayViews.dp(this@OverlayService, 6f * currentScale)
+            setPadding(padH, padV, padH, padV)
+            background = GradientDrawable().apply {
+                cornerRadius = OverlayViews.dp(this@OverlayService, 100f).toFloat()
+                setColor(Color.parseColor("#E60B1020"))
+                setStroke(OverlayViews.dp(this@OverlayService, 1f), Color.parseColor("#44FFFFFF"))
+            }
         }
 
+        fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 16f * currentScale)
+        unitText = OverlayViews.label(this, "FPS", Color.parseColor("#94A3B8")).apply {
+            textSize = 9f * currentScale
+        }
+        frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 11f * currentScale)
+
+        layout.addView(fpsText)
+        layout.addView(unitText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 3f) })
+        layout.addView(frameText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) })
+
+        attachTouchAndWindow(layout, settings)
+    }
+
+    private fun buildRtss(settings: AppSettings) {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val pad = OverlayViews.dp(this@OverlayService, 10f)
+            val pad = OverlayViews.dp(this@OverlayService, 8f * currentScale)
+            setPadding(pad, pad, pad, pad)
+            background = GradientDrawable().apply {
+                cornerRadius = OverlayViews.dp(this@OverlayService, 6f).toFloat()
+                setColor(Color.parseColor("#D9000000"))
+                setStroke(OverlayViews.dp(this@OverlayService, 1f), Color.parseColor("#55FFA500"))
+            }
+        }
+
+        titleText = OverlayViews.label(this, "FRAMESCOPE", Color.parseColor("#FFA500")).apply {
+            textSize = 9f * currentScale
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        layout.addView(titleText)
+
+        val header = OverlayViews.row(this)
+        fpsText = OverlayViews.value(this, "--", Color.parseColor("#00FF66"), 20f * currentScale)
+        frameText = OverlayViews.value(this, "", Color.parseColor("#FFA500"), 12f * currentScale)
+        header.addView(fpsText)
+        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        layout.addView(header)
+
+        populateRows(layout, settings, isRtss = true)
+        attachTouchAndWindow(layout, settings)
+    }
+
+    private fun buildStandard(settings: AppSettings) {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = OverlayViews.dp(this@OverlayService, 10f * currentScale)
             setPadding(pad, pad, pad, pad)
             background = GradientDrawable().apply {
                 cornerRadius = OverlayViews.dp(this@OverlayService, 14f).toFloat()
@@ -111,59 +216,81 @@ class OverlayService : Service() {
             }
         }
 
-        titleText = OverlayViews.label(this, "FRAMESCOPE", Color.parseColor("#64748B")).apply {
-            textSize = 8f
+        if (currentStyle == OverlayStyle.DETAILED) {
+            titleText = OverlayViews.label(this, "FRAMESCOPE", Color.parseColor("#64748B")).apply {
+                textSize = 8f * currentScale
+            }
+            layout.addView(titleText)
         }
-        layout.addView(titleText)
 
         val header = OverlayViews.row(this)
-        fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 26f)
-        frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 12f)
+        fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 24f * currentScale)
+        frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 12f * currentScale)
         header.addView(fpsText)
-        header.addView(
-            frameText,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
+        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         layout.addView(header)
 
-        graphView = GraphView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                OverlayViews.dp(this@OverlayService, graphHeight.toFloat())
-            ).apply { topMargin = OverlayViews.dp(this@OverlayService, 4f) }
+        if (showGraph && currentStyle != OverlayStyle.COMPACT) {
+            graphView = GraphView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    OverlayViews.dp(this@OverlayService, graphHeight.toFloat() * currentScale)
+                ).apply { topMargin = OverlayViews.dp(this@OverlayService, 4f) }
+            }
+            layout.addView(graphView)
         }
-        layout.addView(graphView)
 
-        val rows = settings.overlayRows.value.split(",").map { it.trim().uppercase() }.filter { it.isNotEmpty() }
-        builtRows = settings.overlayRows.value
+        if (currentStyle != OverlayStyle.COMPACT) {
+            populateRows(layout, settings, isRtss = false)
+        }
+
+        attachTouchAndWindow(layout, settings)
+    }
+
+    private fun populateRows(layout: LinearLayout, settings: AppSettings, isRtss: Boolean) {
+        val rows = settings.overlayRows.value.split(",")
+            .map { it.trim().uppercase() }
+            .filter { it.isNotEmpty() }
+
+        val labelColor = if (isRtss) Color.parseColor("#FFA500") else Color.parseColor("#7DD3FC")
+        val valColor = if (isRtss) Color.parseColor("#00FF66") else Color.parseColor("#E2E8F0")
+
         for (row in rows) {
             val rowView = OverlayViews.row(this)
-            val label = OverlayViews.label(this, row, Color.parseColor("#7DD3FC"))
-            rowView.addView(
-                label,
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            )
-            val value = OverlayViews.value(this, "--", Color.parseColor("#E2E8F0"), 12f)
+            val label = OverlayViews.label(this, row, labelColor).apply {
+                textSize = 9f * currentScale
+            }
+            rowView.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+            val value = OverlayViews.value(this, "--", valColor, 12f * currentScale)
             rowView.addView(value)
+
             rowViews[row] = value
             rowLabels[row] = label
             layout.addView(rowView)
         }
+    }
+
+    private fun attachTouchAndWindow(layout: LinearLayout, settings: AppSettings) {
+        val dm = resources.displayMetrics
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        }
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (settings.overlayX.value * resources.displayMetrics.widthPixels).toInt()
-            y = (settings.overlayY.value * resources.displayMetrics.heightPixels).toInt()
-            alpha = settings.overlayOpacity.value
+            x = (settings.overlayX.value * dm.widthPixels).toInt().coerceIn(0, dm.widthPixels)
+            y = (settings.overlayY.value * dm.heightPixels).toInt().coerceIn(0, dm.heightPixels)
+            alpha = currentOpacity
         }
         params = lp
 
@@ -180,24 +307,23 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - dragStartX
                     val dy = event.rawY - dragStartY
-                    if (!dragging && (kotlin.math.abs(dx) > 6 || kotlin.math.abs(dy) > 6)) dragging = true
+                    if (!dragging && (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8)) {
+                        dragging = true
+                    }
                     if (dragging) {
-                        lp.x = (startX + dx).toInt()
-                        lp.y = (startY + dy).toInt()
+                        lp.x = (startX + dx).toInt().coerceIn(0, dm.widthPixels)
+                        lp.y = (startY + dy).toInt().coerceIn(0, dm.heightPixels)
                         runCatching { windowManager.updateViewLayout(layout, lp) }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     if (dragging) {
-                        val metrics = resources.displayMetrics
-                        val app = applicationContext as FrameScopeApp
-                        app.container.settings.overlayX.value =
-                            (lp.x.toFloat() / metrics.widthPixels).coerceIn(0f, 1f)
-                        app.container.settings.overlayY.value =
-                            (lp.y.toFloat() / metrics.heightPixels).coerceIn(0f, 1f)
+                        settings.overlayX.value = (lp.x.toFloat() / dm.widthPixels).coerceIn(0f, 1f)
+                        settings.overlayY.value = (lp.y.toFloat() / dm.heightPixels).coerceIn(0f, 1f)
                     } else {
-                        toggleExpanded()
+                        expanded = !expanded
+                        applyExpandedState()
                     }
                     true
                 }
@@ -209,309 +335,128 @@ class OverlayService : Service() {
         runCatching { windowManager.addView(layout, lp) }
     }
 
-    /**
-     * The pill: one number, one unit, nothing else.
-     *
-     * This is the meter you want on top of a game - small enough to ignore,
-     * big enough to read at a glance. A tap adds the frame time next to it.
-     */
-    private fun buildPill(settings: com.framescope.monitor.core.AppSettings) {
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            val padH = OverlayViews.dp(this@OverlayService, 12f)
-            val padV = OverlayViews.dp(this@OverlayService, 5f)
-            setPadding(padH, padV, padH, padV)
-            background = GradientDrawable().apply {
-                cornerRadius = OverlayViews.dp(this@OverlayService, 100f).toFloat()
-                setColor(Color.parseColor("#D9070C16"))
-                setStroke(OverlayViews.dp(this@OverlayService, 1f), Color.parseColor("#33FFFFFF"))
-            }
-        }
-
-        fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 15f)
-        frameText = OverlayViews.value(this, "", Color.parseColor("#94A3B8"), 10f)
-        unitText = OverlayViews.label(this, "FPS", Color.parseColor("#64748B")).apply {
-            textSize = 8f
-            includeFontPadding = false
-        }
-
-        layout.addView(fpsText)
-        layout.addView(
-            unitText,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginStart = OverlayViews.dp(this@OverlayService, 3f) }
-        )
-        layout.addView(
-            frameText,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) }
-        )
-
-        val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = (settings.overlayX.value * resources.displayMetrics.widthPixels).toInt()
-            y = (settings.overlayY.value * resources.displayMetrics.heightPixels).toInt()
-            alpha = settings.overlayOpacity.value
-        }
-        params = lp
-
-        layout.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    dragStartX = event.rawX
-                    dragStartY = event.rawY
-                    startX = lp.x.toFloat()
-                    startY = lp.y.toFloat()
-                    dragging = false
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - dragStartX
-                    val dy = event.rawY - dragStartY
-                    if (!dragging && (kotlin.math.abs(dx) > 6 || kotlin.math.abs(dy) > 6)) dragging = true
-                    if (dragging) {
-                        lp.x = (startX + dx).toInt()
-                        lp.y = (startY + dy).toInt()
-                        runCatching { windowManager.updateViewLayout(layout, lp) }
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (dragging) {
-                        val metrics = resources.displayMetrics
-                        val app = applicationContext as FrameScopeApp
-                        app.container.settings.overlayX.value =
-                            (lp.x.toFloat() / metrics.widthPixels).coerceIn(0f, 1f)
-                        app.container.settings.overlayY.value =
-                            (lp.y.toFloat() / metrics.heightPixels).coerceIn(0f, 1f)
-                    } else {
-                        toggleExpanded()
-                    }
-                    true
-                }
-                else -> false
-            }
-        }
-
-        root = layout
-        runCatching { windowManager.addView(layout, lp) }
-    }
-
-    /** Rebuilds the overlay so row changes are applied without a restart. */
-    private fun rebuild() {
-        val app = applicationContext as FrameScopeApp
-        builtRows = app.container.settings.overlayRows.value
-        root?.let { runCatching { windowManager.removeView(it) } }
-        root = null
-        rowViews.clear()
-        rowLabels.clear()
-        unitText = null
-        buildOverlay()
-    }
-
-    private fun toggleExpanded() {
-        expanded = !expanded
-        applyStyle()
+    private fun applyExpandedState() {
+        val visibility = if (expanded) View.VISIBLE else View.GONE
+        graphView?.visibility = visibility
+        rowViews.values.forEach { it.parent?.let { p -> (p as? View)?.visibility = visibility } }
     }
 
     private fun observe() {
-        val app = applicationContext as FrameScopeApp
+        val app = applicationContext as? FrameScopeApp ?: return
         val engine = app.container.engine
         val settings = app.container.settings
 
-        val extra = combine(settings.overlayRows.flow, settings.overlayOpacity.flow) { rows, opacity ->
-            rows to opacity
-        }
-        val prefs = combine(
-            settings.overlayStyle.flow.map { runCatching { OverlayStyle.valueOf(it) }.getOrDefault(OverlayStyle.CLASSIC) },
-            settings.overlayScale.flow,
-            settings.overlayShowGraph.flow,
-            settings.overlayGraphHeight.flow,
-            extra
-        ) { style, scale, showGraph, height, extras ->
-            OverlayPrefs(style, scale, showGraph, height, extras.first, extras.second)
-        }
-
         scope.launch {
-            combine(engine.fps, engine.system, prefs, engine.protectedForeground) { fps, system, p, protected ->
-                Quad(fps, system, p, protected)
-            }.collect { quad ->
-                if (quad.protected) {
+            combine(engine.fps, engine.system, engine.protectedForeground) { fps, system, protected ->
+                Triple(fps, system, protected)
+            }.collect { (fps, system, protected) ->
+                if (protected) {
                     root?.visibility = View.GONE
+                    return@collect
                 } else {
                     root?.visibility = View.VISIBLE
-                    params?.alpha = quad.prefs.opacity
-                    if (quad.prefs.rows != builtRows) {
-                        rebuild()
-                    }
-                    if (quad.prefs.style != currentStyle) {
-                        currentStyle = quad.prefs.style
-                        rebuild()
-                        return@collect
-                    }
-                    currentScale = quad.prefs.scale
-                    graphVisible = quad.prefs.showGraph
-                    graphHeight = quad.prefs.height
-                    applyStyle()
-                    render(quad.fps, quad.system)
                 }
+
+                updateValues(fps, system, settings)
+            }
+        }
+
+        // Rebuild when style or scale changes
+        scope.launch {
+            combine(
+                settings.overlayStyle.flow,
+                settings.overlayScale.flow,
+                settings.overlayOpacity.flow,
+                settings.overlayRows.flow,
+                settings.overlayShowGraph.flow
+            ) { style, scale, opacity, rows, graph ->
+                listOf(style, scale.toString(), opacity.toString(), rows, graph.toString())
+            }.collect {
+                buildOverlay()
             }
         }
     }
 
-    /** Applies style, scale and graph preferences to the overlay widgets. */
-    private fun applyStyle() {
-        if (currentStyle == OverlayStyle.PILL) {
-            titleText?.visibility = View.GONE
-            frameText?.visibility = if (expanded) View.VISIBLE else View.GONE
-            graphView?.visibility = View.GONE
-            unitText?.visibility = View.VISIBLE
-            rowViews.values.forEach { it.visibility = View.GONE }
-            rowLabels.values.forEach { it.visibility = View.GONE }
-            fpsText?.textSize = 15f * currentScale
-            frameText?.textSize = 10f * currentScale
-            unitText?.textSize = 8f * currentScale
-            return
+    private fun updateValues(fpsState: FpsState, system: SystemMetrics, settings: AppSettings) {
+        val target = settings.fpsThreshold.value
+        val fpsVal = fpsState.fps
+
+        fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
+        fpsText?.setTextColor(OverlayViews.fpsColor(fpsVal, target))
+
+        frameText?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else ""
+
+        if (fpsState.history.isNotEmpty()) {
+            graphView?.setValues(fpsState.history, target.toFloat())
         }
 
-        val showRows = expanded && currentStyle != OverlayStyle.COMPACT
-        val showFrame = expanded && currentStyle != OverlayStyle.COMPACT
-        val showGraph = expanded && graphVisible && currentStyle != OverlayStyle.RTSS
-        val showTitle = currentStyle == OverlayStyle.RTSS || currentStyle == OverlayStyle.DETAILED
-
-        titleText?.visibility = if (showTitle) View.VISIBLE else View.GONE
-        frameText?.visibility = if (showFrame) View.VISIBLE else View.GONE
-        graphView?.visibility = if (showGraph) View.VISIBLE else View.GONE
-        rowViews.values.forEach { it.visibility = if (showRows) View.VISIBLE else View.GONE }
-        rowLabels.forEach { (key, view) ->
-            view.visibility = if (showRows) View.VISIBLE else View.GONE
-            if (currentStyle == OverlayStyle.RTSS) {
-                view.text = key
-                view.setTextColor(RTSS_COLORS[key] ?: Color.parseColor("#7DD3FC"))
-            }
+        val appName = (applicationContext as? FrameScopeApp)?.container?.engine?.foregroundApp?.value.orEmpty()
+        titleText?.text = if (currentStyle == OverlayStyle.RTSS && appName.isNotBlank()) {
+            appName.substringAfterLast('.').uppercase()
+        } else {
+            "FRAMESCOPE"
         }
 
-        fpsText?.textSize = 26f * currentScale
-        frameText?.textSize = 12f * currentScale
-        rowViews.values.forEach { it.textSize = 12f * currentScale }
-        rowLabels.values.forEach { it.textSize = 9f * currentScale }
-
-        graphView?.layoutParams = graphView?.layoutParams?.apply {
-            height = OverlayViews.dp(this@OverlayService, graphHeight.toFloat())
-        }
-    }
-
-    private fun render(fps: FpsState, system: SystemMetrics) {
-        val target = (applicationContext as FrameScopeApp).container.settings.fpsThreshold.value
-        fpsText?.text = if (fps.valid) String.format("%.0f", fps.fps) else "--"
-        fpsText?.setTextColor(OverlayViews.fpsColor(fps.fps, target))
-        frameText?.text = if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else ""
-
-        graphView?.setValues(fps.history, target.toFloat())
-
-        for ((key, view) in rowViews) {
-            view.text = when (key) {
-                "FPS" -> if (fps.valid) String.format("%.0f", fps.fps) else "--"
-                "FRAME" -> if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else "--"
-                "CPU" -> system.cpuPercent?.let { "${it.toInt()}%" } ?: "--"
-                "CPUF" -> system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
-                "GPU" -> system.gpuFreqMHz?.let { "$it MHz" } ?: system.gpuName?.let { it.take(14) } ?: "--"
-                "TEMP" -> system.thermalMaxC?.let { "${it.toInt()}°" } ?: "--"
-                "BAT" -> system.batteryLevel?.let { "$it%" } ?: "--"
-                "POWER" -> system.powerWatts?.let { "${String.format("%.2f", it)} W" } ?: "--"
-                "MEM" -> system.ramPercent?.let { "$it%" } ?: "--"
-                "REFRESH" -> system.refreshHz?.let { "${it.toInt()} Hz" } ?: "--"
-                "APP" -> appLabel()
-                else -> "--"
-            }
-        }
-        titleText?.text = if (currentStyle == OverlayStyle.RTSS) appLabel().uppercase() else "FRAMESCOPE"
-    }
-
-    private fun appLabel(): String {
-        val pkg = (applicationContext as FrameScopeApp).container.engine.foregroundApp.value
-        if (pkg.isNullOrBlank()) return "--"
-        return runCatching {
-            val pm = packageManager
-            pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
-        }.getOrDefault(pkg)
+        // Support all 11 rows: FPS, FRAME, CPU, CPUF, GPU, TEMP, BAT, POWER, MEM, REFRESH, APP
+        rowViews["FPS"]?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
+        rowViews["FRAME"]?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else "--"
+        rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
+        rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
+        rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")
+        rowViews["TEMP"]?.text = system.thermalMaxC?.let { "%.1f°C".format(it) }
+            ?: (system.batteryTempC?.let { "%.1f°C".format(it) } ?: "--")
+        rowViews["BAT"]?.text = system.batteryLevel?.let { "$it%" } ?: "--"
+        rowViews["POWER"]?.text = system.powerWatts?.let { "%.2f W".format(it) } ?: "--"
+        rowViews["MEM"]?.text = if (system.ramUsedGb != null && system.ramTotalGb != null) {
+            "%.1f/%.0fG".format(system.ramUsedGb, system.ramTotalGb)
+        } else system.ramPercent?.let { "$it%" } ?: "--"
+        rowViews["REFRESH"]?.text = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--"
+        rowViews["APP"]?.text = if (appName.isNotBlank()) appName.substringAfterLast('.') else "--"
     }
 
     private fun createChannel() {
-        val manager = getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.overlay_channel_name),
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = getString(R.string.overlay_channel_desc)
-            setShowBadge(false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "FPS Overlay Monitor",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows live performance statistics on top of screen"
+                setShowBadge(false)
+            }
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(channel)
         }
-        manager.createNotificationChannel(channel)
     }
 
     private fun buildNotification(): Notification {
-        val open = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        val openIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
         )
-        val stop = PendingIntent.getService(
-            this, 1, Intent(this, OverlayService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        val stopIntent = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, OverlayService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_IMMUTABLE
         )
-        return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText("Live FPS overlay is running")
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("FrameScope Overlay Active")
+            .setContentText("Monitoring FPS and device telemetry")
             .setSmallIcon(R.drawable.ic_tile)
-            .setContentIntent(open)
+            .setContentIntent(openIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
             .setOngoing(true)
-            .addAction(Notification.Action.Builder(null, "Stop", stop).build())
+            .setSilent(true)
             .build()
     }
 
-    private data class OverlayPrefs(
-        val style: OverlayStyle,
-        val scale: Float,
-        val showGraph: Boolean,
-        val height: Int,
-        val rows: String,
-        val opacity: Float
-    )
-
-    private data class Quad(
-        val fps: FpsState,
-        val system: SystemMetrics,
-        val prefs: OverlayPrefs,
-        val protected: Boolean
-    )
-
     companion object {
-        const val ACTION_STOP = "com.framescope.monitor.STOP_OVERLAY"
-        private const val CHANNEL_ID = "framescope_overlay"
-        private const val NOTIFICATION_ID = 4711
-
-        private val RTSS_COLORS = mapOf(
-            "GPU" to Color.parseColor("#4ADE80"),
-            "CPU" to Color.parseColor("#38BDF8"),
-            "TEMP" to Color.parseColor("#22D3EE"),
-            "BAT" to Color.parseColor("#FBBF24"),
-            "MEM" to Color.parseColor("#A78BFA"),
-            "FPS" to Color.parseColor("#FB7185")
-        )
+        const val ACTION_STOP = "com.framescope.monitor.overlay.STOP"
+        private const val CHANNEL_ID = "framescope_overlay_channel"
+        private const val NOTIFICATION_ID = 4040
     }
 }

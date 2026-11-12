@@ -1,5 +1,7 @@
 package com.framescope.monitor.metrics
 
+import android.app.usage.UsageStatsManager
+import android.content.Context
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
@@ -7,21 +9,18 @@ import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.roundToInt
 
 /**
- * Samples real frame timings from SurfaceFlinger.
+ * Samples real frame timings from SurfaceFlinger and system graphics pipelines.
  *
- * `dumpsys SurfaceFlinger --latency <layer>` returns the last ~128 presented
- * frames with nanosecond timestamps, which lets us compute a true frame time
- * graph even though we only poll a couple of times per second.
- *
- * The layer name has to match SurfaceFlinger's own name byte for byte, so the
- * names are taken verbatim from `dumpsys SurfaceFlinger --list` and every
- * candidate is verified before it is used. If no layer can be measured -
- * a game that renders into a surface we cannot name, a device that refuses
- * the dump - the sampler says so instead of inventing a number.
+ * `dumpsys SurfaceFlinger --latency <layer/package>` returns the nanosecond timestamps
+ * of presented frames (3-column layout: desired, actual, ready).
  */
-class FpsSampler(private val hub: ShellHub) {
+class FpsSampler(
+    private val hub: ShellHub,
+    var context: Context? = null
+) {
 
     private val _state = MutableStateFlow(FpsState())
     val state: StateFlow<FpsState> = _state.asStateFlow()
@@ -30,153 +29,189 @@ class FpsSampler(private val hub: ShellHub) {
     private var totalFrames = 0
     private var jankFrames = 0
     private val history = ArrayDeque<Float>()
-    private val frameLog = ArrayDeque<Float>()
 
-    /** Foreground package as seen by the last sample. */
     @Volatile
     var foregroundApp: String? = null
         private set
 
-    /** The layer that is currently being measured, for the diagnostics row. */
     @Volatile
     var measuredLayer: String? = null
         private set
 
-    /**
-     * What the last sample attempt saw.
-     *
-     * Every layer that was tried, how many frames it returned and why it was
-     * kept or dropped. Without this the failures are guesswork.
-     */
     private val _reports = MutableStateFlow<Map<String, String>>(emptyMap())
+    val reports: StateFlow<Map<String, String>> = _reports.asStateFlow()
 
-    /** The counters of the last timestats reading, per layer. */
     private val timeStatsBase = LinkedHashMap<String, TimeStats.Reading>()
-
-    /** The time the counters were read, in nanoseconds. */
     private var timeStatsAt: Long = 0L
     private var timeStatsEnabled = false
-
-    /** When the counters were last read, in nanoseconds. */
     private var timeStatsLastUse: Long = 0L
 
-    /** The raw counters dump, shown in the report so the shape is visible. */
     @Volatile
     var timeStatsDump: String = ""
         private set
-
-    /**
-     * The probe report of every app that was sampled, newest last.
-     *
-     * The report of the app the user was in is kept when FrameScope comes to
-     * the front, otherwise opening the app to read the report would replace
-     * the evidence of the app that misbehaved.
-     */
-    val reports: StateFlow<Map<String, String>> = _reports.asStateFlow()
 
     fun reset() {
         lastPresent = 0L
         totalFrames = 0
         jankFrames = 0
         history.clear()
-        frameLog.clear()
+        _state.value = FpsState()
     }
 
-    suspend fun sample(): FpsState {
+    suspend fun sample(targetFps: Int = 60): FpsState {
         val pkg = currentPackage()
         foregroundApp = pkg
+
         if (pkg.isNullOrBlank()) {
-            return invalid("no app", "no foreground app detected")
+            val s = invalid("No app", "Waiting for a foreground app")
+            _state.value = s
+            return s
         }
 
-        // The counters cost a little on every frame, so they are switched off
-        // again once they have not been needed for a while.
-        if (timeStatsEnabled && timeStatsLastUse > 0L &&
-            android.os.SystemClock.elapsedRealtimeNanos() - timeStatsLastUse > 30_000_000_000L
-        ) {
-            hub.execOrNull("dumpsys SurfaceFlinger --timestats -disable 2>/dev/null")
-            timeStatsEnabled = false
-            timeStatsBase.clear()
+        // 1. Primary: Query SurfaceFlinger latency for package or layers
+        val sfCmd = "{ dumpsys SurfaceFlinger --latency '$pkg' 2>/dev/null ; " +
+            ShellCommands.surfaceLatencyOfPackage(pkg) + " ; } | head -130"
+        val dump = hub.execOrNull(sfCmd, 2_500)?.out.orEmpty()
+
+        val parsed = parseSurfaceFlingerOutput(dump, targetFps)
+        if (parsed != null && parsed.valid) {
+            _state.value = parsed
+            return parsed
         }
 
-        // The layer list is walked inside the shell below, one round trip for
-        // every layer of the app.
-        // Read every candidate, then watch the one that drew most recently.
-        //
-        // An app often owns several layers - a background, a snapshot, the
-        // window itself - and only one of them is actually drawing. Picking the
-        // first that looks plausible is how the home screen or the settings app
-        // ended up showing the frame rate of a stale layer.
-        // One shell round trip for every layer of the app.
-        val dump = hub.execOrNull(ShellCommands.surfaceLatencyOfPackage(pkg))?.out.orEmpty()
-        val candidates = ArrayList<LayerSample>()
-        candidates += parseLayerLatencies(dump).filter { plausible(it.presents, it.refresh) }
-
-        if (candidates.isEmpty()) {
-            // No layer of the app answered. A game can render into a surface
-            // that does not carry its package name, so the newest layers are
-            // checked as well and the one that drew last wins.
-            val fallback = hub.execOrNull(
-                ShellCommands.surfaceLatencyOfPackage(pkg, fallback = true)
-            )?.out.orEmpty()
-            candidates += parseLayerLatencies(fallback).filter { plausible(it.presents, it.refresh) }
-            remember(pkg, buildProbeReport(pkg, dump) + "\nfallback (newest layers):\n" +
-                buildProbeReport(pkg, fallback).substringAfter('\n'))
-        } else {
-            remember(pkg, buildProbeReport(pkg, dump))
-        }
-        // The counters are read further down, so the section lands one sample
-        // later. It is evidence, not a reading.
-        if (timeStatsDump.isNotBlank()) {
-            val base = _reports.value[pkg].orEmpty()
-                .substringBefore("\nframe counters (SurfaceFlinger timestats):")
-            _reports.value = retainReport(_reports.value, pkg, base + timeStatsSection())
+        // 2. Fallback: Default SurfaceFlinger active latency
+        val defaultDump = hub.execOrNull(ShellCommands.surfaceLatencyDefault(), 1_500)?.out.orEmpty()
+        val defaultParsed = parseSingleLatencyBlock("default", defaultDump, targetFps)
+        if (defaultParsed != null && defaultParsed.valid) {
+            measuredLayer = "SurfaceFlinger (default)"
+            _state.value = defaultParsed
+            return defaultParsed
         }
 
-        for (sample in pickMostRecent(candidates)) {
-            val result = build(sample.name, sample.refresh, sample.presents) ?: continue
-            measuredLayer = sample.name
-            return result
-        }
-
-        // No usable SurfaceFlinger layer. A game that renders straight into a
-        // buffer queue has no frame timestamps, but SurfaceFlinger still counts
-        // the frames it presented for every layer.
-        val fromCounters = sampleTimeStats(pkg)
-        if (fromCounters != null) {
+        // 3. Fallback: SurfaceFlinger TimeStats
+        val fromTimeStats = sampleTimeStats(pkg)
+        if (fromTimeStats != null && fromTimeStats.valid) {
             timeStatsLastUse = android.os.SystemClock.elapsedRealtimeNanos()
-            return fromCounters
+            _state.value = fromTimeStats
+            return fromTimeStats
         }
 
+        // 4. Fallback: dumpsys gfxinfo
+        val fromGfx = sampleGfxInfo(pkg, targetFps)
+        if (fromGfx != null && fromGfx.valid) {
+            _state.value = fromGfx
+            return fromGfx
+        }
 
-        // Nothing from SurfaceFlinger: fall back to the app's own frame
-        // statistics, but only if the app is actually rendering continuously.
-        sampleGfxInfo(pkg)?.let { return it }
-        sampleDefaultLatency()?.let { return it }
-        return invalid("no data", "no frame timestamps for $pkg")
+        val noSignal = invalid("No signal", "SurfaceFlinger returned no frame data for $pkg")
+        _state.value = noSignal
+        return noSignal
     }
 
-    /**
-     * The frame rate from the counters SurfaceFlinger keeps per layer.
-     *
-     * The counter is cumulative, so the frame rate is how much it grew since
-     * the previous reading. It is the only source that also works for a game
-     * without a frame timeline.
-     */
+    private fun parseSurfaceFlingerOutput(dump: String, targetFps: Int): FpsState? {
+        if (dump.isBlank()) return null
+
+        // If batch output with @@@layer markers
+        if (dump.contains("@@@")) {
+            val sections = dump.split("@@@").filter { it.isNotBlank() }
+            for (section in sections) {
+                val lines = section.trim().lines()
+                val layerName = lines.firstOrNull() ?: continue
+                val content = lines.drop(1).joinToString("\n")
+                val state = parseSingleLatencyBlock(layerName, content, targetFps)
+                if (state != null && state.valid) {
+                    measuredLayer = layerName
+                    return state
+                }
+            }
+        }
+
+        // Single block
+        val state = parseSingleLatencyBlock(pkgOrLayer = foregroundApp ?: "layer", dump = dump, targetFps = targetFps)
+        if (state != null && state.valid) {
+            measuredLayer = foregroundApp
+            return state
+        }
+        return null
+    }
+
+    private fun parseSingleLatencyBlock(pkgOrLayer: String, dump: String, targetFps: Int): FpsState? {
+        val lines = dump.trim().lines().filter { it.isNotBlank() }
+        if (lines.size < 4) return null
+
+        val refreshPeriodNs = lines[0].trim().split(Regex("\\s+")).firstOrNull()?.toLongOrNull() ?: 16_666_666L
+        val effectiveRefreshNs = if (refreshPeriodNs in 2_000_000L..40_000_000L) refreshPeriodNs else 16_666_666L
+
+        val presents = ArrayList<Long>()
+        for (i in 1 until lines.size) {
+            val parts = lines[i].trim().split(Regex("\\s+")).mapNotNull { it.toLongOrNull() }
+            if (parts.isEmpty()) continue
+            // 3-column layout: desired, actual, ready
+            val actual = when {
+                parts.size >= 2 -> parts[1]
+                else -> parts[0]
+            }
+            if (actual > 0L && actual != Long.MAX_VALUE && actual != 9223372036854775807L) {
+                presents.add(actual)
+            }
+        }
+
+        if (presents.size < 3) return null
+
+        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+        if (deltas.size < 2) return null
+
+        val targetIntervalMs = if (targetFps > 0) 1000f / targetFps else (effectiveRefreshNs / 1_000_000f)
+        val jankThresholdNs = (targetIntervalMs * 1.5f * 1_000_000L).toLong()
+
+        var janks = 0
+        for (d in deltas) {
+            if (d > jankThresholdNs) janks++
+        }
+
+        val totalTimeNs = presents.last() - presents.first()
+        if (totalTimeNs <= 0L) return null
+
+        val fps = (presents.size - 1).toDouble() * 1_000_000_000.0 / totalTimeNs
+        if (fps <= 0.5 || fps > 360.0) return null
+
+        val frameTimeMs = (totalTimeNs.toDouble() / (presents.size - 1) / 1_000_000.0).toFloat()
+
+        history.add(fps.toFloat())
+        while (history.size > 20) history.removeFirst()
+
+        totalFrames += presents.size - 1
+        jankFrames += janks
+
+        return FpsState(
+            fps = fps.toFloat(),
+            frameTimeMs = frameTimeMs,
+            history = history.toList(),
+            totalFrames = totalFrames,
+            jankFrames = jankFrames,
+            source = "SurfaceFlinger latency",
+            surface = pkgOrLayer,
+            valid = true,
+            reason = null
+        )
+    }
+
     private suspend fun sampleTimeStats(packageName: String): FpsState? {
         if (!timeStatsEnabled) {
-            hub.execOrNull(ShellCommands.surfaceTimeStatsEnable())
+            hub.execOrNull(ShellCommands.surfaceTimeStatsEnable(), 2_000)
             timeStatsEnabled = true
         }
-        val dump = hub.execOrNull(ShellCommands.surfaceTimeStatsDump())?.out.orEmpty()
+        val dump = hub.execOrNull(ShellCommands.surfaceTimeStatsDump(), 2_500)?.out.orEmpty()
         timeStatsDump = dump
 
         val readings = TimeStats.readAll(dump, packageName)
         if (readings.isEmpty()) return null
+
         val now = android.os.SystemClock.elapsedRealtimeNanos()
         val previous = timeStatsBase.toMap()
         timeStatsBase.clear()
         readings.forEach { timeStatsBase[it.layer] = it }
+
         if (previous.isEmpty() || timeStatsAt <= 0L) {
             timeStatsAt = now
             return null
@@ -185,372 +220,115 @@ class FpsSampler(private val hub: ShellHub) {
         timeStatsAt = now
         if (elapsed <= 0L) return null
 
-        // A game owns several layers: the scene, a heads up display, a banner.
-        // The one that presents the most frames in this interval is the one
-        // that is actually drawing, so it is the one that is measured.
-        var best: Triple<TimeStats.Reading, Long, Long>? = null
+        var bestReading: TimeStats.Reading? = null
+        var maxGrowth = 0L
+        var jankGrowth = 0L
         for (reading in readings) {
             val before = previous[reading.layer] ?: continue
             val grown = reading.frames - before.frames
-            if (grown <= 0L) continue
-            val candidate = Triple(reading, grown, reading.jankyFrames - before.jankyFrames)
-            if (best == null || candidate.second > best.second) best = candidate
+            if (grown > maxGrowth) {
+                maxGrowth = grown
+                bestReading = reading
+                jankGrowth = (reading.jankyFrames - before.jankyFrames).coerceAtLeast(0L)
+            }
         }
-        val (reading, grown, jankyGrowth) = best ?: return null
 
-        val fps = grown.toDouble() * 1_000_000_000.0 / elapsed
-        if (fps < 1.0 || fps > 400.0) return null
+        val reading = bestReading ?: return null
+        if (maxGrowth <= 0L) return null
+
+        val fps = maxGrowth.toDouble() * 1_000_000_000.0 / elapsed
+        if (fps < 1.0 || fps > 360.0) return null
 
         measuredLayer = reading.layer
+        totalFrames += maxGrowth.toInt()
+        jankFrames += jankGrowth.toInt()
+
+        history.add(fps.toFloat())
+        while (history.size > 20) history.removeFirst()
+
         return FpsState(
             fps = fps.toFloat(),
             frameTimeMs = (1000.0 / fps).toFloat(),
-            totalFrames = reading.frames.toInt(),
-            jankFrames = jankyGrowth.coerceAtLeast(0L).toInt(),
-            source = "SurfaceFlinger counters",
-            surface = reading.layer,
-            valid = true
-        )
-    }
-
-    /** Keeps the report of an app so it survives a switch to another app. */
-    private fun remember(packageName: String, report: String) {
-        _reports.value = retainReport(_reports.value, packageName, report)
-    }
-
-    /** The shape of the counters dump, added to the report. */
-    private fun timeStatsSection(): String {
-        val dump = timeStatsDump
-        if (dump.isBlank()) return ""
-        return "\nframe counters (SurfaceFlinger timestats):\n" +
-            dump.lineSequence().filter { it.isNotBlank() }.take(10)
-                .joinToString("\n") { "      | " + it.trim().take(90) } + "\n"
-    }
-
-    /** The foreground package, read on its own so a failure is visible. */
-    private suspend fun currentPackage(): String? {
-        val out = hub.execOrNull(ShellCommands.foregroundPackage())?.out
-        if (out == null) return null
-        return Parsers.foregroundPackage(out)
-    }
-
-    /**
-     * Rejects series that cannot be a frame rate: too few frames, an interval
-     * that no display can produce, or a signal that does not cluster around a
-     * single interval (which is what idle gaps look like).
-     */
-    private fun plausible(presents: List<Long>, refreshNs: Long = 0L): Boolean =
-        plausibleSeries(presents, refreshNs)
-
-    /** Turns a frame series into the live state. */
-    private fun build(layer: String, refresh: Long, presents: List<Long>): FpsState? {
-        if (measuredLayer != null && measuredLayer != layer) {
-            // Timestamps from another layer cannot be continued.
-            lastPresent = 0L
-            history.clear()
-            frameLog.clear()
-        }
-        val newFrames = if (lastPresent <= 0L) {
-            presents.drop(1)
-        } else {
-            presents.filter { it > lastPresent }
-        }
-        if (newFrames.isEmpty()) {
-            // Nothing new since the last poll, keep the previous reading.
-            return _state.value.copy(surface = layer, source = "SurfaceFlinger")
-        }
-
-        var previous = if (lastPresent <= 0L) presents.first() else lastPresent
-        val deltas = ArrayList<Long>()
-        for (present in newFrames) {
-            val delta = present - previous
-            previous = present
-            if (delta <= 0L || delta > 1_000_000_000L) continue
-            deltas += delta
-        }
-        if (deltas.size < 2) return null
-        lastPresent = previous
-
-        val stats = computeFrameStats(deltas) ?: return null
-        val median = stats.medianNs
-        val janky = stats.jank
-        totalFrames += deltas.size
-        jankFrames += janky
-
-        for (delta in deltas) {
-            val fpsForFrame = (1_000_000_000.0 / delta).toFloat()
-            history.addLast(fpsForFrame)
-            frameLog.addLast(fpsForFrame)
-        }
-        while (history.size > 4096) history.removeFirst()
-        while (frameLog.size > 240) frameLog.removeFirst()
-
-        // The headline number is the median interval, which ignores the odd
-        // stall and matches what a capture card would report.
-        val medianFps = (1_000_000_000.0 / median).toFloat()
-        val shownFps = if (history.size >= 10) {
-            val recent = history.takeLast(10)
-            (recent.average() * 0.5 + medianFps * 0.5).toFloat()
-        } else {
-            medianFps
-        }
-
-        _state.value = FpsState(
-            fps = shownFps,
-            // The frame time always matches the frame rate that is shown.
-            frameTimeMs = (1000f / shownFps),
-            history = frameLog.toList(),
+            history = history.toList(),
             totalFrames = totalFrames,
             jankFrames = jankFrames,
-            source = "SurfaceFlinger",
-            surface = layer,
+            source = "SurfaceFlinger timestats",
+            surface = reading.layer,
             valid = true,
             reason = null
         )
-        return _state.value
     }
 
-    private fun invalid(source: String, reason: String): FpsState {
-        val next = _state.value.copy(valid = false, source = source, reason = reason)
-        _state.value = next
-        return next
-    }
+    private suspend fun sampleGfxInfo(pkg: String, targetFps: Int): FpsState? {
+        val out = hub.execOrNull(ShellCommands.gfxInfo(pkg), 2_000)?.out.orEmpty()
+        val timestamps = Parsers.parseGfxFrameStats(out)
+        if (timestamps.size < 4) return null
 
-    /**
-     * Fallback for apps that do not use a SurfaceView layer.
-     *
-     * `gfxinfo framestats` only records frames the app actually drew, so an
-     * idle app produces huge gaps. Those gaps are not frame times and are
-     * dropped; if nothing is left the app is simply not rendering.
-     */
-    private suspend fun sampleGfxInfo(pkg: String?): FpsState? {
-        if (pkg.isNullOrBlank()) return null
-        val dump = hub.execOrNull(ShellCommands.gfxInfo(pkg))?.out ?: return null
-        val frames = Parsers.parseGfxFrameStats(dump)
-        if (frames.size < 4) return null
+        val totalDurationNs = timestamps.last() - timestamps.first()
+        if (totalDurationNs <= 0L) return null
 
-        val deltas = frames.zipWithNext { a, b -> b - a }.filter { it > 0L && it < 1_000_000_000L }
-        if (deltas.size < 3) return null
-        val median = deltas.sorted()[deltas.size / 2]
-        // Longer than 100 ms between frames means the app was idle, not slow.
-        if (median > 100_000_000L) {
-            return invalid("idle", "$pkg is not drawing frames")
-        }
-        val clustered = deltas.filter { it >= median / 2 && it <= median * 2 }
-        if (clustered.size < deltas.size / 2) return null
+        val fps = (timestamps.size - 1).toDouble() * 1_000_000_000.0 / totalDurationNs
+        if (fps < 1.0 || fps > 360.0) return null
 
-        val stats = computeFrameStats(clustered) ?: return null
-        val frameTime = stats.frameTimeMs
-        val fps = stats.fps
-        val janky = stats.jank
-        totalFrames += clustered.size
-        jankFrames += janky
-        for (delta in clustered) {
-            val value = (1_000_000_000.0 / delta).toFloat()
-            history.addLast(value)
-            frameLog.addLast(value)
-        }
-        while (history.size > 4096) history.removeFirst()
-        while (frameLog.size > 240) frameLog.removeFirst()
+        val frameTimeMs = (totalDurationNs.toDouble() / (timestamps.size - 1) / 1_000_000.0).toFloat()
+        measuredLayer = "gfxinfo ($pkg)"
 
-        _state.value = FpsState(
-            fps = fps,
-            frameTimeMs = (1000f / fps),
-            history = frameLog.toList(),
-            totalFrames = totalFrames,
+        history.add(fps.toFloat())
+        while (history.size > 20) history.removeFirst()
+
+        return FpsState(
+            fps = fps.toFloat(),
+            frameTimeMs = frameTimeMs,
+            history = history.toList(),
+            totalFrames = totalFrames + timestamps.size - 1,
             jankFrames = jankFrames,
-            source = "HWUI gfxinfo",
+            source = "dumpsys gfxinfo",
             surface = pkg,
             valid = true,
             reason = null
         )
-        return _state.value
     }
 
-    /** Last resort: the latency of the layer SurfaceFlinger considers active. */
-    private suspend fun sampleDefaultLatency(): FpsState? {
-        val dump = hub.execOrNull(ShellCommands.surfaceLatencyDefault())?.out ?: return null
-        val (refresh, presents) = Parsers.parseLatency(dump)
-        if (!plausible(presents, refresh)) return null
-        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-        if (deltas.isEmpty()) return null
-        val median = deltas.sorted()[deltas.size / 2]
-        val fps = (1_000_000_000.0 / median).toFloat()
-        totalFrames += deltas.size
-        history.addLast(fps)
-        frameLog.addLast(fps)
-        while (history.size > 4096) history.removeFirst()
-        while (frameLog.size > 240) frameLog.removeFirst()
-        _state.value = FpsState(
-            fps = fps,
-            frameTimeMs = (1000f / fps),
-            history = frameLog.toList(),
-            totalFrames = totalFrames,
-            jankFrames = jankFrames,
-            source = "SurfaceFlinger (active)",
-            valid = true,
-            reason = null
-        )
-        return _state.value
-    }
-}
+    private suspend fun currentPackage(): String? {
+        // 1. Shell detection via dumpsys activity activities | grep mResumedActivity
+        val out = hub.execOrNull(
+            "{ dumpsys activity activities 2>/dev/null | grep -E 'topResumedActivity|mResumedActivity' ; " +
+                "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' ; } | head -3",
+            2_000
+        )?.out
 
-
-/**
- * The numbers behind a frame series.
- *
- * Kept separate from the sampler so the arithmetic can be checked on its own:
- * a 60 Hz stream has to come out as 60 fps and 16.7 ms, and a stream with
- * stalls has to count them as jank.
- */
-internal data class FrameStats(
-    val fps: Float,
-    val frameTimeMs: Float,
-    val medianNs: Long,
-    val deltas: List<Long>,
-    val jank: Int
-)
-
-internal fun computeFrameStats(deltas: List<Long>): FrameStats? {
-    if (deltas.size < 2) return null
-    val sorted = deltas.sorted()
-    val median = sorted[sorted.size / 2]
-    // Below a millisecond no display can show a frame, above 100 ms the app
-    // was idle rather than slow.
-    if (median < 1_000_000L || median > 100_000_000L) return null
-    val frameTime = (deltas.average() / 1_000_000.0).toFloat()
-    if (frameTime <= 0f) return null
-    val fps = (1000.0 / frameTime).toFloat()
-    // Jank is a frame that took noticeably longer than the usual interval.
-    val jank = deltas.count { it > median * 1.6 }
-    return FrameStats(fps = fps, frameTimeMs = frameTime, medianNs = median, deltas = deltas, jank = jank)
-}
-
-
-/** One SurfaceFlinger layer that produced a usable frame series. */
-internal data class LayerSample(
-    val name: String,
-    val refresh: Long,
-    val presents: List<Long>
-)
-
-/**
- * Orders the layers so the one that drew most recently comes first.
- *
- * The comparison is between the layers of the same device, so it does not
- * depend on the clock the timestamps come from.
- */
-internal fun pickMostRecent(samples: List<LayerSample>): List<LayerSample> =
-    samples.sortedByDescending { it.presents.last() }
-
-
-/**
- * Rejects series that cannot be a frame rate: too few frames, an interval
- * that no display can produce, or a signal that does not cluster around a
- * single interval (which is what idle gaps look like).
- */
-internal fun plausibleSeries(presents: List<Long>, refreshNs: Long = 0L): Boolean {
-    if (presents.size < 4) return false
-    val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-    if (deltas.size < 3) return false
-    val median = deltas.sorted()[deltas.size / 2]
-    if (median < 1_000_000L || median > 100_000_000L) return false
-    // A display cannot present frames many times faster than it refreshes.
-    // Timestamps that say otherwise are not present times.
-    if (refreshNs > 0L && median * 3 < refreshNs) return false
-    val clustered = deltas.count { it >= median / 2 && it <= median * 2 }
-    return clustered * 10 >= deltas.size * 6
-}
-
-/**
- * Adds the report of an app and drops the oldest one.
- *
- * The order matters: the most recently updated app is last, so the report of
- * the app that is on screen can be found without looking at the keys.
- */
-internal fun retainReport(
-    current: Map<String, String>,
-    packageName: String,
-    report: String
-): Map<String, String> {
-    val next = LinkedHashMap(current)
-    next.remove(packageName)
-    next[packageName] = report
-    while (next.size > 4) {
-        val oldest = next.keys.firstOrNull() ?: break
-        next.remove(oldest)
-    }
-    return next
-}
-
-/**
- * A readable account of what the layers of an app returned.
- *
- * It names every layer, the number of frames it had and why it was accepted
- * or dropped, so a wrong reading can be traced to the exact layer.
- */
-internal fun buildProbeReport(packageName: String, dump: String): String {
-    val out = StringBuilder()
-    out.append("app: ").append(packageName).append('\n')
-    var count = 0
-    for (block in dump.split("@@@")) {
-        val name = block.lines().firstOrNull()?.trim().orEmpty()
-        if (name.isEmpty()) continue
-        count++
-        val body = block.substringAfter('\n')
-        val (refresh, presents) = Parsers.parseLatency(body)
-        val reason = when {
-            presents.isEmpty() -> "no frames"
-            !plausibleSeries(presents, refresh) -> "rejected (median ${medianMs(presents)} ms)"
-            else -> "${presents.size} frames, median ${medianMs(presents)} ms, ok"
+        if (!out.isNullOrBlank()) {
+            val detected = Parsers.foregroundPackage(out)
+            if (!detected.isNullOrBlank() && detected != "null") return detected
         }
-        out.append("  ").append(name).append(" -> ").append(reason).append('\n')
-        // The first raw rows show the shape of the dump on this device.
-        body.lineSequence().filter { it.isNotBlank() }.take(2).forEach {
-            out.append("      | ").append(it.trim().take(90)).append('\n')
+
+        // 2. Fallback: UsageStatsManager if granted
+        val ctx = context
+        if (ctx != null) {
+            val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+            if (usm != null) {
+                val end = System.currentTimeMillis()
+                val begin = end - 10_000
+                val stats = runCatching { usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, begin, end) }.getOrNull()
+                val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
+                if (mostRecent != null && mostRecent.lastTimeUsed > begin) {
+                    return mostRecent.packageName
+                }
+            }
         }
-        if (count >= 20) break
-    }
-    if (count == 0) out.append("  (no layer answered)\n")
-    return out.toString()
-}
 
-private fun medianMs(presents: List<Long>): String {
-    val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-    if (deltas.isEmpty()) return "?"
-    val median = deltas.sorted()[deltas.size / 2]
-    return String.format("%.1f", median / 1_000_000.0)
-}
-
-/**
- * Splits the output of the multi layer latency dump.
- *
- * Each block starts with the layer name on a `@@@` line, followed by the
- * regular SurfaceFlinger latency format.
- */
-internal fun parseLayerLatencies(dump: String): List<LayerSample> {
-    val result = ArrayList<LayerSample>()
-    var name: String? = null
-    val block = StringBuilder()
-
-    fun flush() {
-        val current = name ?: return
-        val text = block.toString()
-        block.setLength(0)
-        if (text.isBlank()) return
-        val (refresh, presents) = Parsers.parseLatency(text)
-        if (presents.isEmpty()) return
-        result += LayerSample(current, refresh, presents)
+        return null
     }
 
-    for (line in dump.lines()) {
-        if (line.startsWith("@@@")) {
-            flush()
-            name = line.removePrefix("@@@").trim()
-        } else if (name != null) {
-            block.append(line).append('\n')
-        }
-    }
-    flush()
-    return result
+    private fun invalid(source: String, reason: String): FpsState = FpsState(
+        fps = 0f,
+        frameTimeMs = 0f,
+        history = history.toList(),
+        totalFrames = totalFrames,
+        jankFrames = jankFrames,
+        source = source,
+        surface = null,
+        valid = false,
+        reason = reason
+    )
 }

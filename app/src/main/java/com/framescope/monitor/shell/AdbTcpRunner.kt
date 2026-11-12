@@ -205,20 +205,28 @@ class AdbTcpRunner(
 
             session.handshake()
 
-            // If handshake completed, authorization is now valid and remembered
-            keys.markAuthorisationStored()
-            _authState.value = AdbAuthState.STORED
             lastFailureAt = 0L
             failureCount = 0
             lastError = null
+
+            if (session.offeredKey) {
+                // Persist the key in the phone's own adb_keys so the
+                // "Allow wireless debugging?" prompt never comes back.
+                val stored = runCatching {
+                    session.exec(storeKeyCommand(), STORE_KEY_TIMEOUT_MS)
+                }.getOrNull()
+                if (stored != null && stored.out.contains(KEYS_OK_MARKER)) {
+                    keys.markAuthorisationStored()
+                    _authState.value = AdbAuthState.STORED
+                }
+            } else {
+                keys.markAuthorisationStored()
+                _authState.value = AdbAuthState.STORED
+            }
+
             return session
         } catch (e: Exception) {
             runCatching { socket.close() }
-            if (e.message?.contains("rejected") == true) {
-                keyOfferUsed = false
-                keys.clearAuthorisationStored()
-                _authState.value = AdbAuthState.UNKNOWN
-            }
             throw ShellUnavailable(describe(e, targetHost, targetPort))
         }
     }
@@ -226,6 +234,11 @@ class AdbTcpRunner(
     private fun closeSession() {
         runCatching { session?.close() }
         session = null
+    }
+
+    private fun storeKeyCommand(): String {
+        val payload = keys.publicKeyPayload()
+        return "echo '$payload' >> /data/misc/adb/adb_keys && echo $KEYS_OK_MARKER"
     }
 
     private fun describe(e: Exception, targetHost: String, targetPort: Int): String = when (e) {
@@ -588,5 +601,7 @@ class AdbTcpRunner(
         private const val SCAN_HANDSHAKE_MS = 2_000
         private const val SCAN_TIMEOUT_MS = 8_000L
         private const val PROBE_COMMAND = "echo $PROBE_MARK"
+        private const val STORE_KEY_TIMEOUT_MS = 5_000L
+        private const val KEYS_OK_MARKER = "__framescope_keys_ok__"
     }
 }

@@ -7,10 +7,12 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import com.framescope.monitor.BuildConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -79,7 +81,7 @@ class ShizukuRunner(
             isBound = true
 
             // Verify actual command execution before declaring READY
-            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            CoroutineScope(Dispatchers.IO).launch {
                 verifyService(stub)
             }
         }

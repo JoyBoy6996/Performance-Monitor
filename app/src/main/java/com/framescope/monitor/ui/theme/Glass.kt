@@ -3,6 +3,8 @@ package com.framescope.monitor.ui.theme
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -11,8 +13,6 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.drawOutline
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -87,15 +87,13 @@ fun Modifier.glass(
             spotColor = colors.shadow
         )
         .clip(shape)
+        .background(
+            brush = Brush.verticalGradient(
+                colors = listOf(tint, tint.copy(alpha = tint.alpha * 0.88f))
+            ),
+            shape = shape
+        )
         .drawBehind {
-            val outline = shape.createOutline(size, layoutDirection, this)
-            drawOutline(
-                outline = outline,
-                brush = Brush.verticalGradient(
-                    colors = listOf(tint, tint.copy(alpha = tint.alpha * 0.88f)),
-                    endY = size.height
-                )
-            )
             drawRect(
                 brush = Brush.radialGradient(
                     colors = listOf(Color.White.copy(alpha = 0.055f), Color.Transparent),
@@ -112,19 +110,23 @@ fun Modifier.glass(
                     end = androidx.compose.ui.geometry.Offset(size.width, 0.5f),
                     strokeWidth = 1.dp.toPx()
                 )
+            }
+        }
+        .then(
+            if (topHairlineOnly) {
+                Modifier
             } else {
-                drawOutline(
-                    outline = outline,
+                Modifier.border(
+                    width = 1.dp,
                     brush = Brush.linearGradient(
                         colors = listOf(
                             colors.hairlineHighlight,
                             hairline,
                             hairline.copy(alpha = 0f)
-                        ),
-                        end = androidx.compose.ui.geometry.Offset(size.width, size.height)
+                        )
                     ),
-                    style = Stroke(width = 1.dp.toPx())
+                    shape = shape
                 )
             }
-        }
+        )
 }

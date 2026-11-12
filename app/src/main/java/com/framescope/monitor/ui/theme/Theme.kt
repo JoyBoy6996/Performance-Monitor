@@ -203,6 +203,7 @@ fun FrameScopeTheme(
             // depend on the wallpaper the user picked, so only light/dark is swapped.
             androidx.compose.runtime.CompositionLocalProvider(
                 LocalStatusColors provides if (dark) DarkStatus else LightStatus,
+                LocalGlassColors provides glassColors(dark, colors.surface),
                 LocalMotionEnabled provides motionEnabled,
                 content = content
             )

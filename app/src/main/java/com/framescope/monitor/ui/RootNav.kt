@@ -24,12 +24,10 @@ import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Timeline
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
@@ -40,7 +38,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.SessionRecord
@@ -50,6 +50,9 @@ import com.framescope.monitor.ui.screens.SessionDetailScreen
 import com.framescope.monitor.ui.screens.SessionsScreen
 import com.framescope.monitor.ui.screens.SettingsScreen
 import com.framescope.monitor.ui.screens.ToolsScreen
+import com.framescope.monitor.ui.theme.GlassBackdrop
+import com.framescope.monitor.ui.theme.LocalGlassColors
+import com.framescope.monitor.ui.theme.glass
 
 enum class AppTab(val label: String, val icon: ImageVector) {
     MONITOR("Monitor", Icons.Rounded.Speed),
@@ -74,12 +77,20 @@ fun FrameScopeRoot(
     val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val bottomPadding = if (compact) 24.dp else 24.dp + navInset
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    GlassBackdrop(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxSize()) {
             if (!compact) {
                 NavigationRail(
-                    modifier = Modifier.fillMaxHeight(),
-                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .glass(
+                            shape = RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp),
+                            tint = LocalGlassColors.current.fill,
+                            hairline = LocalGlassColors.current.hairline,
+                            blurRadius = 20.dp,
+                            elevation = 0.dp
+                        ),
+                    containerColor = Color.Transparent,
                     windowInsets = WindowInsets(0, 0, 0, 0)
                 ) {
                     Column(
@@ -136,7 +147,15 @@ fun FrameScopeRoot(
 
                 if (compact) {
                     NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier.glass(
+                            shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                            tint = LocalGlassColors.current.fill,
+                            hairline = LocalGlassColors.current.hairline,
+                            blurRadius = 20.dp,
+                            elevation = 0.dp,
+                            topHairlineOnly = true
+                        ),
+                        containerColor = Color.Transparent,
                         tonalElevation = 0.dp
                     ) {
                         AppTab.entries.forEach { entry ->

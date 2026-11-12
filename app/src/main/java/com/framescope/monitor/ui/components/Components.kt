@@ -34,9 +34,11 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -53,10 +55,13 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.framescope.monitor.ui.theme.LocalGlassColors
 import com.framescope.monitor.ui.theme.LocalMotionEnabled
+import com.framescope.monitor.ui.theme.glass
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.luminance
 import com.framescope.monitor.ui.theme.MonoBlock
 import com.framescope.monitor.ui.theme.MonoCaption
 import com.framescope.monitor.ui.theme.MonoHero
@@ -82,17 +87,34 @@ fun Panel(
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainer,
     contentColor: Color = MaterialTheme.colorScheme.onSurface,
     borderColor: Color = MaterialTheme.colorScheme.outlineVariant,
+    glass: Boolean = true,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Surface(
-        modifier = modifier,
-        shape = shape,
-        color = containerColor,
-        contentColor = contentColor,
-        border = BorderStroke(1.dp, borderColor),
-        tonalElevation = 0.dp
-    ) {
-        Column(Modifier.padding(Space.lg), content = content)
+    if (glass) {
+        val glassColors = LocalGlassColors.current
+        Box(
+            modifier = modifier.glass(
+                shape = shape,
+                tint = containerColor.copy(alpha = glassColors.fill.alpha),
+                hairline = glassColors.hairline,
+                elevation = 10.dp
+            )
+        ) {
+            CompositionLocalProvider(LocalContentColor provides contentColor) {
+                Column(Modifier.padding(Space.lg), content = content)
+            }
+        }
+    } else {
+        Surface(
+            modifier = modifier,
+            shape = shape,
+            color = containerColor,
+            contentColor = contentColor,
+            border = BorderStroke(1.dp, borderColor),
+            tonalElevation = 0.dp
+        ) {
+            Column(Modifier.padding(Space.lg), content = content)
+        }
     }
 }
 
@@ -102,7 +124,11 @@ fun PanelDivider(modifier: Modifier = Modifier) {
     HorizontalDivider(
         modifier = modifier,
         thickness = 1.dp,
-        color = MaterialTheme.colorScheme.outlineVariant
+        color = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+            Color.White.copy(alpha = 0.08f)
+        } else {
+            Color.Black.copy(alpha = 0.12f)
+        }
     )
 }
 
@@ -208,8 +234,13 @@ fun StatusPill(
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.14f))
+            .glass(
+                shape = RoundedCornerShape(50),
+                tint = color.copy(alpha = 0.14f),
+                hairline = color.copy(alpha = 0.30f),
+                blurRadius = 20.dp,
+                elevation = 2.dp
+            )
             .padding(horizontal = 9.dp, vertical = 4.dp)
     ) {
         Box(
@@ -385,7 +416,7 @@ fun FpsGauge(
     showValue: Boolean = true
 ) {
     val arcColor = fpsStateColor(value, target)
-    val trackColor = MaterialTheme.status.track
+    val trackColor = MaterialTheme.status.track.copy(alpha = 0.68f)
     val gridColor = MaterialTheme.status.grid
     val gridStrongColor = MaterialTheme.status.gridStrong
     val notchColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -558,7 +589,7 @@ fun SegmentedOptions(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLowest)
+            .background(LocalGlassColors.current.fillNested)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
@@ -585,8 +616,19 @@ fun SegmentedOptions(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(background)
+                    .then(
+                        if (isSelected) {
+                            Modifier.glass(
+                                shape = RoundedCornerShape(8.dp),
+                                tint = background.copy(alpha = 0.90f),
+                                hairline = LocalGlassColors.current.hairlineHighlight,
+                                blurRadius = 20.dp,
+                                elevation = 2.dp
+                            )
+                        } else {
+                            Modifier
+                        }
+                    )
                     .clickable { onSelect(option) }
                     .padding(vertical = 9.dp),
                 contentAlignment = Alignment.Center
@@ -638,8 +680,21 @@ fun ChipRow(
             )
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(9.dp))
-                    .background(background)
+                    .glass(
+                        shape = RoundedCornerShape(8.dp),
+                        tint = if (isSelected) {
+                            background.copy(alpha = 0.88f)
+                        } else {
+                            LocalGlassColors.current.fillNested
+                        },
+                        hairline = if (isSelected) {
+                            LocalGlassColors.current.hairlineHighlight
+                        } else {
+                            LocalGlassColors.current.hairline
+                        },
+                        blurRadius = 20.dp,
+                        elevation = 2.dp
+                    )
                     .clickable { onToggle(option) }
                     .padding(horizontal = 10.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -741,7 +796,8 @@ fun ValueSlider(
     }
 }
 
-/** Empty state: an icon, a headline and one sentence of guidance. */@Composable
+/** Empty state: an icon, a headline and one sentence of guidance. */
+@Composable
 fun EmptyState(
     icon: ImageVector,
     title: String,
@@ -749,7 +805,13 @@ fun EmptyState(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = modifier.fillMaxWidth().padding(horizontal = Space.xl, vertical = 48.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .glass(
+                tint = LocalGlassColors.current.fill,
+                hairline = LocalGlassColors.current.hairline
+            )
+            .padding(horizontal = Space.xl, vertical = 48.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(

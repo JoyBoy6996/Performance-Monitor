@@ -79,7 +79,16 @@ class MetricsEngine(
                 val enabled = settings.measurementEnabled.value
 
                 val fpsState = if (enabled) {
-                    runCatching { fpsSampler.sample(settings.fpsThreshold.value) }.getOrNull()
+                    try {
+                        kotlinx.coroutines.withTimeoutOrNull(3000L) {
+                            fpsSampler.sample(settings.fpsThreshold.value)
+                        } ?: run {
+                            _diagnostic.value = "Frame sampler timed out"
+                            null
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
                 } else {
                     fpsSampler.reset()
                     null
@@ -105,13 +114,20 @@ class MetricsEngine(
 
                 slowCounter++
                 if (slowCounter % SLOW_EVERY == 0) {
-                    val metrics = runCatching { systemSampler.sample() }.getOrNull()
+                    val metrics = try {
+                        kotlinx.coroutines.withTimeoutOrNull(2500L) {
+                            systemSampler.sample()
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
                     if (metrics != null) _system.value = metrics
                 }
 
                 if (fpsState != null && fpsState.valid) {
                     if (sessionLogger.isRecording) {
                         sessionLogger.onSample(fpsState, _system.value, settings.fpsThreshold.value)
+                        _live.value = sessionLogger.currentLiveStats()
                     }
 
                     // Update live series for chart
@@ -139,12 +155,14 @@ class MetricsEngine(
         val label = appLabel(current)
         sessionLogger.start(current, label, _system.value.batteryLevel)
         _recording.value = true
+        _live.value = LiveStats()
     }
 
     fun stopRecording(): SessionRecord? {
         if (!_recording.value) return null
         _recording.value = false
         val record = sessionLogger.stop(settings.fpsThreshold.value)
+        _live.value = LiveStats()
         return record
     }
 

@@ -90,7 +90,7 @@ private val LightStatus = StatusColors(
  * It is switched off when the system asks for animations to be removed, which keeps the
  * breathing indicators from going on forever for people who turned them off on purpose.
  */
-val LocalMotionEnabled = staticCompositionLocalOf { true }
+val LocalMotionEnabled = compositionLocalOf { true }
 
 /**
  * Access the semantic palette from any composable: `MaterialTheme.status.good`.

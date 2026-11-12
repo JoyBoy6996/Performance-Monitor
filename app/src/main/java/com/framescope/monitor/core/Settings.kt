@@ -166,11 +166,12 @@ class AppSettings(context: Context) {
     }
 
     private fun allPrefs(): List<Pref<*>> = listOf(
-        accessMode, adbHost, adbPort,
+        accessMode, adbHost, adbPort, keepAdbBridge,
         overlayEnabled, overlayStyle, overlayRows, overlayOpacity, overlayScale,
         overlayX, overlayY, overlayShowGraph, overlayGraphHeight, overlayClickThrough,
         protectBankApps, protectedApps,
         fpsThreshold, sampleIntervalMs, autoRecord, monitorWhileBackground,
+        measurementEnabled, setupCompleted,
         themeMode, dynamicColor
     )
 }

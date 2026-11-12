@@ -71,7 +71,7 @@ fun FrameScopeRoot(
     val compact = widthSizeClass == WindowWidthSizeClass.Compact
     // In compact mode the navigation bar owns the gesture inset, in expanded mode the
     // content has to keep clear of it itself.
-    val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val navInset = remember { WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() }
     val bottomPadding = if (compact) 24.dp else 24.dp + navInset
 
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -108,7 +108,7 @@ fun FrameScopeRoot(
                     if (session != null) {
                         SessionDetailScreen(
                             session = session,
-                            threshold = container.settings.fpsThreshold.value,
+                            threshold = container.settings.fpsThreshold.flow.collectAsStateValue(),
                             onBack = { openSession = null },
                             bottomPadding = bottomPadding
                         )
@@ -136,7 +136,6 @@ fun FrameScopeRoot(
 
                 if (compact) {
                     NavigationBar(
-                        modifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars),
                         containerColor = MaterialTheme.colorScheme.surfaceContainer,
                         tonalElevation = 0.dp
                     ) {

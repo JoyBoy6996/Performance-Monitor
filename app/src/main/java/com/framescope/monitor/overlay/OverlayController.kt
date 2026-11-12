@@ -2,7 +2,7 @@ package com.framescope.monitor.overlay
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,17 +15,13 @@ class OverlayController(private val context: Context) {
 
     fun start() {
         val intent = Intent(context, OverlayService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
-        }
+        ContextCompat.startForegroundService(context, intent)
         _running.value = true
     }
 
     fun stop() {
         val intent = Intent(context, OverlayService::class.java).setAction(OverlayService.ACTION_STOP)
-        context.startService(intent)
+        ContextCompat.startForegroundService(context, intent)
         _running.value = false
     }
 

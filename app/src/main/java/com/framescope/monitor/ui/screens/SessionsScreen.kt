@@ -89,10 +89,18 @@ fun SessionsScreen(
                     onOpen = { onOpenSession(session) },
                     onShare = {
                         val csv = container.store.toCsv(session)
+                        val exportDir = java.io.File(context.filesDir, "exports").apply { mkdirs() }
+                        val file = java.io.File(exportDir, "session_${session.id}.csv").apply { writeText(csv) }
+                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                            context,
+                            "${context.packageName}.files",
+                            file
+                        )
                         val send = Intent(Intent.ACTION_SEND).apply {
                             type = "text/csv"
-                            putExtra(Intent.EXTRA_SUBJECT, "FrameScope session")
-                            putExtra(Intent.EXTRA_TEXT, csv)
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            putExtra(Intent.EXTRA_SUBJECT, "FrameScope session - ${session.appLabel}")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         }
                         context.startActivity(Intent.createChooser(send, "Export session"))
                     },

@@ -64,8 +64,14 @@ object TimeStats {
         }
         frames?.let { blocks += Triple(layer, it, janky to missed) }
 
-        return blocks.filter { it.first.contains(packageName) }
-            .map { Reading(it.first, it.second, it.third.first, it.third.second) }
+        val pkgRegex = Regex("[\\[/\\s]${Regex.escape(packageName)}[/\\s\\]#(]")
+        return blocks.filter {
+            val layerName = it.first
+            layerName.startsWith("$packageName/") ||
+                layerName.contains("[$packageName/") ||
+                layerName.contains("[$packageName]") ||
+                pkgRegex.containsMatchIn(layerName)
+        }.map { Reading(it.first, it.second, it.third.first, it.third.second) }
     }
 
     /** Reads the counters of the first layer that belongs to a package. */

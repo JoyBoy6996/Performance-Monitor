@@ -15,7 +15,9 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
@@ -36,6 +38,14 @@ class ScreenRecorderService : Service() {
     private var mediaRecorder: MediaRecorder? = null
     private var outputFile: File? = null
 
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            stopRecording()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -43,9 +53,20 @@ class ScreenRecorderService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) return START_NOT_STICKY
+        // Promote unconditionally first to prevent RemoteServiceException
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(
+                this,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
 
-        if (intent.action == ACTION_STOP) {
+        if (intent == null || intent.action == ACTION_STOP) {
             stopRecording()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -57,27 +78,13 @@ class ScreenRecorderService : Service() {
             val resultData = intent.getParcelableExtra<Intent>(EXTRA_DATA)
 
             if (resultCode != 0 && resultData != null) {
-                // Android 14+ requires starting foreground with mediaProjection type
-                // BEFORE retrieving the MediaProjection instance!
-                val notification = buildNotification()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ServiceCompat.startForeground(
-                        this,
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                    )
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
-                }
-
                 startRecording(resultCode, resultData)
             } else {
                 stopSelf()
             }
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startRecording(resultCode: Int, data: Intent) {
@@ -87,6 +94,8 @@ class ScreenRecorderService : Service() {
                 return
             }
             mediaProjection = mp
+            // MediaProjection.Callback MUST be registered before createVirtualDisplay on Android 14+
+            mp.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
 
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val dm = DisplayMetrics()
@@ -100,7 +109,8 @@ class ScreenRecorderService : Service() {
             if (height % 2 != 0) height -= 1
             val density = dm.densityDpi
 
-            val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+            // Scoped storage safe location
+            val moviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: File(filesDir, "Movies")
             if (!moviesDir.exists()) moviesDir.mkdirs()
 
             val file = File(moviesDir, "FrameScope_${System.currentTimeMillis()}.mp4")
@@ -120,6 +130,21 @@ class ScreenRecorderService : Service() {
             recorder.setVideoSize(width, height)
             recorder.setVideoFrameRate(30)
             recorder.setVideoEncodingBitRate(4_000_000) // 4 Mbps
+
+            val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display?.rotation ?: android.view.Surface.ROTATION_0
+            } else {
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.rotation
+            }
+            val hint = when (rotation) {
+                android.view.Surface.ROTATION_90 -> 90
+                android.view.Surface.ROTATION_180 -> 180
+                android.view.Surface.ROTATION_270 -> 270
+                else -> 0
+            }
+            recorder.setOrientationHint(hint)
+
             recorder.setOutputFile(file.absolutePath)
             recorder.prepare()
 
@@ -142,17 +167,18 @@ class ScreenRecorderService : Service() {
     }
 
     private fun stopRecording() {
-        runCatching {
-            mediaRecorder?.stop()
-            mediaRecorder?.reset()
-            mediaRecorder?.release()
-        }
+        runCatching { mediaRecorder?.stop() }
+        runCatching { mediaRecorder?.reset() }
+        runCatching { mediaRecorder?.release() }
         mediaRecorder = null
 
         runCatching { virtualDisplay?.release() }
         virtualDisplay = null
 
-        runCatching { mediaProjection?.stop() }
+        runCatching {
+            mediaProjection?.unregisterCallback(projectionCallback)
+            mediaProjection?.stop()
+        }
         mediaProjection = null
     }
 

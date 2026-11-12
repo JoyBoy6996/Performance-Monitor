@@ -76,7 +76,7 @@ class OverlayService : Service() {
         createChannel()
 
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
@@ -98,7 +98,7 @@ class OverlayService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -117,6 +117,7 @@ class OverlayService : Service() {
     }
 
     private fun buildOverlay() {
+        graphView = null
         if (!Settings.canDrawOverlays(this)) return
 
         val app = applicationContext as? FrameScopeApp ?: return
@@ -140,6 +141,7 @@ class OverlayService : Service() {
             OverlayStyle.RTSS -> buildRtss(settings)
             else -> buildStandard(settings)
         }
+        applyExpandedState()
     }
 
     private fun buildPill(settings: AppSettings) {
@@ -280,11 +282,16 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
+        var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        if (settings.overlayClickThrough.value) {
+            flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            flags,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -294,7 +301,8 @@ class OverlayService : Service() {
         }
         params = lp
 
-        layout.setOnTouchListener { _, event ->
+        val touchSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+        layout.setOnTouchListener { v, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     dragStartX = event.rawX
@@ -307,12 +315,16 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = event.rawX - dragStartX
                     val dy = event.rawY - dragStartY
-                    if (!dragging && (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8)) {
+                    if (!dragging && (kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop)) {
                         dragging = true
                     }
                     if (dragging) {
-                        lp.x = (startX + dx).toInt().coerceIn(0, dm.widthPixels)
-                        lp.y = (startY + dy).toInt().coerceIn(0, dm.heightPixels)
+                        val viewW = layout.width.takeIf { it > 0 } ?: OverlayViews.dp(this, 120f)
+                        val viewH = layout.height.takeIf { it > 0 } ?: OverlayViews.dp(this, 40f)
+                        val maxX = (dm.widthPixels - viewW).coerceAtLeast(0)
+                        val maxY = (dm.heightPixels - viewH).coerceAtLeast(0)
+                        lp.x = (startX + dx).toInt().coerceIn(0, maxX)
+                        lp.y = (startY + dy).toInt().coerceIn(0, maxY)
                         runCatching { windowManager.updateViewLayout(layout, lp) }
                     }
                     true
@@ -322,6 +334,7 @@ class OverlayService : Service() {
                         settings.overlayX.value = (lp.x.toFloat() / dm.widthPixels).coerceIn(0f, 1f)
                         settings.overlayY.value = (lp.y.toFloat() / dm.heightPixels).coerceIn(0f, 1f)
                     } else {
+                        v.performClick()
                         expanded = !expanded
                         applyExpandedState()
                     }
@@ -361,20 +374,55 @@ class OverlayService : Service() {
             }
         }
 
-        // Rebuild when style or scale changes
+        // Rebuild only when structure changes (style, rows)
         scope.launch {
             combine(
                 settings.overlayStyle.flow,
-                settings.overlayScale.flow,
-                settings.overlayOpacity.flow,
-                settings.overlayRows.flow,
-                settings.overlayShowGraph.flow
-            ) { style, scale, opacity, rows, graph ->
-                listOf(style, scale.toString(), opacity.toString(), rows, graph.toString())
+                settings.overlayRows.flow
+            ) { style, rows ->
+                style to rows
             }.collect {
                 buildOverlay()
             }
         }
+
+        // Re-style in place for presentation properties
+        scope.launch {
+            combine(
+                settings.overlayScale.flow,
+                settings.overlayOpacity.flow,
+                settings.overlayShowGraph.flow,
+                settings.overlayGraphHeight.flow,
+                settings.overlayClickThrough.flow
+            ) { _, _, _, _, _ -> }.collect {
+                restyleOverlay(settings)
+            }
+        }
+    }
+
+    private fun restyleOverlay(settings: AppSettings) {
+        val rootLayout = root ?: return
+        val lp = params ?: return
+        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
+        currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
+        showGraph = settings.overlayShowGraph.value
+        graphHeight = settings.overlayGraphHeight.value
+
+        lp.alpha = currentOpacity
+        if (settings.overlayClickThrough.value) {
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        }
+
+        graphView?.let { gv ->
+            gv.visibility = if (showGraph && expanded) View.VISIBLE else View.GONE
+            val lpGraph = gv.layoutParams
+            lpGraph?.height = OverlayViews.dp(this, graphHeight.toFloat())
+            gv.layoutParams = lpGraph
+        }
+
+        runCatching { windowManager.updateViewLayout(rootLayout, lp) }
     }
 
     private fun updateValues(fpsState: FpsState, system: SystemMetrics, settings: AppSettings) {

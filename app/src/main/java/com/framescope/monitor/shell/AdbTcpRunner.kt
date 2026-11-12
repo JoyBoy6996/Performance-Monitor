@@ -214,6 +214,11 @@ class AdbTcpRunner(
             return session
         } catch (e: Exception) {
             runCatching { socket.close() }
+            if (e.message?.contains("rejected") == true) {
+                keyOfferUsed = false
+                keys.clearAuthorisationStored()
+                _authState.value = AdbAuthState.UNKNOWN
+            }
             throw ShellUnavailable(describe(e, targetHost, targetPort))
         }
     }
@@ -398,12 +403,12 @@ class AdbTcpRunner(
                 val msg = try {
                     readMessage()
                 } catch (e: Exception) {
-                    return true
-                } ?: return true
+                    return false
+                } ?: return false
                 if (msg.command == "OKAY") return true
                 if (msg.command == "FAIL") return false
             }
-            return true
+            return false
         }
 
         fun exec(command: String, timeoutMs: Long): ShellResult {

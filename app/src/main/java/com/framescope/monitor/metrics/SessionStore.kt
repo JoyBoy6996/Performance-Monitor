@@ -8,6 +8,7 @@ import com.framescope.monitor.core.SessionRecord
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -20,6 +21,7 @@ class SessionStore(context: Context) {
 
     private val dbHelper = SessionDatabaseHelper(context)
     private val dir = File(context.filesDir, "sessions").apply { mkdirs() }
+    private val ioScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
 
     private val _sessions = MutableStateFlow<List<SessionRecord>>(emptyList())
     val sessions: StateFlow<List<SessionRecord>> = _sessions.asStateFlow()
@@ -30,8 +32,8 @@ class SessionStore(context: Context) {
 
     @Synchronized
     private fun load() {
-        // Read from SQLite database
-        val dbRecords = dbHelper.getAllRecords()
+        // Read from SQLite database with safety
+        val dbRecords = runCatching { dbHelper.getAllRecords() }.getOrDefault(emptyList())
         if (dbRecords.isNotEmpty()) {
             _sessions.value = dbRecords
             return
@@ -44,44 +46,77 @@ class SessionStore(context: Context) {
             .sortedByDescending { it.startedAt }
 
         if (jsonRecords.isNotEmpty()) {
-            jsonRecords.forEach { dbHelper.insertRecord(it) }
             _sessions.value = jsonRecords
+            ioScope.launch {
+                jsonRecords.forEach { runCatching { dbHelper.insertRecord(it) } }
+            }
         }
     }
 
     @Synchronized
     fun add(record: SessionRecord) {
-        dbHelper.insertRecord(record)
-        runCatching { File(dir, "${record.id}.json").writeText(toJson(record)) }
-        _sessions.value = listOf(record) + _sessions.value.filterNot { it.id == record.id }
+        _sessions.value = (listOf(record) + _sessions.value.filterNot { it.id == record.id }).take(MAX_RECORDS)
+        ioScope.launch {
+            runCatching { dbHelper.insertRecord(record) }
+            runCatching { File(dir, "${record.id}.json").writeText(toJson(record)) }
+            runCatching { pruneRecords() }
+        }
     }
 
     @Synchronized
     fun addSample(sample: SessionSample) {
-        dbHelper.insertSample(sample)
+        ioScope.launch {
+            runCatching { dbHelper.insertSample(sample) }
+        }
+    }
+
+    @Synchronized
+    fun addSamples(samples: List<SessionSample>) {
+        if (samples.isEmpty()) return
+        ioScope.launch {
+            runCatching { dbHelper.insertSamples(samples) }
+        }
     }
 
     @Synchronized
     fun delete(id: String) {
-        dbHelper.deleteRecord(id)
-        runCatching { File(dir, "$id.json").delete() }
         _sessions.value = _sessions.value.filterNot { it.id == id }
+        ioScope.launch {
+            runCatching { dbHelper.deleteRecord(id) }
+            runCatching { File(dir, "$id.json").delete() }
+        }
     }
 
     @Synchronized
     fun importRecords(records: List<SessionRecord>) {
-        records.forEach { record ->
-            dbHelper.insertRecord(record)
-            runCatching { File(dir, "${record.id}.json").writeText(toJson(record)) }
+        _sessions.value = (records + _sessions.value).distinctBy { it.id }.take(MAX_RECORDS)
+        ioScope.launch {
+            records.forEach { record ->
+                runCatching { dbHelper.insertRecord(record) }
+                runCatching { File(dir, "${record.id}.json").writeText(toJson(record)) }
+            }
+            runCatching { pruneRecords() }
         }
-        load()
     }
 
     @Synchronized
     fun clear() {
-        dbHelper.clearAll()
-        dir.listFiles { f -> f.extension == "json" }?.forEach { it.delete() }
         _sessions.value = emptyList()
+        ioScope.launch {
+            runCatching { dbHelper.clearAll() }
+            runCatching { dir.listFiles { f -> f.extension == "json" }?.forEach { it.delete() } }
+        }
+    }
+
+    private fun pruneRecords() {
+        val current = _sessions.value
+        if (current.size > MAX_RECORDS) {
+            val toRemove = current.drop(MAX_RECORDS)
+            toRemove.forEach {
+                runCatching { dbHelper.deleteRecord(it.id) }
+                runCatching { File(dir, "${it.id}.json").delete() }
+            }
+        }
     }
 
     fun toJson(record: SessionRecord): String = JSONObject().apply {
@@ -228,9 +263,32 @@ class SessionStore(context: Context) {
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            db.execSQL("DROP TABLE IF EXISTS $TABLE_SAMPLES")
-            db.execSQL("DROP TABLE IF EXISTS $TABLE_RECORDS")
-            onCreate(db)
+            // Keep existing data on upgrade; do not drop tables.
+        }
+
+        fun insertSamples(samples: List<SessionSample>) {
+            if (samples.isEmpty()) return
+            val db = writableDatabase
+            db.beginTransaction()
+            try {
+                for (sample in samples) {
+                    val cv = ContentValues().apply {
+                        put("session_id", sample.sessionId)
+                        put("timestamp", sample.timestamp)
+                        put("fps", sample.fps)
+                        put("frame_time_ms", sample.frameTimeMs)
+                        put("cpu_percent", sample.cpuPercent)
+                        put("gpu_freq_mhz", sample.gpuFreqMHz)
+                        put("thermal_max_c", sample.thermalMaxC)
+                        put("battery_level", sample.batteryLevel)
+                        put("ram_percent", sample.ramPercent)
+                    }
+                    db.insert(TABLE_SAMPLES, null, cv)
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
         }
 
         fun insertRecord(record: SessionRecord) {
@@ -357,5 +415,9 @@ class SessionStore(context: Context) {
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }
+    }
+
+    companion object {
+        const val MAX_RECORDS = 100
     }
 }

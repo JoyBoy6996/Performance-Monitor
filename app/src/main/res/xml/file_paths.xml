@@ -2,4 +2,6 @@
 <paths>
     <!-- Backup files live in the cache directory and are shared out through FileProvider. -->
     <cache-path name="backups" path="." />
+    <files-path name="files" path="." />
+    <external-files-path name="recordings" path="Movies/" />
 </paths>

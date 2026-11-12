@@ -124,49 +124,15 @@ object Parsers {
     /**
      * Parses `dumpsys SurfaceFlinger --latency`.
      *
-     * The first line is the refresh period in nanoseconds. Every following row
-     * holds one frame: the desired present time, the actual present time and
-     * (on newer builds) the time the frame was ready. The actual present time
-     * is the second column in both layouts.
+     * Delegates to the pure-function core (parseLayerLatencies and computeFrameStats).
      */
     fun parseLatency(dump: String): Pair<Long, List<Long>> {
-        val lines = dump.trim().lines().filter { it.isNotBlank() }
-        if (lines.isEmpty()) return 0L to emptyList()
-        val refresh = lines[0].trim().split(WHITESPACE).firstOrNull()?.toLongOrNull() ?: 0L
-
-        val rows = lines.drop(1)
-            .map { row -> row.trim().split(WHITESPACE).mapNotNull { it.toLongOrNull() } }
-            .filter { it.isNotEmpty() }
-        if (rows.isEmpty()) return refresh to emptyList()
-        // The first row is a placeholder for a frame that was never drawn.
-        val body = if (rows.first().all { it == 0L }) rows.drop(1) else rows
-        if (body.isEmpty()) return refresh to emptyList()
-
-        val columns = body.first().size
-        // The actual present time is column one, but be forgiving and check the
-        // neighbours too in case a build orders the columns differently.
-        for (index in preferredColumns(columns)) {
-            val series = body.mapNotNull { row -> row.getOrNull(index) }.filter { it > 0L }
-            if (looksLikeFrameSeries(series)) return refresh to series
-        }
-        return refresh to emptyList()
-    }
-
-    private fun preferredColumns(columns: Int): List<Int> = when {
-        columns >= 3 -> listOf(1, 2, 0)
-        columns == 2 -> listOf(1, 0)
-        else -> listOf(0)
-    }
-
-    /** A real frame series moves forward at a steady pace. */
-    private fun looksLikeFrameSeries(series: List<Long>): Boolean {
-        if (series.size < 4) return false
-        val deltas = series.zipWithNext { a, b -> b - a }.filter { it > 0L }
-        if (deltas.size < 3) return false
-        val median = deltas.sorted()[deltas.size / 2]
-        if (median < 1_000_000L || median > 1_000_000_000L) return false
-        val clustered = deltas.count { it >= median / 2 && it <= median * 2 }
-        return clustered * 10 >= deltas.size * 6
+        val sample = com.framescope.monitor.metrics.parseLayerLatencies("@@@layer\n$dump").firstOrNull()
+            ?: return 0L to emptyList()
+        val deltas = sample.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+        val stats = com.framescope.monitor.metrics.computeFrameStats(deltas)
+        if (stats == null) return sample.refreshPeriodNs to emptyList()
+        return sample.refreshPeriodNs to sample.presents
     }
 
     /** Parses `dumpsys gfxinfo <pkg> framestats` frame completion timestamps. */

@@ -38,6 +38,7 @@ class FrameScopeApp : Application() {
         val app = runCatching { container }.getOrNull() ?: return
         app.scope.launch(Dispatchers.IO) {
             runCatching {
+                com.framescope.monitor.core.ProtectedApps.scanInstalled(applicationContext)
                 app.hub.applyAdbEndpoint(
                     app.settings.adbHost.value,
                     app.settings.adbPort.value

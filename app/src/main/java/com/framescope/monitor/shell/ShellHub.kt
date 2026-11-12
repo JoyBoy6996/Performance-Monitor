@@ -45,6 +45,18 @@ class ShellHub(
     private var lastProbeAt = 0L
 
     @Volatile
+    private var lastFailureAt = 0L
+
+    @Volatile
+    private var configuredAdbPort = 5555
+
+    @Volatile
+    private var configuredPreferred: String? = null
+
+    @Volatile
+    private var configuredAllowBootstrap: Boolean = true
+
+    @Volatile
     private var consecutiveFailures = 0
 
     /** The Shizuku backend, when that is the one in use. */
@@ -76,6 +88,9 @@ class ShellHub(
         adbPort: Int,
         allowAdbBootstrap: Boolean
     ): AccessStatus {
+        configuredPreferred = preferred
+        configuredAdbPort = adbPort
+        configuredAllowBootstrap = allowAdbBootstrap
         lastProbeAt = System.currentTimeMillis()
         val mode = preferred?.lowercase()
 
@@ -160,6 +175,7 @@ class ShellHub(
     }
 
     fun applyAdbEndpoint(newHost: String, newPort: Int) {
+        configuredAdbPort = newPort
         (adb as? AdbTcpRunner)?.retarget(newHost, newPort)
     }
 
@@ -170,7 +186,7 @@ class ShellHub(
     private suspend fun execBlocking(command: String, timeoutMs: Long): ShellResult {
         val runner = active ?: run {
             // Lazy refresh if no runner is currently selected
-            val status = refreshBlocking(null, 5555, false)
+            val status = refreshBlocking(configuredPreferred, configuredAdbPort, configuredAllowBootstrap)
             active ?: throw ShellUnavailable(status.detail.ifBlank { "No privileged backend available" })
         }
 
@@ -182,11 +198,14 @@ class ShellHub(
         } catch (e: Exception) {
             _lastError.value = e.message ?: "The command failed"
             consecutiveFailures++
+            val now = System.currentTimeMillis()
+            val timeSinceLastFailure = now - lastFailureAt
+            lastFailureAt = now
 
             // Exponential backoff cooldown before probing again
             val backoffMs = (BASE_COOLDOWN_MS * (1 shl minOf(consecutiveFailures - 1, 4))).coerceIn(BASE_COOLDOWN_MS, MAX_COOLDOWN_MS)
-            if (System.currentTimeMillis() - lastProbeAt > backoffMs) {
-                refresh()
+            if (consecutiveFailures == 1 || timeSinceLastFailure > backoffMs) {
+                refreshBlocking(configuredPreferred, configuredAdbPort, configuredAllowBootstrap)
                 val fallback = active
                 if (fallback != null && fallback !== runner) {
                     val retry = runCatching { fallback.exec(command, timeoutMs) }.getOrNull()

@@ -68,12 +68,24 @@ class FpsSampler(
             return s
         }
 
-        // 1. Primary: Query SurfaceFlinger latency for package or layers
-        val sfCmd = "{ dumpsys SurfaceFlinger --latency '$pkg' 2>/dev/null ; " +
-            ShellCommands.surfaceLatencyOfPackage(pkg) + " ; } | head -130"
+        // 1. Primary: Query SurfaceFlinger latency for candidate layers of package
+        val candidateLayers = getCandidateLayers(pkg)
+        val sfCmd = if (candidateLayers.isNotEmpty()) {
+            buildString {
+                append("{ ")
+                for (layer in candidateLayers) {
+                    append("echo \"@@@$layer\"; dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | head -40; ")
+                }
+                append("}")
+            }
+        } else {
+            ShellCommands.surfaceLatencyOfPackage(pkg)
+        }
         val dump = hub.execOrNull(sfCmd, 2_500)?.out.orEmpty()
 
-        val parsed = parseSurfaceFlingerOutput(dump, targetFps)
+        _reports.value = retainReport(_reports.value, pkg, buildProbeReport(pkg, dump))
+
+        val parsed = parseSurfaceFlingerOutput(dump)
         if (parsed != null && parsed.valid) {
             _state.value = parsed
             return parsed
@@ -81,7 +93,7 @@ class FpsSampler(
 
         // 2. Fallback: Default SurfaceFlinger active latency
         val defaultDump = hub.execOrNull(ShellCommands.surfaceLatencyDefault(), 1_500)?.out.orEmpty()
-        val defaultParsed = parseSingleLatencyBlock("default", defaultDump, targetFps)
+        val defaultParsed = parseSurfaceFlingerOutput(defaultDump)
         if (defaultParsed != null && defaultParsed.valid) {
             measuredLayer = "SurfaceFlinger (default)"
             _state.value = defaultParsed
@@ -108,92 +120,50 @@ class FpsSampler(
         return noSignal
     }
 
-    private fun parseSurfaceFlingerOutput(dump: String, targetFps: Int): FpsState? {
-        if (dump.isBlank()) return null
+    private var cachedLayers: List<String> = emptyList()
+    private var lastLayersAt: Long = 0L
 
-        // If batch output with @@@layer markers
-        if (dump.contains("@@@")) {
-            val sections = dump.split("@@@").filter { it.isNotBlank() }
-            for (section in sections) {
-                val lines = section.trim().lines()
-                val layerName = lines.firstOrNull() ?: continue
-                val content = lines.drop(1).joinToString("\n")
-                val state = parseSingleLatencyBlock(layerName, content, targetFps)
-                if (state != null && state.valid) {
-                    measuredLayer = layerName
-                    return state
-                }
-            }
+    private suspend fun getCandidateLayers(pkg: String): List<String> {
+        val now = System.currentTimeMillis()
+        if (now - lastLayersAt > 4000L || cachedLayers.isEmpty()) {
+            val listDump = hub.execOrNull("dumpsys SurfaceFlinger --list 2>/dev/null", 1_500)?.out.orEmpty()
+            cachedLayers = listDump.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            lastLayersAt = now
         }
-
-        // Single block
-        val state = parseSingleLatencyBlock(pkgOrLayer = foregroundApp ?: "layer", dump = dump, targetFps = targetFps)
-        if (state != null && state.valid) {
-            measuredLayer = foregroundApp
-            return state
-        }
-        return null
+        val matching = cachedLayers.filter { it.contains(pkg) }
+        return if (matching.isNotEmpty()) matching.take(3) else cachedLayers.takeLast(3)
     }
 
-    private fun parseSingleLatencyBlock(pkgOrLayer: String, dump: String, targetFps: Int): FpsState? {
-        val lines = dump.trim().lines().filter { it.isNotBlank() }
-        if (lines.size < 4) return null
+    private fun parseSurfaceFlingerOutput(dump: String): FpsState? {
+        if (dump.isBlank()) return null
+        val samples = parseLayerLatencies(dump)
+        val sorted = pickMostRecent(samples)
+        for (sample in sorted) {
+            val deltas = sample.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+            val stats = computeFrameStats(deltas)
+            if (stats != null) {
+                measuredLayer = sample.name.ifBlank { foregroundApp ?: "layer" }
+                val frameCount = sample.presents.size - 1
+                totalFrames += frameCount
+                jankFrames += stats.jank
 
-        val refreshPeriodNs = lines[0].trim().split(Regex("\\s+")).firstOrNull()?.toLongOrNull() ?: 16_666_666L
-        val effectiveRefreshNs = if (refreshPeriodNs in 2_000_000L..40_000_000L) refreshPeriodNs else 16_666_666L
+                history.add(stats.fps)
+                while (history.size > 20) history.removeFirst()
 
-        val presents = ArrayList<Long>()
-        for (i in 1 until lines.size) {
-            val parts = lines[i].trim().split(Regex("\\s+")).mapNotNull { it.toLongOrNull() }
-            if (parts.isEmpty()) continue
-            // 3-column layout: desired, actual, ready
-            val actual = when {
-                parts.size >= 2 -> parts[1]
-                else -> parts[0]
-            }
-            if (actual > 0L && actual != Long.MAX_VALUE && actual != 9223372036854775807L) {
-                presents.add(actual)
+                return FpsState(
+                    fps = stats.fps,
+                    frameTimeMs = stats.frameTimeMs,
+                    history = history.toList(),
+                    totalFrames = totalFrames,
+                    jankFrames = jankFrames,
+                    source = "SurfaceFlinger latency",
+                    surface = measuredLayer,
+                    valid = true,
+                    reason = null
+                )
             }
         }
-
-        if (presents.size < 3) return null
-
-        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-        if (deltas.size < 2) return null
-
-        val targetIntervalMs = if (targetFps > 0) 1000f / targetFps else (effectiveRefreshNs / 1_000_000f)
-        val jankThresholdNs = (targetIntervalMs * 1.5f * 1_000_000L).toLong()
-
-        var janks = 0
-        for (d in deltas) {
-            if (d > jankThresholdNs) janks++
-        }
-
-        val totalTimeNs = presents.last() - presents.first()
-        if (totalTimeNs <= 0L) return null
-
-        val fps = (presents.size - 1).toDouble() * 1_000_000_000.0 / totalTimeNs
-        if (fps <= 0.5 || fps > 360.0) return null
-
-        val frameTimeMs = (totalTimeNs.toDouble() / (presents.size - 1) / 1_000_000.0).toFloat()
-
-        history.add(fps.toFloat())
-        while (history.size > 20) history.removeFirst()
-
-        totalFrames += presents.size - 1
-        jankFrames += janks
-
-        return FpsState(
-            fps = fps.toFloat(),
-            frameTimeMs = frameTimeMs,
-            history = history.toList(),
-            totalFrames = totalFrames,
-            jankFrames = jankFrames,
-            source = "SurfaceFlinger latency",
-            surface = pkgOrLayer,
-            valid = true,
-            reason = null
-        )
+        return null
     }
 
     private suspend fun sampleTimeStats(packageName: String): FpsState? {

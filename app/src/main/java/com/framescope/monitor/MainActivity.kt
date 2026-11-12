@@ -23,15 +23,13 @@ import com.framescope.monitor.recorder.ScreenRecorderService
 import com.framescope.monitor.ui.FrameScopeRoot
 import com.framescope.monitor.ui.collectAsStateValue
 import com.framescope.monitor.ui.theme.FrameScopeTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private val container get() = runCatching { (application as FrameScopeApp).container }.getOrNull()
 
     private val notificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
-
-    private val audioPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val overlayPermission =
@@ -50,6 +48,19 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    override fun onResume() {
+        super.onResume()
+        container?.let { app ->
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                app.hub.refresh(
+                    preferred = app.settings.accessMode.value,
+                    adbPort = app.settings.adbPort.value,
+                    allowAdbBootstrap = app.settings.keepAdbBridge.value
+                )
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -63,10 +74,6 @@ class MainActivity : ComponentActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            audioPermission.launch(Manifest.permission.RECORD_AUDIO)
         }
 
         val app = container

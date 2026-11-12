@@ -14,7 +14,7 @@ plays nicely with banking and security apps.
 | Area | What you get |
 |---|---|
 | **Monitor tab** | Live FPS gauge, frame time, frame-time history graph, CPU / GPU / temperature / battery / RAM / power tiles, live session stats |
-| **Overlay tab** | Floating overlay with 4 styles (Compact, Classic, Detailed, RTSS-style), selectable rows, opacity + scale sliders, graph height, drag to reposition, tap to collapse |
+| **Overlay tab** | Floating overlay with 5 styles (Pill, Compact, Classic, Detailed, RTSS-style), selectable rows, opacity + scale sliders, graph height, drag to reposition, tap to collapse |
 | **Sessions tab** | Recorded sessions with avg / max / min FPS, 1% low, 5% low, smoothness score, jank count, peak temperature, per-second graph, CSV export and share |
 | **Tools tab** | Device info, screen test (colour patches + touch trail), top-process monitor, thermal sensor list, battery/power detail, shell console for running any command with the active backend |
 | **Setup tab** | Backend selector, one-time ADB setup commands with copy buttons, banking app protection, sampling interval, smoothness target, theme control |

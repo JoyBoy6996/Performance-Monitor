@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">FrameScope</string>
+    <string name="overlay_channel_name">FrameScope overlay</string>
+    <string name="overlay_channel_desc">Keeps the live FPS overlay running while you play</string>
+    <!-- Material3 looks this string up when a text field has an error state.
+         Declaring it here keeps it resolvable in every resource environment. -->
+    <string name="default_error_message" translatable="false">Invalid input</string>
+</resources>

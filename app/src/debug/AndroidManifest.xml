@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Lets the Compose test harness launch a bare activity in debug builds. -->
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            android:theme="@style/Theme.FrameScope" />
+    </application>
+</manifest>

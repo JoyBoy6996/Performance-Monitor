@@ -1,5 +1,11 @@
 package com.framescope.monitor.metrics
 
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.display.DisplayManager
+import android.os.BatteryManager
+import android.view.Display
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
@@ -7,7 +13,10 @@ import com.framescope.monitor.shell.ShellHub
 import kotlin.math.abs
 
 /** Collects device metrics that change slowly (CPU, RAM, battery, thermals, GPU). */
-class SystemSampler(private val hub: ShellHub) {
+class SystemSampler(
+    private val hub: ShellHub,
+    var context: Context? = null
+) {
 
     private var lastCpu: LongArray? = null
 
@@ -21,11 +30,9 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.cpuFreq(),
             ShellCommands.displayInfo()
         )
-        val result = hub.execOrNull(script) ?: return null
-        val out = result.out
-        if (out.isBlank()) return null
-        val parts = ShellCommands.split(out)
-        if (parts.isEmpty()) return null
+        val result = hub.execOrNull(script)
+        val out = result?.out.orEmpty()
+        val parts = if (out.isNotBlank()) ShellCommands.split(out) else emptyList()
         fun part(index: Int): String = parts.getOrElse(index) { "" }
 
         val cpu = cpuPercent(part(0))
@@ -34,12 +41,50 @@ class SystemSampler(private val hub: ShellHub) {
         val thermals = Parsers.parseThermals(part(3))
         val gpu = part(4)
         val cpuFreq = Parsers.parseCpuFreq(part(5))
-        val refresh = Parsers.parseRefreshRate(part(6))
+        var refresh = Parsers.parseRefreshRate(part(6))
 
-        val level = battery["level"]?.toIntOrNull()
-        val batteryTemp = battery["temperature"]?.toFloatOrNull()?.let { it / 10f }
-        val current = battery["current_now"]?.toLongOrNull()?.let { abs(it) }
-        val voltage = battery["voltage"]?.toLongOrNull()
+        var level = battery["level"]?.toIntOrNull()
+        var batteryTemp = battery["temperature"]?.toFloatOrNull()?.let { it / 10f }
+        var current = battery["current_now"]?.toLongOrNull()?.let { abs(it) }
+        var voltage = battery["voltage"]?.toLongOrNull()
+
+        // Native Android BatteryManager & Display fallback (works without root or Shizuku)
+        val ctx = context
+        if (ctx != null) {
+            if (level == null || batteryTemp == null || current == null || voltage == null) {
+                val sticky = runCatching {
+                    ctx.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                }.getOrNull()
+                if (sticky != null) {
+                    if (level == null) {
+                        val rawLvl = sticky.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                        val scale = sticky.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+                        if (rawLvl >= 0 && scale > 0) level = (rawLvl * 100) / scale
+                    }
+                    if (batteryTemp == null) {
+                        val rawTemp = sticky.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+                        if (rawTemp > 0) batteryTemp = rawTemp / 10f
+                    }
+                    if (voltage == null) {
+                        val rawVolt = sticky.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
+                        if (rawVolt > 0) voltage = rawVolt.toLong()
+                    }
+                }
+                if (current == null || current == 0L) {
+                    val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+                    val rawCur = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+                    if (rawCur != null && rawCur != 0 && rawCur != Int.MIN_VALUE) {
+                        current = abs(rawCur.toLong())
+                    }
+                }
+            }
+            if (refresh == null) {
+                val dm = ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+                @Suppress("DEPRECATION")
+                refresh = dm?.getDisplay(Display.DEFAULT_DISPLAY)?.refreshRate
+            }
+        }
+
         val power = if (current != null && voltage != null && current > 0L && voltage > 0L) {
             val amps = if (current > 20_000L) current / 1_000_000.0 else current / 1_000.0
             val volts = if (voltage > 100L) voltage / 1_000.0 else voltage.toDouble()

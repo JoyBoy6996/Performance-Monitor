@@ -1,5 +1,6 @@
 package com.framescope.monitor.metrics
 
+import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import com.framescope.monitor.core.FpsState
@@ -29,6 +30,8 @@ class FpsSampler(
     private var totalFrames = 0
     private var jankFrames = 0
     private val history = ArrayDeque<Float>()
+
+    private var lastKnownForegroundApp: String? = null
 
     @Volatile
     var foregroundApp: String? = null
@@ -322,19 +325,35 @@ class FpsSampler(
             if (!detected.isNullOrBlank() && detected != "null") return detected
         }
 
-        // 2. Fallback: UsageStatsManager if granted
+        // 2. Fallback: UsageEvents (real-time foreground transitions via GET_USAGE_STATS)
         val ctx = context
         if (ctx != null) {
             val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
             if (usm != null) {
                 val end = System.currentTimeMillis()
-                val begin = end - 300_000L
-                val stats = runCatching { usm.queryUsageStats(UsageStatsManager.INTERVAL_BEST, begin, end) }.getOrNull()
-                val mostRecent = stats
-                    ?.filter { it.lastTimeUsed > begin && it.totalTimeInForeground > 0L }
-                    ?.maxByOrNull { it.lastTimeUsed }
-                if (mostRecent != null) {
-                    return mostRecent.packageName
+                val begin = end - 3_600_000L
+                val events = runCatching { usm.queryEvents(begin, end) }.getOrNull()
+                if (events != null) {
+                    val event = UsageEvents.Event()
+                    var latestPkg: String? = null
+                    var latestTs = 0L
+                    while (events.hasNextEvent()) {
+                        events.getNextEvent(event)
+                        @Suppress("DEPRECATION")
+                        val isResumed = event.eventType == UsageEvents.Event.ACTIVITY_RESUMED ||
+                            event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND
+                        if (isResumed && event.timeStamp >= latestTs && !event.packageName.isNullOrBlank()) {
+                            latestTs = event.timeStamp
+                            latestPkg = event.packageName
+                        }
+                    }
+                    if (!latestPkg.isNullOrBlank()) {
+                        lastKnownForegroundApp = latestPkg
+                        return latestPkg
+                    }
+                }
+                if (!lastKnownForegroundApp.isNullOrBlank()) {
+                    return lastKnownForegroundApp
                 }
             }
         }

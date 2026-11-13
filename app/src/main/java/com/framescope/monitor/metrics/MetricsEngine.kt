@@ -36,6 +36,7 @@ class MetricsEngine(
         set(value) {
             field = value
             fpsSampler.context = value
+            systemSampler.context = value
         }
 
     val fps: StateFlow<FpsState> = fpsSampler.state

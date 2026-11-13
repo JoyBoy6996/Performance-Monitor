@@ -98,15 +98,24 @@ class SystemSampler(
 
         val rawGpuFreq = Parsers.parseGpuFreq(gpu)
         val gpuMhz = rawGpuFreq?.let { if (it > 10_000) it / 1_000_000 else it / 1000 }
+        val gpuName = Parsers.parseGpuName(gpu)
+        val cpuMhz = cpuFreq?.let { it / 1000 }
+        val validPower = power?.takeIf { it > 0.01f && it < 150f }
+
+        val hasAnyMetric = listOf<Any?>(
+            cpu, cpuMhz, gpuName, gpuMhz, level, batteryTemp,
+            validPower, usedGb, totalGb, ramPercent, maxThermal, refresh
+        ).any { it != null }
+        if (!hasAnyMetric) return null
 
         return SystemMetrics(
             cpuPercent = cpu,
-            cpuFreqMHz = cpuFreq?.let { it / 1000 },
-            gpuName = Parsers.parseGpuName(gpu),
+            cpuFreqMHz = cpuMhz,
+            gpuName = gpuName,
             gpuFreqMHz = gpuMhz,
             batteryLevel = level,
             batteryTempC = batteryTemp,
-            powerWatts = power?.takeIf { it > 0.01f && it < 150f },
+            powerWatts = validPower,
             ramUsedGb = usedGb,
             ramTotalGb = totalGb,
             ramPercent = ramPercent,

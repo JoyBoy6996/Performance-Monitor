@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
@@ -35,7 +34,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
@@ -87,12 +88,20 @@ class OverlayService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        if (!Settings.canDrawOverlays(this)) {
+            (applicationContext as? FrameScopeApp)?.container?.overlay?.syncRunning(false)
+            stopSelf()
+            return
+        }
+
+        (applicationContext as? FrameScopeApp)?.container?.overlay?.syncRunning(true)
         buildOverlay()
         observe()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            (applicationContext as? FrameScopeApp)?.container?.overlay?.syncRunning(false)
             removeOverlay()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -102,6 +111,7 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        (applicationContext as? FrameScopeApp)?.container?.overlay?.syncRunning(false)
         scope.cancel()
         removeOverlay()
         super.onDestroy()
@@ -118,10 +128,16 @@ class OverlayService : Service() {
 
     private fun buildOverlay() {
         graphView = null
+        fpsText = null
+        unitText = null
+        frameText = null
+        titleText = null
+
         if (!Settings.canDrawOverlays(this)) return
 
         val app = applicationContext as? FrameScopeApp ?: return
         val settings = app.container.settings
+        val engine = app.container.engine
 
         currentStyle = runCatching {
             OverlayStyle.valueOf(settings.overlayStyle.value)
@@ -142,6 +158,8 @@ class OverlayService : Service() {
             else -> buildStandard(settings)
         }
         applyExpandedState()
+        updateValues(engine.fps.value, engine.system.value, settings)
+        root?.visibility = if (engine.protectedForeground.value) View.GONE else View.VISIBLE
     }
 
     private fun buildPill(settings: AppSettings) {
@@ -168,11 +186,11 @@ class OverlayService : Service() {
         layout.addView(unitText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 3f) })
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 3f * currentScale) })
         layout.addView(frameText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) })
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f * currentScale) })
 
         attachTouchAndWindow(layout, settings)
     }
@@ -180,6 +198,7 @@ class OverlayService : Service() {
     private fun buildRtss(settings: AppSettings) {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            minimumWidth = OverlayViews.dp(this@OverlayService, 125f * currentScale)
             val pad = OverlayViews.dp(this@OverlayService, 8f * currentScale)
             setPadding(pad, pad, pad, pad)
             background = GradientDrawable().apply {
@@ -199,7 +218,10 @@ class OverlayService : Service() {
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#00FF66"), 20f * currentScale)
         frameText = OverlayViews.value(this, "", Color.parseColor("#FFA500"), 12f * currentScale)
         header.addView(fpsText)
-        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(frameText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 8f * currentScale) })
         layout.addView(header)
 
         populateRows(layout, settings, isRtss = true)
@@ -207,9 +229,13 @@ class OverlayService : Service() {
     }
 
     private fun buildStandard(settings: AppSettings) {
+        val isCompact = currentStyle == OverlayStyle.COMPACT
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val pad = OverlayViews.dp(this@OverlayService, 10f * currentScale)
+            if (!isCompact) {
+                minimumWidth = OverlayViews.dp(this@OverlayService, 132f * currentScale)
+            }
+            val pad = OverlayViews.dp(this@OverlayService, (if (isCompact) 8f else 10f) * currentScale)
             setPadding(pad, pad, pad, pad)
             background = GradientDrawable().apply {
                 cornerRadius = OverlayViews.dp(this@OverlayService, 14f).toFloat()
@@ -227,22 +253,29 @@ class OverlayService : Service() {
 
         val header = OverlayViews.row(this)
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 24f * currentScale)
-        frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 12f * currentScale)
         header.addView(fpsText)
-        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        if (!isCompact) {
+            frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 12f * currentScale)
+            header.addView(frameText, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = OverlayViews.dp(this@OverlayService, 8f * currentScale) })
+        }
         layout.addView(header)
 
-        if (showGraph && currentStyle != OverlayStyle.COMPACT) {
+        if (showGraph && !isCompact) {
             graphView = GraphView(this).apply {
+                minimumWidth = OverlayViews.dp(this@OverlayService, 112f * currentScale)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     OverlayViews.dp(this@OverlayService, graphHeight.toFloat() * currentScale)
-                ).apply { topMargin = OverlayViews.dp(this@OverlayService, 4f) }
+                ).apply { topMargin = OverlayViews.dp(this@OverlayService, 4f * currentScale) }
             }
             layout.addView(graphView)
         }
 
-        if (currentStyle != OverlayStyle.COMPACT) {
+        if (!isCompact) {
             populateRows(layout, settings, isRtss = false)
         }
 
@@ -262,7 +295,9 @@ class OverlayService : Service() {
             val label = OverlayViews.label(this, row, labelColor).apply {
                 textSize = 9f * currentScale
             }
-            rowView.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            rowView.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = OverlayViews.dp(this@OverlayService, 8f * currentScale)
+            })
 
             val value = OverlayViews.value(this, "--", valColor, 12f * currentScale)
             rowView.addView(value)
@@ -346,12 +381,35 @@ class OverlayService : Service() {
 
         root = layout
         runCatching { windowManager.addView(layout, lp) }
+        layout.post { clampToScreen() }
+    }
+
+    private fun clampToScreen() {
+        val layout = root ?: return
+        val lp = params ?: return
+        val dm = resources.displayMetrics
+        val viewW = layout.width.takeIf { it > 0 } ?: return
+        val viewH = layout.height.takeIf { it > 0 } ?: return
+        val maxX = (dm.widthPixels - viewW).coerceAtLeast(0)
+        val maxY = (dm.heightPixels - viewH).coerceAtLeast(0)
+        val clampedX = lp.x.coerceIn(0, maxX)
+        val clampedY = lp.y.coerceIn(0, maxY)
+        if (clampedX != lp.x || clampedY != lp.y) {
+            lp.x = clampedX
+            lp.y = clampedY
+            runCatching { windowManager.updateViewLayout(layout, lp) }
+        }
     }
 
     private fun applyExpandedState() {
         val visibility = if (expanded) View.VISIBLE else View.GONE
-        graphView?.visibility = visibility
-        rowViews.values.forEach { it.parent?.let { p -> (p as? View)?.visibility = visibility } }
+        if (currentStyle == OverlayStyle.PILL) {
+            frameText?.visibility = visibility
+        } else {
+            graphView?.visibility = if (expanded && showGraph) View.VISIBLE else View.GONE
+            rowViews.values.forEach { it.parent?.let { p -> (p as? View)?.visibility = visibility } }
+        }
+        root?.post { clampToScreen() }
     }
 
     private fun observe() {
@@ -374,65 +432,49 @@ class OverlayService : Service() {
             }
         }
 
-        // Rebuild only when structure changes (style, rows)
+        // Rebuild overlay cleanly whenever layout/size/graph settings change
         scope.launch {
             combine(
                 settings.overlayStyle.flow,
-                settings.overlayRows.flow
-            ) { style, rows ->
-                style to rows
-            }.collect {
+                settings.overlayRows.flow,
+                settings.overlayScale.flow,
+                settings.overlayShowGraph.flow,
+                settings.overlayGraphHeight.flow
+            ) { _, _, _, _, _ -> }.drop(1).collect {
                 buildOverlay()
             }
         }
 
-        // Re-style in place for presentation properties
+        // Update opacity and click-through in place without rebuilding view
         scope.launch {
             combine(
-                settings.overlayScale.flow,
                 settings.overlayOpacity.flow,
-                settings.overlayShowGraph.flow,
-                settings.overlayGraphHeight.flow,
                 settings.overlayClickThrough.flow
-            ) { _, _, _, _, _ -> }.collect {
-                restyleOverlay(settings)
+            ) { opacity, clickThrough ->
+                opacity to clickThrough
+            }.drop(1).collect { (opacity, clickThrough) ->
+                val rootLayout = root ?: return@collect
+                val lp = params ?: return@collect
+                currentOpacity = opacity.coerceIn(0.3f, 1.0f)
+                lp.alpha = currentOpacity
+                if (clickThrough) {
+                    lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                } else {
+                    lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                }
+                runCatching { windowManager.updateViewLayout(rootLayout, lp) }
             }
         }
     }
 
-    private fun restyleOverlay(settings: AppSettings) {
-        val rootLayout = root ?: return
-        val lp = params ?: return
-        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
-        currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
-        showGraph = settings.overlayShowGraph.value
-        graphHeight = settings.overlayGraphHeight.value
-
-        lp.alpha = currentOpacity
-        if (settings.overlayClickThrough.value) {
-            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        } else {
-            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        }
-
-        graphView?.let { gv ->
-            gv.visibility = if (showGraph && expanded) View.VISIBLE else View.GONE
-            val lpGraph = gv.layoutParams
-            lpGraph?.height = OverlayViews.dp(this, graphHeight.toFloat())
-            gv.layoutParams = lpGraph
-        }
-
-        runCatching { windowManager.updateViewLayout(rootLayout, lp) }
-    }
-
     private fun updateValues(fpsState: FpsState, system: SystemMetrics, settings: AppSettings) {
         val target = settings.fpsThreshold.value
-        val fpsVal = fpsState.fps
+        val fpsVal = if (fpsState.valid) fpsState.fps else 0f
 
-        fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
+        fpsText?.text = if (fpsState.valid) String.format(Locale.US, "%.1f", fpsVal) else "--"
         fpsText?.setTextColor(OverlayViews.fpsColor(fpsVal, target))
 
-        frameText?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else ""
+        frameText?.text = if (fpsState.valid) String.format(Locale.US, "%.1f ms", fpsState.frameTimeMs) else ""
 
         if (fpsState.history.isNotEmpty()) {
             graphView?.setValues(fpsState.history, target.toFloat())
@@ -446,17 +488,17 @@ class OverlayService : Service() {
         }
 
         // Support all 11 rows: FPS, FRAME, CPU, CPUF, GPU, TEMP, BAT, POWER, MEM, REFRESH, APP
-        rowViews["FPS"]?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
-        rowViews["FRAME"]?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else "--"
+        rowViews["FPS"]?.text = if (fpsState.valid) String.format(Locale.US, "%.1f", fpsVal) else "--"
+        rowViews["FRAME"]?.text = if (fpsState.valid) String.format(Locale.US, "%.1f ms", fpsState.frameTimeMs) else "--"
         rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
         rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
-        rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")
-        rowViews["TEMP"]?.text = system.thermalMaxC?.let { "%.1f°C".format(it) }
-            ?: (system.batteryTempC?.let { "%.1f°C".format(it) } ?: "--")
+        rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName?.take(14) ?: "--")
+        rowViews["TEMP"]?.text = system.thermalMaxC?.let { String.format(Locale.US, "%.1f°C", it) }
+            ?: (system.batteryTempC?.let { String.format(Locale.US, "%.1f°C", it) } ?: "--")
         rowViews["BAT"]?.text = system.batteryLevel?.let { "$it%" } ?: "--"
-        rowViews["POWER"]?.text = system.powerWatts?.let { "%.2f W".format(it) } ?: "--"
+        rowViews["POWER"]?.text = system.powerWatts?.let { String.format(Locale.US, "%.2f W", it) } ?: "--"
         rowViews["MEM"]?.text = if (system.ramUsedGb != null && system.ramTotalGb != null) {
-            "%.1f/%.0fG".format(system.ramUsedGb, system.ramTotalGb)
+            String.format(Locale.US, "%.1f/%.0fG", system.ramUsedGb, system.ramTotalGb)
         } else system.ramPercent?.let { "$it%" } ?: "--"
         rowViews["REFRESH"]?.text = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--"
         rowViews["APP"]?.text = if (appName.isNotBlank()) appName.substringAfterLast('.') else "--"

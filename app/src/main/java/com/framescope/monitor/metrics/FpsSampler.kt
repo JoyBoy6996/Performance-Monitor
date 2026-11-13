@@ -74,7 +74,12 @@ class FpsSampler(
             buildString {
                 append("{ ")
                 for (layer in candidateLayers) {
-                    append("echo \"@@@$layer\"; dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | head -40; ")
+                    val safe = layer.replace("\"", "")
+                    append("echo \"@@@$safe\"; dumpsys SurfaceFlinger --latency \"$safe\" 2>/dev/null | head -40; ")
+                    val base = safe.substringBefore('#')
+                    if (base != safe) {
+                        append("echo \"@@@$base\"; dumpsys SurfaceFlinger --latency \"$base\" 2>/dev/null | head -40; ")
+                    }
                 }
                 append("}")
             }
@@ -122,16 +127,32 @@ class FpsSampler(
 
     private var cachedLayers: List<String> = emptyList()
     private var lastLayersAt: Long = 0L
+    private var lastLayersPkg: String? = null
 
     private suspend fun getCandidateLayers(pkg: String): List<String> {
         val now = System.currentTimeMillis()
-        if (now - lastLayersAt > 4000L || cachedLayers.isEmpty()) {
+        if (pkg != lastLayersPkg || now - lastLayersAt > 3000L || cachedLayers.isEmpty()) {
             val listDump = hub.execOrNull("dumpsys SurfaceFlinger --list 2>/dev/null", 1_500)?.out.orEmpty()
             cachedLayers = listDump.lines().map { it.trim() }.filter { it.isNotEmpty() }
             lastLayersAt = now
+            lastLayersPkg = pkg
         }
-        val matching = cachedLayers.filter { it.contains(pkg) }
-        return if (matching.isNotEmpty()) matching.take(3) else cachedLayers.takeLast(3)
+        val filtered = cachedLayers.filterNot {
+            it.startsWith("Bounds for") ||
+                it.startsWith("Background for") ||
+                it.contains("com.framescope.monitor") ||
+                it.contains("StatusBar") ||
+                it.contains("NavigationBar") ||
+                it.contains("ScreenDecor") ||
+                it.contains("NotificationShade")
+        }
+        val matching = filtered.filter { it.contains(pkg) }
+        if (matching.isNotEmpty()) {
+            val surfaceViews = matching.filter { it.contains("SurfaceView", ignoreCase = true) || it.contains("BLAST") }
+            val others = matching.filterNot { it in surfaceViews }
+            return (surfaceViews.takeLast(3) + others.takeLast(2)).distinct().take(4)
+        }
+        return filtered.takeLast(3)
     }
 
     private fun parseSurfaceFlingerOutput(dump: String): FpsState? {

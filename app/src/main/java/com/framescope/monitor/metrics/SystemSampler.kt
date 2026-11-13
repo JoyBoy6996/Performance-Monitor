@@ -4,6 +4,7 @@ import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
+import kotlin.math.abs
 
 /** Collects device metrics that change slowly (CPU, RAM, battery, thermals, GPU). */
 class SystemSampler(private val hub: ShellHub) {
@@ -21,9 +22,10 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.displayInfo()
         )
         val result = hub.execOrNull(script) ?: return null
-        if (!result.ok) return null
         val out = result.out
+        if (out.isBlank()) return null
         val parts = ShellCommands.split(out)
+        if (parts.isEmpty()) return null
         fun part(index: Int): String = parts.getOrElse(index) { "" }
 
         val cpu = cpuPercent(part(0))
@@ -36,25 +38,30 @@ class SystemSampler(private val hub: ShellHub) {
 
         val level = battery["level"]?.toIntOrNull()
         val batteryTemp = battery["temperature"]?.toFloatOrNull()?.let { it / 10f }
-        val current = battery["current_now"]?.toIntOrNull()
-        val voltage = battery["voltage"]?.toIntOrNull()
-        val power = if (current != null && voltage != null) {
-            (current.toDouble() / 1_000_000.0 * voltage / 1000.0).toFloat()
+        val current = battery["current_now"]?.toLongOrNull()?.let { abs(it) }
+        val voltage = battery["voltage"]?.toLongOrNull()
+        val power = if (current != null && voltage != null && current > 0L && voltage > 0L) {
+            val amps = if (current > 20_000L) current / 1_000_000.0 else current / 1_000.0
+            val volts = if (voltage > 100L) voltage / 1_000.0 else voltage.toDouble()
+            (amps * volts).toFloat()
         } else null
 
         val usedGb = if (total > 0) (total - available) / 1_073_741_824f else null
         val totalGb = if (total > 0) total / 1_073_741_824f else null
         val ramPercent = if (total > 0) ((total - available) * 100 / total).toInt() else null
-        val maxThermal = thermals.values.maxOrNull()
+        val maxThermal = thermals.values.filter { it in 10f..120f }.maxOrNull() ?: batteryTemp
+
+        val rawGpuFreq = Parsers.parseGpuFreq(gpu)
+        val gpuMhz = rawGpuFreq?.let { if (it > 10_000) it / 1_000_000 else it / 1000 }
 
         return SystemMetrics(
             cpuPercent = cpu,
             cpuFreqMHz = cpuFreq?.let { it / 1000 },
             gpuName = Parsers.parseGpuName(gpu),
-            gpuFreqMHz = Parsers.parseGpuFreq(gpu)?.let { it / 1000 },
+            gpuFreqMHz = gpuMhz,
             batteryLevel = level,
             batteryTempC = batteryTemp,
-            powerWatts = power?.takeIf { it > 0 },
+            powerWatts = power?.takeIf { it > 0.01f && it < 150f },
             ramUsedGb = usedGb,
             ramTotalGb = totalGb,
             ramPercent = ramPercent,

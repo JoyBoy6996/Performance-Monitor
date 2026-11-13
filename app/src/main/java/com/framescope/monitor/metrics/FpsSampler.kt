@@ -129,20 +129,49 @@ class FpsSampler(
     private var lastLayersAt: Long = 0L
     private var lastLayersPkg: String? = null
 
+    private fun normalizeLayerName(raw: String): String {
+        var s = raw.trim()
+        if (s.startsWith("RequestedLayerState{") && s.endsWith("}")) {
+            s = s.removePrefix("RequestedLayerState{").removeSuffix("}").trim()
+            // Strip OriginOS/Android 15+ timestamp + parentId while preserving #<id>:
+            // "Window:22ff352 type=1 com.pkg/Act 11-13 11:10:26.046#335355 parentId=335338"
+            // -> "Window:22ff352 type=1 com.pkg/Act#335355"
+            s = s.replace(Regex("\\s+\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\.\\d+(#\\d+).*$"), "$1")
+            s = s.replace(Regex("\\s+(?:parentId|relativeParentId|z)=.*$"), "").trim()
+        }
+        return s
+    }
+
     private suspend fun getCandidateLayers(pkg: String): List<String> {
         val now = System.currentTimeMillis()
-        if (pkg != lastLayersPkg || now - lastLayersAt > 3000L || cachedLayers.isEmpty()) {
+        if (pkg != lastLayersPkg || now - lastLayersAt > 2500L || cachedLayers.isEmpty()) {
             val listDump = hub.execOrNull("dumpsys SurfaceFlinger --list 2>/dev/null", 1_500)?.out.orEmpty()
-            cachedLayers = listDump.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            cachedLayers = listDump.lines()
+                .map { normalizeLayerName(it) }
+                .filter { it.isNotEmpty() }
             lastLayersAt = now
             lastLayersPkg = pkg
         }
         val filtered = cachedLayers.filterNot {
             it.startsWith("Bounds for") ||
                 it.startsWith("Background for") ||
+                it.startsWith("Task=") ||
+                it.startsWith("Leaf:") ||
+                it.startsWith("OneHanded:") ||
+                it.startsWith("AppZoomOut:") ||
+                it.startsWith("HideDisplayCutout:") ||
+                it.startsWith("Display ") ||
+                it.startsWith("Display Overlays") ||
+                it.startsWith("Input Overlays") ||
+                it.startsWith("Accessibility Overlays") ||
+                it.startsWith("Ime") ||
+                it.startsWith("SnapshotWindowParent") ||
+                it.startsWith("home_task_overlay") ||
+                it.contains("__@@DcDiming") ||
                 it.contains("com.framescope.monitor") ||
                 it.contains("StatusBar") ||
                 it.contains("NavigationBar") ||
+                it.contains("FakeGestureBar") ||
                 it.contains("ScreenDecor") ||
                 it.contains("NotificationShade")
         }

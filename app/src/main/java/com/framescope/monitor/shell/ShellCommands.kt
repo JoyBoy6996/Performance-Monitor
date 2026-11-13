@@ -8,7 +8,7 @@ object ShellCommands {
         val sep = "__FS_SEP__"
         return commands.joinToString("\n") { cmd ->
             "echo $sep\n{ $cmd ; } 2>/dev/null\n"
-        }
+        } + "true\n"
     }
 
     const val SEPARATOR = "__FS_SEP__"
@@ -87,8 +87,8 @@ object ShellCommands {
 
     fun gpuInfo(): String =
         "dumpsys SurfaceFlinger 2>/dev/null | grep -m1 -E 'GLES:' ; " +
-            "for f in /sys/class/devfreq/*gpu*/cur_freq /sys/class/devfreq/*gpu*/gpu_clock " +
-            "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq /sys/class/kgsl/kgsl-3d0/gpu_clock " +
+            "for f in /sys/class/kgsl/kgsl-3d0/gpuclk /sys/class/kgsl/kgsl-3d0/devfreq/cur_freq " +
+            "/sys/class/devfreq/*gpu*/cur_freq /sys/class/devfreq/*gpu*/gpu_clock " +
             "/sys/devices/platform/*.gpu/devfreq/cur_freq; do " +
             "[ -r \"\$f\" ] && echo \"GPUFREQ=\$(cat \$f)\" && break; done"
 

@@ -29,9 +29,21 @@ object TimeStats {
                 missed = 0L
                 continue
             }
-            FRAMES_RE.find(line)?.let { frames = it.groupValues[1].toLongOrNull(); continue }
-            JANKY_RE.find(line)?.let { janky = it.groupValues[1].toLongOrNull() ?: janky; continue }
-            MISSED_RE.find(line)?.let { missed = it.groupValues[1].toLongOrNull() ?: missed; continue }
+            val mFrames = FRAMES_RE.find(line)
+            if (mFrames != null) {
+                frames = mFrames.groupValues[1].toLongOrNull()
+                continue
+            }
+            val mJanky = JANKY_RE.find(line)
+            if (mJanky != null) {
+                janky = mJanky.groupValues[1].toLongOrNull() ?: janky
+                continue
+            }
+            val mMissed = MISSED_RE.find(line)
+            if (mMissed != null) {
+                missed = mMissed.groupValues[1].toLongOrNull() ?: missed
+                continue
+            }
 
             val candidate = when {
                 line.startsWith("Layer name:", ignoreCase = true) ->

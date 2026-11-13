@@ -328,10 +328,12 @@ class FpsSampler(
             val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
             if (usm != null) {
                 val end = System.currentTimeMillis()
-                val begin = end - 10_000
-                val stats = runCatching { usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, begin, end) }.getOrNull()
-                val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
-                if (mostRecent != null && mostRecent.lastTimeUsed > begin) {
+                val begin = end - 300_000L
+                val stats = runCatching { usm.queryUsageStats(UsageStatsManager.INTERVAL_BEST, begin, end) }.getOrNull()
+                val mostRecent = stats
+                    ?.filter { it.lastTimeUsed > begin && it.totalTimeInForeground > 0L }
+                    ?.maxByOrNull { it.lastTimeUsed }
+                if (mostRecent != null) {
                     return mostRecent.packageName
                 }
             }

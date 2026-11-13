@@ -136,7 +136,7 @@ class FpsSampler(
             // Strip OriginOS/Android 15+ timestamp + parentId while preserving #<id>:
             // "Window:22ff352 type=1 com.pkg/Act 11-13 11:10:26.046#335355 parentId=335338"
             // -> "Window:22ff352 type=1 com.pkg/Act#335355"
-            s = s.replace(Regex("\\s+\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\.\\d+(#\\d+).*$"), "$1")
+            s = s.replace(Regex("\\s+\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}\\.\\d+(#\\d+).*$")) { it.groupValues[1] }
             s = s.replace(Regex("\\s+(?:parentId|relativeParentId|z)=.*$"), "").trim()
         }
         return s

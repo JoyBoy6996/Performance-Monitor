@@ -38,7 +38,8 @@ class ShellHub(
     private val appContext: Context? = null
 ) {
 
-    constructor(context: Context? = null) : this(ShizukuRunner(context), context?.applicationContext)
+    constructor(context: Context?) : this(ShizukuRunner(context), context?.applicationContext)
+    constructor() : this(ShizukuRunner(null), null)
 
     private val _status = MutableStateFlow(AccessStatus())
     val status: StateFlow<AccessStatus> = _status.asStateFlow()

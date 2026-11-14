@@ -1,11 +1,14 @@
 name: Build APK
 
 on:
+  push:
+    branches: [ "fix/fps-overlay" ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -13,21 +16,17 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Configure Android SDK path
-        run: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build Debug APK with Info Logs
-        run: ./gradlew assembleDebug --info
+      - name: Build clean debug APK
+        run: ./gradlew clean assembleDebug
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FrameScope-debug-apk
+          name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
@@ -43,7 +44,7 @@ fun FrameScopeScreen(
     Scaffold(
         modifier = modifier,
         containerColor = Color.Transparent,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        contentWindowInsets = WindowInsets.statusBars,
         topBar = {
             MediumTopAppBar(
                 modifier = Modifier.glass(
@@ -84,7 +85,7 @@ fun FrameScopeScreen(
             contentPadding = PaddingValues(
                 start = Space.gutter,
                 end = Space.gutter,
-                top = padding.calculateTopPadding(),
+                top = padding.calculateTopPadding() + 12.dp,
                 bottom = bottomPadding
             ),
             verticalArrangement = Arrangement.spacedBy(Space.md),

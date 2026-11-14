@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
@@ -44,15 +44,17 @@ fun FrameScopeScreen(
     Scaffold(
         modifier = modifier,
         containerColor = Color.Transparent,
-        contentWindowInsets = WindowInsets.statusBars,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             MediumTopAppBar(
-                modifier = Modifier.glass(
-                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                    tint = LocalGlassColors.current.fill,
-                    hairline = LocalGlassColors.current.hairline,
-                    elevation = 0.dp
-                ),
+                modifier = Modifier
+                    .statusBarsPadding()
+                    .glass(
+                        shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
+                        tint = LocalGlassColors.current.fill,
+                        hairline = LocalGlassColors.current.hairline,
+                        elevation = 0.dp
+                    ),
                 title = {
                     androidx.compose.foundation.layout.Column {
                         Text(
@@ -70,6 +72,7 @@ fun FrameScopeScreen(
                 },
                 actions = actions,
                 scrollBehavior = scrollBehavior,
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 colors = TopAppBarDefaults.mediumTopAppBarColors(
                     containerColor = Color.Transparent,
                     scrolledContainerColor = Color.Transparent
@@ -85,7 +88,7 @@ fun FrameScopeScreen(
             contentPadding = PaddingValues(
                 start = Space.gutter,
                 end = Space.gutter,
-                top = padding.calculateTopPadding() + 12.dp,
+                top = padding.calculateTopPadding() + Space.md,
                 bottom = bottomPadding
             ),
             verticalArrangement = Arrangement.spacedBy(Space.md),

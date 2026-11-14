@@ -11,11 +11,11 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.MediumTopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -52,7 +52,7 @@ fun FrameScopeScreen(
         containerColor = Color.Transparent,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            TopAppBar(
+            MediumTopAppBar(
                 modifier = Modifier.glass(
                     shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
                     tint = LocalGlassColors.current.fill,
@@ -76,7 +76,7 @@ fun FrameScopeScreen(
                 },
                 actions = actions,
                 scrollBehavior = scrollBehavior,
-                colors = TopAppBarDefaults.topAppBarColors(
+                colors = TopAppBarDefaults.mediumTopAppBarColors(
                     containerColor = Color.Transparent,
                     scrolledContainerColor = Color.Transparent
                 )
@@ -91,7 +91,7 @@ fun FrameScopeScreen(
             contentPadding = PaddingValues(
                 start = Space.gutter,
                 end = Space.gutter,
-                top = padding.calculateTopPadding() + 8.dp,
+                top = padding.calculateTopPadding(),
                 bottom = bottomPadding
             ),
             verticalArrangement = Arrangement.spacedBy(Space.md),

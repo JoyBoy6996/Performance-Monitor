@@ -16,11 +16,17 @@ jobs:
           distribution: "temurin"
           java-version: "17"
 
+      - name: Setup Android SDK
+        uses: subosito/android-action@v2
+        with:
+          components: platform-tools,platforms;android-34,build-tools;34.0.0
+          allow-missing-components: true
+
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build APK skipping tests
-        run: ./gradlew build -x test
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

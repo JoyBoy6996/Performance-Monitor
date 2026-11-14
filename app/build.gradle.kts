@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.framescope.monitor.dev"
+    namespace = "com.joyboy6996.performancemonitor"
     compileSdk = 35
 
     defaultConfig {

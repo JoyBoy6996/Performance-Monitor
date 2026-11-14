@@ -5,11 +5,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MediumTopAppBar
 import androidx.compose.material3.MaterialTheme
@@ -25,7 +25,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.LocalGlassColors
-import com.framescope.monitor.ui.theme.glass
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,12 +45,7 @@ fun FrameScopeScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             MediumTopAppBar(
-                modifier = Modifier.glass(
-                    shape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp),
-                    tint = LocalGlassColors.current.fill,
-                    hairline = LocalGlassColors.current.hairline,
-                    elevation = 0.dp
-                ),
+                modifier = Modifier.fillMaxWidth(),
                 title = {
                     androidx.compose.foundation.layout.Column {
                         Text(
@@ -69,9 +63,10 @@ fun FrameScopeScreen(
                 },
                 actions = actions,
                 scrollBehavior = scrollBehavior,
+                windowInsets = TopAppBarDefaults.windowInsets,
                 colors = TopAppBarDefaults.mediumTopAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent
+                    containerColor = LocalGlassColors.current.fill,
+                    scrolledContainerColor = LocalGlassColors.current.fill
                 )
             )
         }

@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.framescope.monitor"
+    namespace = "com.framescope.monitor.dev"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.framescope.monitor"
+        applicationId = "com.framescope.monitor.dev"
         minSdk = 26
         targetSdk = 35
         versionCode = 2

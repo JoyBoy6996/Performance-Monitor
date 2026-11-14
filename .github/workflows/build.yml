@@ -1,6 +1,8 @@
 name: Build APK
 
 on:
+  push:
+    branches: [ "fix/fps-overlay" ]
   workflow_dispatch:
 
 jobs:

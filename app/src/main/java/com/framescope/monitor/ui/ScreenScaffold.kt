@@ -91,7 +91,7 @@ fun FrameScopeScreen(
             contentPadding = PaddingValues(
                 start = Space.gutter,
                 end = Space.gutter,
-                top = padding.calculateTopPadding() + Space.sm,
+                top = padding.calculateTopPadding(),
                 bottom = bottomPadding
             ),
             verticalArrangement = Arrangement.spacedBy(Space.md),

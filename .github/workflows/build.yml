@@ -17,13 +17,6 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Configure Android SDK & Licenses
-        run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          mkdir -p $ANDROID_HOME/licenses
-          echo "24333f8a43b681623ef8046314d874af1824d168" > $ANDROID_HOME/licenses/android-sdk-license
-          echo "d56f5187479451eabf01fb78af6dfcb139a648b0" >> $ANDROID_HOME/licenses/android-sdk-license
-
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 

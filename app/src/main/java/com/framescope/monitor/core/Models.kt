@@ -11,8 +11,40 @@ data class FpsState(
     val surface: String? = null,
     val valid: Boolean = false,
     /** Why there is no data, in plain words. */
-    val reason: String? = null
+    val reason: String? = null,
+    /** Whether the reading can be shown at all, and why not when it cannot. */
+    val availability: MetricAvailability = MetricAvailability.UNSUPPORTED,
+    /** When the reading was taken, on the monotonic clock. */
+    val measuredAtElapsedNanos: Long = 0L,
+    /** How old the frame behind the number is, in milliseconds. */
+    val sampleAgeMs: Long = 0L,
+    /** The exact span of time the current frame rate was measured over. */
+    val measurementWindowMs: Long = 0L,
+    /** Which provider produced the reading. */
+    val sourceKind: FpsSourceKind = FpsSourceKind.NONE,
+    /**
+     * The frame rate that one percent of the frames were slower than.
+     *
+     * Derived from the frame times of the window, not from an average of frame rates:
+     * an average cannot describe the worst frames of a run.
+     */
+    val low1PercentFps: Float? = null,
+    /** The frame rate that five percent of the frames were slower than. */
+    val low5PercentFps: Float? = null,
+    /** The app the reading belongs to. */
+    val appPackage: String? = null
 )
+
+/** The provider a frame rate reading came from. */
+enum class FpsSourceKind {
+    NONE,
+    /** Presentation timestamps of a verified foreground layer. */
+    SURFACE_FLAINGER_LATENCY,
+    /** SurfaceFlinger frame counters, used as an interval estimate. */
+    TIMESTATS,
+    /** The app's own graphics pipeline. */
+    GFXINFO
+}
 
 /** Device level metrics, refreshed a couple of times per second. */
 data class SystemMetrics(
@@ -28,8 +60,45 @@ data class SystemMetrics(
     val ramPercent: Int? = null,
     val thermalMaxC: Float? = null,
     val refreshHz: Float? = null,
-    val updatedAt: Long = 0L
-)
+    val updatedAt: Long = 0L,
+    /** Why each metric is or is not available. A metric missing here is unavailable. */
+    val availability: Map<SystemMetric, MetricAvailability> = emptyMap(),
+    /** Where each metric was read from. */
+    val sources: Map<SystemMetric, String> = emptyMap(),
+    /** When the snapshot was taken, on the monotonic clock. */
+    val measuredAtElapsedNanos: Long = 0L
+) {
+    /**
+     * The state of one metric.
+     *
+     * A metric with no value and no recorded state was never collected, which is
+     * different from one that was collected and is unavailable.
+     */
+    fun availabilityOf(metric: SystemMetric): MetricAvailability =
+        availability[metric] ?: if (isPresent(metric)) {
+            MetricAvailability.AVAILABLE
+        } else {
+            MetricAvailability.UNSUPPORTED
+        }
+
+    /** The collector that produced this metric, when it is known. */
+    fun sourceOf(metric: SystemMetric): String? = sources[metric]
+
+    private fun isPresent(metric: SystemMetric): Boolean = when (metric) {
+        SystemMetric.CPU_PERCENT -> cpuPercent != null
+        SystemMetric.CPU_FREQ_MHZ -> cpuFreqMHz != null
+        SystemMetric.GPU_NAME -> gpuName != null
+        SystemMetric.GPU_FREQ_MHZ -> gpuFreqMHz != null
+        SystemMetric.BATTERY_LEVEL -> batteryLevel != null
+        SystemMetric.BATTERY_TEMP_C -> batteryTempC != null
+        SystemMetric.POWER_WATTS -> powerWatts != null
+        SystemMetric.RAM_USED_GB -> ramUsedGb != null
+        SystemMetric.RAM_TOTAL_GB -> ramTotalGb != null
+        SystemMetric.RAM_PERCENT -> ramPercent != null
+        SystemMetric.THERMAL_MAX_C -> thermalMaxC != null
+        SystemMetric.REFRESH_HZ -> refreshHz != null
+    }
+}
 
 /** A recorded gameplay / app session. */
 data class SessionRecord(
@@ -60,7 +129,33 @@ data class SessionRecord(
     /** Longest frame of the run, in milliseconds. */
     val longestFrameMs: Float = 0f,
     /** Seconds in which the frame rate fell below the target. */
-    val dropSeconds: Int = 0
+    val dropSeconds: Int = 0,
+    /**
+     * The parts of the run that were measured from different apps or different sources.
+     *
+     * The frame rate of two providers is not the same kind of number, so the run is
+     * split where the app or the provider changed instead of one series being drawn
+     * across the boundary.
+     */
+    val segments: List<SessionSegment> = emptyList(),
+    /** Seconds of the run that had no reading at all. */
+    val gapSeconds: Int = 0
+)
+
+/**
+ * One continuous stretch of a session that was measured from one app with one source.
+ */
+data class SessionSegment(
+    val appPackage: String,
+    val source: String,
+    /** Where the segment starts, measured from the beginning of the session. */
+    val startOffsetMs: Long,
+    /** Where the segment ends, measured from the beginning of the session. */
+    val endOffsetMs: Long,
+    /** The frames that were counted in this segment. */
+    val frames: Int,
+    /** The average frame rate of this segment. */
+    val averageFps: Float
 )
 
 /** Aggregated numbers for the session that is currently being recorded. */

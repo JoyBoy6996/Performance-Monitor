@@ -9,6 +9,8 @@ jobs:
   build:
     name: Build FrameScope APK
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,20 +19,38 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install SDK packages
-        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - name: Show the environment
+        run: |
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || true
+          echo "--- platforms:"; ls "$ANDROID_HOME/platforms" || true
+          echo "--- build-tools:"; ls "$ANDROID_HOME/build-tools" || true
+          echo "--- sdkmanager:"; which sdkmanager || true
+      - name: Install the SDK packages the build needs
+        run: |
+          SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          if [ -z "$SDKMANAGER" ]; then SDKMANAGER=$(command -v sdkmanager || true); fi
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" || \
+              echo "sdkmanager ne packages install nahi kiye - preinstalled SDK par chalega"
+          else
+            echo "sdkmanager nahi mila - runner ke preinstalled SDK par chalega"
+          fi
       - name: Make Gradlew Executable
         run: chmod +x gradlew
       - name: Run Unit Tests
         continue-on-error: true
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace || \
+            (echo "dobara try kar raha hoon" && sleep 20 && ./gradlew assembleDebug --no-daemon --stacktrace)
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: FrameScope-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore

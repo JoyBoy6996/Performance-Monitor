@@ -3,6 +3,7 @@ package com.framescope.monitor.metrics
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.steadyWindow
 import java.util.UUID
@@ -33,6 +34,21 @@ data class SecondBucket(
 
 /**
  * Handles background sampling during recording runs and builds complete [SessionRecord] models.
+ *
+ * The numbers of a session are built from the frame counter of the sampler, not from the
+ * frame rate of each poll:
+ *
+ * - The frame total is the number of frames that were actually presented, counted once
+ *   each. The sampler resets its counter when the app or the provider changes, and a
+ *   reset is treated as a boundary rather than as a number to subtract.
+ * - The first reading of a run is the baseline of the counter, so the run counts the
+ *   frames that were presented from that moment on. The frames the counter had already
+ *   seen belong to whatever came before the run and are not claimed by it.
+ * - The jank count is the number of frame intervals that missed the frame budget.
+ * - The 1% and 5% lows come from the frame times, and the session keeps the worst window
+ *   of the run.
+ * - The average is the unique frames divided by the time that was actually measured.
+ *   Time without a reading is a gap, and a gap is not turned into data.
  */
 class SessionLogger(private val store: SessionStore) {
 
@@ -56,11 +72,29 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketBattery = ArrayList<Float>()
 
     private var lastBucketSec = -1L
-    private var lastFpsStateTotalFrames = -1
-    private var accumulatedRealFrames = 0
+
+    private var lastTotalFrames = -1
+    private var lastJankFrames = -1
+    private var accumulatedFrames = 0
+    private var accumulatedJank = 0
     private var observedSamples = 0
-    private var jankFramesCount = 0
     private var maxFrameTimeSeen = 0f
+    private var low1Seen = Float.MAX_VALUE
+    private var low5Seen = Float.MAX_VALUE
+    private var minFpsSeen = Float.MAX_VALUE
+    private var maxFpsSeen = 0f
+
+    private val segments = ArrayList<SessionSegment>()
+    private var segmentPackage = ""
+    private var segmentSource = ""
+    private var segmentStartMs = 0L
+    private var segmentFrames = 0
+    private var segmentFpsSum = 0f
+    private var segmentSamples = 0
+
+    private var firstValidAt = 0L
+    private var lastValidAt = 0L
+    private var gapMs = 0L
 
     @Synchronized
     fun start(packageName: String, label: String, initialBattery: Int?) {
@@ -81,11 +115,28 @@ class SessionLogger(private val store: SessionStore) {
         bucketBattery.clear()
 
         lastBucketSec = startedAt / 1000
-        lastFpsStateTotalFrames = -1
-        accumulatedRealFrames = 0
+        lastTotalFrames = -1
+        lastJankFrames = -1
+        accumulatedFrames = 0
+        accumulatedJank = 0
         observedSamples = 0
-        jankFramesCount = 0
         maxFrameTimeSeen = 0f
+        low1Seen = Float.MAX_VALUE
+        low5Seen = Float.MAX_VALUE
+        minFpsSeen = Float.MAX_VALUE
+        maxFpsSeen = 0f
+
+        segments.clear()
+        segmentPackage = ""
+        segmentSource = ""
+        segmentStartMs = 0L
+        segmentFrames = 0
+        segmentFpsSum = 0f
+        segmentSamples = 0
+
+        firstValidAt = 0L
+        lastValidAt = 0L
+        gapMs = 0L
     }
 
     @Synchronized
@@ -103,34 +154,59 @@ class SessionLogger(private val store: SessionStore) {
         val battery = metrics.batteryLevel ?: 0
         val ram = metrics.ramPercent ?: 0
 
-        val sample = SessionSample(
-            sessionId = currentSessionId,
-            timestamp = now,
-            fps = fps,
-            frameTimeMs = frameTime,
-            cpuPercent = cpu,
-            gpuFreqMHz = gpuFreq,
-            thermalMaxC = temp,
-            batteryLevel = battery,
-            ramPercent = ram
+        samples.add(
+            SessionSample(
+                sessionId = currentSessionId,
+                timestamp = now,
+                fps = fps,
+                frameTimeMs = frameTime,
+                cpuPercent = cpu,
+                gpuFreqMHz = gpuFreq,
+                thermalMaxC = temp,
+                batteryLevel = battery,
+                ramPercent = ram
+            )
         )
-        samples.add(sample)
-
         observedSamples++
-        if (lastFpsStateTotalFrames >= 0 && fpsState.totalFrames >= lastFpsStateTotalFrames) {
-            accumulatedRealFrames += (fpsState.totalFrames - lastFpsStateTotalFrames)
-        } else if (fpsState.totalFrames > 0 && lastFpsStateTotalFrames < 0) {
-            accumulatedRealFrames += 1
-        }
-        lastFpsStateTotalFrames = fpsState.totalFrames
 
-        val targetFrameTimeMs = if (targetFps > 0) 1000f / targetFps else 16.66f
-        if (frameTime > targetFrameTimeMs * 1.5f || (fps > 0 && fps < targetFps * 0.85f)) {
-            jankFramesCount++
+        // The frames that were presented since the last poll. The counter of the sampler
+        // only ever grows while it is looking at the same target, so a target change
+        // shows up as a number that went backwards and is treated as a boundary.
+        val frameDelta = if (lastTotalFrames >= 0 && fpsState.totalFrames >= lastTotalFrames) {
+            fpsState.totalFrames - lastTotalFrames
+        } else {
+            0
         }
+        accumulatedFrames += frameDelta
+        lastTotalFrames = fpsState.totalFrames
+
+        if (lastJankFrames >= 0 && fpsState.jankFrames >= lastJankFrames) {
+            accumulatedJank += fpsState.jankFrames - lastJankFrames
+        }
+        lastJankFrames = fpsState.jankFrames
+
+        if (fps > 0f) {
+            if (fps > maxFpsSeen) maxFpsSeen = fps
+            if (fps < minFpsSeen) minFpsSeen = fps
+        }
+        fpsState.low1PercentFps?.let { if (it > 0f && it < low1Seen) low1Seen = it }
+        fpsState.low5PercentFps?.let { if (it > 0f && it < low5Seen) low5Seen = it }
         if (frameTime > maxFrameTimeSeen) {
             maxFrameTimeSeen = frameTime
         }
+
+        // A stretch of time without a reading is a gap, not a slow second.
+        if (firstValidAt == 0L) {
+            firstValidAt = now
+        } else {
+            val delta = now - lastValidAt
+            if (delta > GAP_THRESHOLD_MS) {
+                gapMs += delta - GAP_THRESHOLD_MS
+            }
+        }
+        lastValidAt = now
+
+        updateSegment(fpsState, fps, now, frameDelta)
 
         bucketFps.add(fps)
         bucketFrameTime.add(frameTime)
@@ -140,7 +216,8 @@ class SessionLogger(private val store: SessionStore) {
 
         if (nowSec > lastBucketSec) {
             flushBucket()
-            // Fill any missed seconds if sampler stalled
+            // The chart stays continuous, but the gap is counted and kept out of the
+            // numbers rather than being turned into data that was never measured.
             val gap = (nowSec - lastBucketSec - 1).coerceAtMost(30)
             if (gap > 0 && secondBuckets.isNotEmpty()) {
                 val last = secondBuckets.last()
@@ -150,6 +227,47 @@ class SessionLogger(private val store: SessionStore) {
             }
             lastBucketSec = nowSec
         }
+    }
+
+    /**
+     * Keeps the run split into the stretches that were measured the same way.
+     *
+     * The frame rate of two providers is not the same kind of number, so a change of app
+     * or of provider ends one segment and starts another.
+     */
+    private fun updateSegment(fpsState: FpsState, fps: Float, now: Long, frameDelta: Int) {
+        val pkg = fpsState.appPackage ?: currentPackage
+        val source = fpsState.sourceKind.name
+        val offset = now - startedAt
+
+        if (segmentPackage != pkg || segmentSource != source) {
+            closeSegment(offset)
+            segmentPackage = pkg
+            segmentSource = source
+            segmentStartMs = offset
+            segmentFrames = 0
+            segmentFpsSum = 0f
+            segmentSamples = 0
+        }
+
+        segmentSamples++
+        segmentFpsSum += fps
+        segmentFrames += frameDelta
+    }
+
+    private fun closeSegment(offset: Long) {
+        if (segmentPackage.isEmpty() && segmentSource.isEmpty()) return
+        if (segmentSamples == 0) return
+        segments.add(
+            SessionSegment(
+                appPackage = segmentPackage,
+                source = segmentSource,
+                startOffsetMs = segmentStartMs,
+                endOffsetMs = offset,
+                frames = segmentFrames,
+                averageFps = segmentFpsSum / segmentSamples
+            )
+        )
     }
 
     private fun flushBucket() {
@@ -172,32 +290,33 @@ class SessionLogger(private val store: SessionStore) {
     @Synchronized
     fun currentLiveStats(): LiveStats {
         if (!isRecording || samples.isEmpty()) return LiveStats()
-        val allFps = samples.map { it.fps }.filter { it > 0f }.sorted()
-        val avgFps = if (allFps.isNotEmpty()) allFps.average().toFloat() else 0f
-        val maxFps = allFps.lastOrNull() ?: 0f
-        val minFps = allFps.firstOrNull() ?: 0f
-        val p1Index = ((allFps.size - 1) * 0.01f).toInt().coerceIn(0, (allFps.size - 1).coerceAtLeast(0))
-        val p5Index = ((allFps.size - 1) * 0.05f).toInt().coerceIn(0, (allFps.size - 1).coerceAtLeast(0))
-        val low1 = if (allFps.isNotEmpty()) allFps[p1Index] else 0f
-        val low5 = if (allFps.isNotEmpty()) allFps[p5Index] else 0f
-        val frames = if (accumulatedRealFrames > 0) accumulatedRealFrames else observedSamples
-        val smoothness = if (frames > 0) ((1f - (jankFramesCount.toFloat() / frames)) * 100f).coerceIn(0f, 100f) else 100f
-        val avgFt = if (samples.isNotEmpty()) samples.map { it.frameTimeMs }.average().toFloat() else 0f
+        val measuredMs = measuredDurationMs()
+        val avgFps = if (measuredMs > 0L) {
+            (accumulatedFrames.toDouble() * 1000.0 / measuredMs).toFloat()
+        } else {
+            0f
+        }
+        val smoothness = if (accumulatedFrames > 0) {
+            ((1f - (accumulatedJank.toFloat() / accumulatedFrames)) * 100f).coerceIn(0f, 100f)
+        } else {
+            100f
+        }
+        val avgFt = samples.map { it.frameTimeMs }.average().toFloat()
         val maxTemp = samples.map { it.thermalMaxC }.filter { it > 0f }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
 
         return LiveStats(
             avgFps = avgFps,
-            maxFps = maxFps,
-            minFps = minFps,
-            low1Percent = low1,
-            low5Percent = low5,
+            maxFps = if (maxFpsSeen == 0f) 0f else maxFpsSeen,
+            minFps = if (minFpsSeen == Float.MAX_VALUE) 0f else minFpsSeen,
+            low1Percent = if (low1Seen == Float.MAX_VALUE) 0f else low1Seen,
+            low5Percent = if (low5Seen == Float.MAX_VALUE) 0f else low5Seen,
             smoothness = smoothness,
-            totalFrames = frames,
-            jankFrames = jankFramesCount,
+            totalFrames = accumulatedFrames,
+            jankFrames = accumulatedJank,
             avgFrameTimeMs = avgFt,
             maxFrameTimeMs = maxFrameTimeSeen,
-            durationMs = System.currentTimeMillis() - startedAt,
+            durationMs = measuredMs,
             maxTempC = maxTemp,
             avgCpu = avgCpu
         )
@@ -208,6 +327,7 @@ class SessionLogger(private val store: SessionStore) {
         if (!isRecording) return null
         isRecording = false
         flushBucket()
+        closeSegment(System.currentTimeMillis() - startedAt)
 
         val duration = System.currentTimeMillis() - startedAt
         if (samples.size < 3 && secondBuckets.size < 2) {
@@ -222,19 +342,24 @@ class SessionLogger(private val store: SessionStore) {
         val evaluationFps = if (steady.isNotEmpty()) steady else allFps
         val sortedFps = evaluationFps.sorted()
 
-        val avgFps = sortedFps.average().toFloat()
-        val maxFps = sortedFps.last()
-        val minFps = sortedFps.first()
+        // The average is the frames that were presented divided by the time that was
+        // actually measured, not the average of the per second readings.
+        val measuredMs = measuredDurationMs()
+        val avgFps = if (measuredMs > 0L) {
+            (accumulatedFrames.toDouble() * 1000.0 / measuredMs).toFloat()
+        } else {
+            sortedFps.average().toFloat()
+        }
+        val maxFps = if (maxFpsSeen == 0f) sortedFps.last() else maxFpsSeen
+        val minFps = if (minFpsSeen == Float.MAX_VALUE) sortedFps.first() else minFpsSeen
 
-        // 1% low and 5% low
-        val p1Index = ((sortedFps.size - 1) * 0.01f).toInt().coerceIn(0, sortedFps.size - 1)
-        val p5Index = ((sortedFps.size - 1) * 0.05f).toInt().coerceIn(0, sortedFps.size - 1)
-        val low1 = sortedFps[p1Index]
-        val low5 = sortedFps[p5Index]
+        // The 1% and 5% lows are the worst window of the run, taken from the frame times.
+        val low1 = if (low1Seen == Float.MAX_VALUE) sortedFps.first() else low1Seen
+        val low5 = if (low5Seen == Float.MAX_VALUE) sortedFps.first() else low5Seen
 
-        val totalFrames = if (accumulatedRealFrames > 0) accumulatedRealFrames else observedSamples
+        val totalFrames = accumulatedFrames
         val smoothness = if (totalFrames > 0) {
-            ((1f - (jankFramesCount.toFloat() / totalFrames)) * 100f).coerceIn(0f, 100f)
+            ((1f - (accumulatedJank.toFloat() / totalFrames)) * 100f).coerceIn(0f, 100f)
         } else 100f
 
         val avgFrameTime = if (samples.isNotEmpty()) {
@@ -257,7 +382,7 @@ class SessionLogger(private val store: SessionStore) {
             low5Percent = low5,
             smoothness = smoothness,
             totalFrames = totalFrames,
-            jankFrames = jankFramesCount,
+            jankFrames = accumulatedJank,
             avgFrameTimeMs = avgFrameTime,
             maxFrameTimeMs = maxFrameTimeSeen,
             maxTempC = maxTemp,
@@ -268,11 +393,29 @@ class SessionLogger(private val store: SessionStore) {
             frameTimeSeries = secondBuckets.map { it.frameTimeMs },
             batterySeries = secondBuckets.map { it.batteryLevel },
             longestFrameMs = maxFrameTimeSeen,
-            dropSeconds = evaluationFps.count { it < targetFps }
+            dropSeconds = evaluationFps.count { it < targetFps },
+            segments = segments.toList(),
+            gapSeconds = (gapMs / 1000L).toInt()
         )
 
         store.add(record)
         store.addSamples(samples)
         return record
+    }
+
+    /** The time of the run that carried a reading, without the gaps. */
+    private fun measuredDurationMs(): Long {
+        if (firstValidAt == 0L || lastValidAt <= firstValidAt) return 0L
+        return (lastValidAt - firstValidAt - gapMs).coerceAtLeast(0L)
+    }
+
+    companion object {
+        /**
+         * Two readings further apart than this are a gap rather than a slow second.
+         *
+         * The sampler polls several times a second, so anything beyond two seconds means
+         * the app went away or the source stopped answering.
+         */
+        private const val GAP_THRESHOLD_MS = 2_000L
     }
 }

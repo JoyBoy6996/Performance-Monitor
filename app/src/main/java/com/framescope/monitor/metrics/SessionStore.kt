@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.SessionSegment
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -144,6 +145,17 @@ class SessionStore(context: Context) {
         put("batterySeries", JSONArray(record.batterySeries.map { it.toDouble() }))
         put("longestFrameMs", record.longestFrameMs.toDouble())
         put("dropSeconds", record.dropSeconds)
+        put("gapSeconds", record.gapSeconds)
+        put("segments", JSONArray(record.segments.map { segment ->
+            JSONObject().apply {
+                put("appPackage", segment.appPackage)
+                put("source", segment.source)
+                put("startOffsetMs", segment.startOffsetMs)
+                put("endOffsetMs", segment.endOffsetMs)
+                put("frames", segment.frames)
+                put("averageFps", segment.averageFps.toDouble())
+            }
+        }))
     }.toString()
 
     fun recordFromJson(text: String): SessionRecord = fromJson(text)
@@ -174,7 +186,9 @@ class SessionStore(context: Context) {
             frameTimeSeries = o.optJSONArray("frameTimeSeries").toFloatList(),
             batterySeries = o.optJSONArray("batterySeries").toFloatList(),
             longestFrameMs = o.optDouble("longestFrameMs", 0.0).toFloat(),
-            dropSeconds = o.optInt("dropSeconds")
+            dropSeconds = o.optInt("dropSeconds"),
+            gapSeconds = o.optInt("gapSeconds"),
+            segments = o.optJSONArray("segments").toSegments()
         )
     }
 
@@ -205,6 +219,26 @@ class SessionStore(context: Context) {
         val out = ArrayList<Float>(length())
         for (i in 0 until length()) {
             out.add(optDouble(i, 0.0).toFloat())
+        }
+        return out
+    }
+
+    /** Reads the segments of a run, ignoring anything that does not parse. */
+    private fun JSONArray?.toSegments(): List<SessionSegment> {
+        if (this == null) return emptyList()
+        val out = ArrayList<SessionSegment>()
+        for (i in 0 until length()) {
+            val item = optJSONObject(i) ?: continue
+            out.add(
+                SessionSegment(
+                    appPackage = item.optString("appPackage"),
+                    source = item.optString("source"),
+                    startOffsetMs = item.optLong("startOffsetMs"),
+                    endOffsetMs = item.optLong("endOffsetMs"),
+                    frames = item.optInt("frames"),
+                    averageFps = item.optDouble("averageFps", 0.0).toFloat()
+                )
+            )
         }
         return out
     }

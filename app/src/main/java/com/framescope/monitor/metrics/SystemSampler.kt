@@ -1,69 +1,104 @@
 package com.framescope.monitor.metrics
 
+import com.framescope.monitor.core.MetricAvailability
+import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
 
-/** Collects device metrics that change slowly (CPU, RAM, battery, thermals, GPU). */
+/**
+ * The device metrics that need a privileged shell.
+ *
+ * These are the readings a normal app cannot get: the CPU frequency node, the GPU clock
+ * and the detailed thermal sensors. They are only available while Shizuku is connected,
+ * and each one reports its own state so that a command which fails does not take the
+ * others down with it.
+ */
 class SystemSampler(private val hub: ShellHub) {
 
     private var lastCpu: LongArray? = null
 
-    suspend fun sample(): SystemMetrics? {
+    /**
+     * Reads the privileged metrics.
+     *
+     * The result always describes every metric, including the ones that could not be
+     * read. It never returns null: the caller merges this over whatever the native
+     * collectors produced and keeps the native values for everything that is missing
+     * here.
+     */
+    suspend fun sample(): SystemMetrics {
+        val now = android.os.SystemClock.elapsedRealtimeNanos()
+        val availability = mutableMapOf<SystemMetric, MetricAvailability>()
+        val sources = mutableMapOf<SystemMetric, String>()
+
         val script = ShellCommands.batch(
             ShellCommands.cpuStat(),
-            ShellCommands.memInfo(),
-            ShellCommands.battery(),
-            ShellCommands.thermal(),
             ShellCommands.gpuInfo(),
             ShellCommands.cpuFreq(),
-            ShellCommands.displayInfo()
+            ShellCommands.thermal()
         )
-        val result = hub.execOrNull(script) ?: return null
-        if (!result.ok) return null
-        val out = result.out
-        val parts = ShellCommands.split(out)
+        val result = hub.execOrNull(script)
+
+        val parts = if (result != null) ShellCommands.split(result.out) else emptyList()
         fun part(index: Int): String = parts.getOrElse(index) { "" }
 
         val cpu = cpuPercent(part(0))
-        val (total, available) = Parsers.parseMemInfo(part(1))
-        val battery = Parsers.parseBattery(part(2))
+        val gpu = part(1)
+        val cpuFreq = Parsers.parseCpuFreq(part(2))
         val thermals = Parsers.parseThermals(part(3))
-        val gpu = part(4)
-        val cpuFreq = Parsers.parseCpuFreq(part(5))
-        val refresh = Parsers.parseRefreshRate(part(6))
 
-        val level = battery["level"]?.toIntOrNull()
-        val batteryTemp = battery["temperature"]?.toFloatOrNull()?.let { it / 10f }
-        val current = battery["current_now"]?.toIntOrNull()
-        val voltage = battery["voltage"]?.toIntOrNull()
-        val power = if (current != null && voltage != null) {
-            (current.toDouble() / 1_000_000.0 * voltage / 1000.0).toFloat()
-        } else null
-
-        val usedGb = if (total > 0) (total - available) / 1_073_741_824f else null
-        val totalGb = if (total > 0) total / 1_073_741_824f else null
-        val ramPercent = if (total > 0) ((total - available) * 100 / total).toInt() else null
+        val gpuName = Parsers.parseGpuName(gpu)
+        val gpuFreq = Parsers.parseGpuFreq(gpu)
         val maxThermal = thermals.values.maxOrNull()
+
+        record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
+        record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
+        record(availability, sources, SystemMetric.GPU_NAME, gpuName != null, "GPU_NAME", "privileged SurfaceFlinger")
+        record(availability, sources, SystemMetric.GPU_FREQ_MHZ, gpuFreq != null, "GPU_FREQ_MHZ", "privileged GPU frequency node")
+        record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "privileged thermalservice")
 
         return SystemMetrics(
             cpuPercent = cpu,
             cpuFreqMHz = cpuFreq?.let { it / 1000 },
-            gpuName = Parsers.parseGpuName(gpu),
-            gpuFreqMHz = Parsers.parseGpuFreq(gpu)?.let { it / 1000 },
-            batteryLevel = level,
-            batteryTempC = batteryTemp,
-            powerWatts = power?.takeIf { it > 0 },
-            ramUsedGb = usedGb,
-            ramTotalGb = totalGb,
-            ramPercent = ramPercent,
+            gpuName = gpuName,
+            gpuFreqMHz = gpuFreq?.let { it / 1000 },
             thermalMaxC = maxThermal,
-            refreshHz = refresh,
-            updatedAt = System.currentTimeMillis()
+            updatedAt = System.currentTimeMillis(),
+            availability = availability,
+            sources = sources,
+            measuredAtElapsedNanos = now
         )
     }
 
+    /**
+     * Notes whether a metric could be read.
+     *
+     * A metric that is missing because the shell could not be reached needs Shizuku; one
+     * that is missing because the device does not expose it does not.
+     */
+    private fun record(
+        availability: MutableMap<SystemMetric, MetricAvailability>,
+        sources: MutableMap<SystemMetric, String>,
+        metric: SystemMetric,
+        present: Boolean,
+        source: String,
+        @Suppress("UNUSED_PARAMETER") sourceDetail: String
+    ) {
+        sources[metric] = source
+        availability[metric] = if (present) {
+            MetricAvailability.AVAILABLE
+        } else {
+            MetricAvailability.SHIZUKU_REQUIRED
+        }
+    }
+
+    /**
+     * The CPU load between two readings of `/proc/stat`.
+     *
+     * A single reading is not enough: the counters only say how much time was used in
+     * total, so the load is the difference between two of them.
+     */
     private fun cpuPercent(cpuDump: String): Float? {
         val current = Parsers.parseCpuStat(cpuDump) ?: return null
         val previous = lastCpu

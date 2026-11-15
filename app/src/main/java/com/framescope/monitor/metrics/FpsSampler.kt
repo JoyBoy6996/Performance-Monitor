@@ -1,21 +1,32 @@
 package com.framescope.monitor.metrics
 
-import android.app.usage.UsageStatsManager
 import android.content.Context
+import android.os.SystemClock
+import com.framescope.monitor.core.FpsSourceKind
 import com.framescope.monitor.core.FpsState
+import com.framescope.monitor.core.MetricAvailability
+import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlin.math.roundToInt
 
 /**
  * Samples real frame timings from SurfaceFlinger and system graphics pipelines.
  *
- * `dumpsys SurfaceFlinger --latency <layer/package>` returns the nanosecond timestamps
- * of presented frames (3-column layout: desired, actual, ready).
+ * The measurement has one rule above all others: a number is only ever published when it
+ * can be attributed to the app that is in front of the user. When that cannot be
+ * established the answer is "no data", with the reason, rather than a plausible looking
+ * number that belongs to some other surface.
+ *
+ * The providers are tried in order of how well they can be attributed, and each one keeps
+ * its own state:
+ *
+ * 1. Presentation timestamps of a layer that was verified to belong to the app.
+ * 2. SurfaceFlinger's frame counters for the same app, which give an interval estimate.
+ * 3. The app's own graphics pipeline, which only describes that app's UI thread.
  */
 class FpsSampler(
     private val hub: ShellHub,
@@ -25,159 +36,269 @@ class FpsSampler(
     private val _state = MutableStateFlow(FpsState())
     val state: StateFlow<FpsState> = _state.asStateFlow()
 
-    private var lastPresent = 0L
-    private var totalFrames = 0
-    private var jankFrames = 0
-    private val history = ArrayDeque<Float>()
+    private val detector = ForegroundDetector(hub)
 
+    /** The app in front of the user, as far as it is known. */
     @Volatile
     var foregroundApp: String? = null
         private set
 
+    /** The layer the current reading was taken from. */
     @Volatile
     var measuredLayer: String? = null
+        private set
+
+    /** Where the foreground answer came from. */
+    @Volatile
+    var foregroundSource: ForegroundDetector.Source = ForegroundDetector.Source.NONE
+        private set
+
+    /** Whether the foreground answer is known to be exact. */
+    @Volatile
+    var foregroundConfident: Boolean = false
+        private set
+
+    /** Why the current target was chosen, or why none could be chosen. */
+    @Volatile
+    var targetReason: String = ""
         private set
 
     private val _reports = MutableStateFlow<Map<String, String>>(emptyMap())
     val reports: StateFlow<Map<String, String>> = _reports.asStateFlow()
 
-    private val timeStatsBase = LinkedHashMap<String, TimeStats.Reading>()
-    private var timeStatsAt: Long = 0L
-    private var timeStatsEnabled = false
-    private var timeStatsLastUse: Long = 0L
+    /** Counts the frames of the primary provider. */
+    private val latencyCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
 
-    @Volatile
-    var timeStatsDump: String = ""
-        private set
+    /** Counts the frames of the gfxinfo provider. */
+    private val gfxCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
+
+    /** Which provider produced the reading that is on screen. */
+    private var activeSource: FpsSourceKind = FpsSourceKind.NONE
+
+    private val history = ArrayDeque<Float>()
+
+    // --- TimeStats provider state -------------------------------------------------
+
+    private var timeStatsEnabled = false
+    private var timeStatsEnableFailures = 0
+    private var timeStatsFailures = 0
+    private var timeStatsNextAttemptAt = 0L
+    private var timeStatsBase = LinkedHashMap<String, TimeStats.Reading>()
+    private var timeStatsAt = 0L
+    private var timeStatsFrames = 0L
+    private var timeStatsJank = 0L
+
+    // --- gfxinfo provider state ----------------------------------------------------
+
+    private var gfxNextAttemptAt = 0L
+    private var gfxFailures = 0
+
+    init {
+        detector.context = context
+    }
 
     fun reset() {
-        lastPresent = 0L
-        totalFrames = 0
-        jankFrames = 0
+        latencyCounter.reset()
+        gfxCounter.reset()
         history.clear()
+        activeSource = FpsSourceKind.NONE
+        measuredLayer = null
         _state.value = FpsState()
     }
 
+    /**
+     * Publishes the absence of a measurement, and why.
+     *
+     * Used when the measurement cannot even be attempted, so the interface can say
+     * "this needs Shizuku" instead of showing an empty reading with no explanation.
+     */
+    fun reportUnavailable(reason: String, availability: MetricAvailability) {
+        _state.value = FpsState(
+            fps = 0f,
+            frameTimeMs = 0f,
+            history = history.toList(),
+            totalFrames = latencyCounter.totalUniqueFrames.toInt(),
+            jankFrames = latencyCounter.totalJankFrames.toInt(),
+            source = "no source",
+            surface = null,
+            valid = false,
+            reason = reason,
+            availability = availability,
+            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+            sampleAgeMs = 0L,
+            measurementWindowMs = 0L,
+            sourceKind = FpsSourceKind.NONE
+        )
+    }
+
+    /**
+     * Takes one measurement.
+     *
+     * @param targetFps the refresh rate the frame budget is derived from
+     */
     suspend fun sample(targetFps: Int = 60): FpsState {
-        val pkg = currentPackage()
+        val nowUptime = SystemClock.uptimeNanos()
+        detector.context = context
+        val detection = detector.detect()
+
+        foregroundSource = detection.source
+        foregroundConfident = detection.confident
+
+        val pkg = detection.packageName
+        if (pkg != foregroundApp) {
+            // A different app is in front. Everything measured so far belonged to the
+            // old one, so the counters start again.
+            onTargetChanged(pkg)
+        }
         foregroundApp = pkg
 
         if (pkg.isNullOrBlank()) {
-            val s = invalid("No app", "Waiting for a foreground app")
-            _state.value = s
-            return s
+            return publishUnavailable(
+                source = "no source",
+                kind = FpsSourceKind.NONE,
+                reason = detection.detail ?: "Waiting for a foreground app",
+                availability = if (detection.detail?.contains("Shizuku") == true) {
+                    MetricAvailability.SHIZUKU_REQUIRED
+                } else {
+                    MetricAvailability.PERMISSION_REQUIRED
+                },
+                nowUptime = nowUptime
+            )
         }
 
-        // 1. Primary: Query SurfaceFlinger latency for candidate layers of package
-        val candidateLayers = getCandidateLayers(pkg)
-        val sfCmd = if (candidateLayers.isNotEmpty()) {
-            buildString {
-                append("{ ")
-                for (layer in candidateLayers) {
-                    append("echo \"@@@$layer\"; dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | head -40; ")
-                }
-                append("}")
-            }
-        } else {
-            ShellCommands.surfaceLatencyOfPackage(pkg)
+        // The app in front is known, but the frame timing needs SurfaceFlinger, which
+        // needs a privileged shell. The command fails immediately when there is none, so
+        // the app name stays right and the frame rate says why it is missing.
+        if (hub.status.value.state != AccessState.READY) {
+            return publishUnavailable(
+                source = "no source",
+                kind = FpsSourceKind.NONE,
+                reason = "Shizuku is not connected, so the frame rate of $pkg cannot be measured",
+                availability = MetricAvailability.SHIZUKU_REQUIRED,
+                nowUptime = nowUptime
+            )
         }
-        val dump = hub.execOrNull(sfCmd, 2_500)?.out.orEmpty()
 
+        // 1. Primary: presentation timestamps of a verified layer.
+        val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
+        if (fromLatency != null) return fromLatency
+
+        // 2. Fallback: SurfaceFlinger's frame counters for the same app.
+        val fromTimeStats = sampleFromTimeStats(pkg, targetFps, nowUptime)
+        if (fromTimeStats != null) return fromTimeStats
+
+        // 3. Fallback: the app's own graphics pipeline.
+        val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
+        if (fromGfx != null) return fromGfx
+
+        return publishUnavailable(
+            source = "no source",
+            kind = FpsSourceKind.NONE,
+            reason = "No frame source could be attributed to $pkg",
+            availability = MetricAvailability.UNSUPPORTED,
+            nowUptime = nowUptime
+        )
+    }
+
+    /**
+     * The primary provider: the presentation timestamps of one verified layer.
+     *
+     * Returns null when no layer of the app could be verified, so that the caller can try
+     * the next provider. When a layer was verified but has not drawn enough frames yet,
+     * the answer is a warming up state rather than a fallback reading.
+     */
+    private suspend fun sampleFromLatency(
+        pkg: String,
+        targetFps: Int,
+        nowUptime: Long
+    ): FpsState? {
+        val dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayers(pkg), 2_500)?.out.orEmpty()
         _reports.value = retainReport(_reports.value, pkg, buildProbeReport(pkg, dump))
 
-        val parsed = parseSurfaceFlingerOutput(dump)
-        if (parsed != null && parsed.valid) {
-            _state.value = parsed
-            return parsed
-        }
-
-        // 2. Fallback: Default SurfaceFlinger active latency
-        val defaultDump = hub.execOrNull(ShellCommands.surfaceLatencyDefault(), 1_500)?.out.orEmpty()
-        val defaultParsed = parseSurfaceFlingerOutput(defaultDump)
-        if (defaultParsed != null && defaultParsed.valid) {
-            measuredLayer = "SurfaceFlinger (default)"
-            _state.value = defaultParsed
-            return defaultParsed
-        }
-
-        // 3. Fallback: SurfaceFlinger TimeStats
-        val fromTimeStats = sampleTimeStats(pkg)
-        if (fromTimeStats != null && fromTimeStats.valid) {
-            timeStatsLastUse = android.os.SystemClock.elapsedRealtimeNanos()
-            _state.value = fromTimeStats
-            return fromTimeStats
-        }
-
-        // 4. Fallback: dumpsys gfxinfo
-        val fromGfx = sampleGfxInfo(pkg, targetFps)
-        if (fromGfx != null && fromGfx.valid) {
-            _state.value = fromGfx
-            return fromGfx
-        }
-
-        val noSignal = invalid("No signal", "SurfaceFlinger returned no frame data for $pkg")
-        _state.value = noSignal
-        return noSignal
-    }
-
-    private var cachedLayers: List<String> = emptyList()
-    private var lastLayersAt: Long = 0L
-
-    private suspend fun getCandidateLayers(pkg: String): List<String> {
-        val now = System.currentTimeMillis()
-        if (now - lastLayersAt > 4000L || cachedLayers.isEmpty()) {
-            val listDump = hub.execOrNull("dumpsys SurfaceFlinger --list 2>/dev/null", 1_500)?.out.orEmpty()
-            cachedLayers = listDump.lines().map { it.trim() }.filter { it.isNotEmpty() }
-            lastLayersAt = now
-        }
-        val matching = cachedLayers.filter { it.contains(pkg) }
-        return if (matching.isNotEmpty()) matching.take(3) else cachedLayers.takeLast(3)
-    }
-
-    private fun parseSurfaceFlingerOutput(dump: String): FpsState? {
-        if (dump.isBlank()) return null
         val samples = parseLayerLatencies(dump)
-        val sorted = pickMostRecent(samples)
-        for (sample in sorted) {
-            val deltas = sample.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-            val stats = computeFrameStats(deltas)
-            if (stats != null) {
-                measuredLayer = sample.name.ifBlank { foregroundApp ?: "layer" }
-                val frameCount = sample.presents.size - 1
-                totalFrames += frameCount
-                jankFrames += stats.jank
+        val selection = selectVerifiedTarget(samples, pkg)
+        targetReason = selection.reason
 
-                history.add(stats.fps)
-                while (history.size > 20) history.removeFirst()
+        val target = selection.target ?: return null
 
-                return FpsState(
-                    fps = stats.fps,
-                    frameTimeMs = stats.frameTimeMs,
-                    history = history.toList(),
-                    totalFrames = totalFrames,
-                    jankFrames = jankFrames,
-                    source = "SurfaceFlinger latency",
-                    surface = measuredLayer,
-                    valid = true,
-                    reason = null
-                )
-            }
+        // Switching provider starts a new baseline: the counters of one provider say
+        // nothing about the frames of another.
+        if (activeSource != FpsSourceKind.SURFACE_FLAINGER_LATENCY) {
+            latencyCounter.reset(target.name)
         }
-        return null
+        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
+        measuredLayer = target.name
+
+        val budgetNs = frameBudgetNs(targetFps)
+        latencyCounter.frameBudgetNs = budgetNs
+
+        val result = latencyCounter.onSample(target.name, target.presents, nowUptime)
+
+        val fps = result.recentFps
+        if (fps == null || fps <= 0f) {
+            // The layer is verified but has not drawn two frames yet.
+            return publishUnavailable(
+                source = "SurfaceFlinger latency",
+                kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+                reason = "Waiting for ${target.name} to present frames",
+                availability = MetricAvailability.WARMING_UP,
+                nowUptime = nowUptime
+            )
+        }
+
+        publish(
+            fps = fps,
+            frameTimeMs = result.frameTimeMs ?: (1000f / fps),
+            source = "SurfaceFlinger latency",
+            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+            layer = target.name,
+            totalFrames = latencyCounter.totalUniqueFrames,
+            jankFrames = latencyCounter.totalJankFrames,
+            sampleAgeMs = latencyCounter.frameAgeMs(nowUptime),
+            windowMs = result.windowMs,
+            low1PercentFps = latencyCounter.low1PercentFps(),
+            low5PercentFps = latencyCounter.low5PercentFps(),
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
     }
 
-    private suspend fun sampleTimeStats(packageName: String): FpsState? {
+    /**
+     * The counter provider: SurfaceFlinger's own frame counters for the app.
+     *
+     * These are a count, not a timestamp per frame, so the frame rate is an average over
+     * the interval between two dumps. That is a different kind of measurement and it is
+     * labelled as one.
+     */
+    private suspend fun sampleFromTimeStats(
+        pkg: String,
+        targetFps: Int,
+        nowUptime: Long
+    ): FpsState? {
+        val now = SystemClock.elapsedRealtimeNanos()
+        if (now < timeStatsNextAttemptAt) return null
+
         if (!timeStatsEnabled) {
-            hub.execOrNull(ShellCommands.surfaceTimeStatsEnable(), 2_000)
+            // Only a confirmed enable counts as enabled, and a failure is retried later
+            // instead of being remembered as a success.
+            val result = hub.execOrNull(ShellCommands.surfaceTimeStatsEnable(), 2_000)
+            if (result == null || !result.ok) {
+                timeStatsEnableFailures++
+                timeStatsNextAttemptAt = now + backoffNanos(timeStatsEnableFailures)
+                return null
+            }
             timeStatsEnabled = true
+            timeStatsEnableFailures = 0
         }
+
         val dump = hub.execOrNull(ShellCommands.surfaceTimeStatsDump(), 2_500)?.out.orEmpty()
-        timeStatsDump = dump
+        val readings = TimeStats.readAll(dump, pkg)
+        if (readings.isEmpty()) {
+            timeStatsNextAttemptAt = now + backoffNanos(++timeStatsFailures)
+            return null
+        }
 
-        val readings = TimeStats.readAll(dump, packageName)
-        if (readings.isEmpty()) return null
-
-        val now = android.os.SystemClock.elapsedRealtimeNanos()
         val previous = timeStatsBase.toMap()
         timeStatsBase.clear()
         readings.forEach { timeStatsBase[it.layer] = it }
@@ -190,115 +311,227 @@ class FpsSampler(
         timeStatsAt = now
         if (elapsed <= 0L) return null
 
-        var bestReading: TimeStats.Reading? = null
-        var maxGrowth = 0L
+        var best: TimeStats.Reading? = null
+        var growth = 0L
         var jankGrowth = 0L
         for (reading in readings) {
             val before = previous[reading.layer] ?: continue
-            val grown = reading.frames - before.frames
-            if (grown > maxGrowth) {
-                maxGrowth = grown
-                bestReading = reading
+            val grew = reading.frames - before.frames
+            if (grew > growth) {
+                growth = grew
+                best = reading
                 jankGrowth = (reading.jankyFrames - before.jankyFrames).coerceAtLeast(0L)
             }
         }
 
-        val reading = bestReading ?: return null
-        if (maxGrowth <= 0L) return null
+        val reading = best ?: return null
+        if (growth <= 0L) {
+            timeStatsNextAttemptAt = now + backoffNanos(++timeStatsFailures)
+            return null
+        }
 
-        val fps = maxGrowth.toDouble() * 1_000_000_000.0 / elapsed
+        timeStatsFailures = 0
+        timeStatsNextAttemptAt = 0L
+
+        val fps = growth.toDouble() * 1_000_000_000.0 / elapsed
         if (fps < 1.0 || fps > 360.0) return null
 
+        timeStatsFrames += growth
+        timeStatsJank += jankGrowth.coerceAtLeast(0L)
+
+        activeSource = FpsSourceKind.TIMESTATS
         measuredLayer = reading.layer
-        totalFrames += maxGrowth.toInt()
-        jankFrames += jankGrowth.toInt()
 
-        history.add(fps.toFloat())
-        while (history.size > 20) history.removeFirst()
-
-        return FpsState(
+        publish(
             fps = fps.toFloat(),
             frameTimeMs = (1000.0 / fps).toFloat(),
-            history = history.toList(),
-            totalFrames = totalFrames,
-            jankFrames = jankFrames,
-            source = "SurfaceFlinger timestats",
-            surface = reading.layer,
-            valid = true,
-            reason = null
+            source = "SurfaceFlinger counters",
+            kind = FpsSourceKind.TIMESTATS,
+            layer = reading.layer,
+            totalFrames = timeStatsFrames,
+            jankFrames = timeStatsJank,
+            sampleAgeMs = (now - timeStatsAt) / 1_000_000L,
+            windowMs = elapsed / 1_000_000L,
+            nowUptime = nowUptime
         )
+        return _state.value
     }
 
-    private suspend fun sampleGfxInfo(pkg: String, targetFps: Int): FpsState? {
+    /**
+     * The app's own graphics pipeline.
+     *
+     * This describes the frames the app's UI thread produced. For an app that draws its
+     * interface in the normal way that is the app's frame rate; for a game that renders
+     * through its own engine it is not the game's frame rate. The source is named so the
+     * user can tell the two apart.
+     */
+    private suspend fun sampleFromGfxInfo(
+        pkg: String,
+        targetFps: Int,
+        nowUptime: Long
+    ): FpsState? {
+        val now = SystemClock.elapsedRealtimeNanos()
+        if (now < gfxNextAttemptAt) return null
+
         val out = hub.execOrNull(ShellCommands.gfxInfo(pkg), 2_000)?.out.orEmpty()
         val timestamps = Parsers.parseGfxFrameStats(out)
-        if (timestamps.size < 4) return null
+        if (timestamps.size < 4) {
+            gfxNextAttemptAt = now + backoffNanos(++gfxFailures)
+            return null
+        }
 
-        val totalDurationNs = timestamps.last() - timestamps.first()
-        if (totalDurationNs <= 0L) return null
+        gfxFailures = 0
+        gfxNextAttemptAt = 0L
 
-        val fps = (timestamps.size - 1).toDouble() * 1_000_000_000.0 / totalDurationNs
-        if (fps < 1.0 || fps > 360.0) return null
+        if (activeSource != FpsSourceKind.GFXINFO) {
+            gfxCounter.reset(pkg)
+        }
+        activeSource = FpsSourceKind.GFXINFO
+        measuredLayer = pkg
+        gfxCounter.frameBudgetNs = frameBudgetNs(targetFps)
 
-        val frameTimeMs = (totalDurationNs.toDouble() / (timestamps.size - 1) / 1_000_000.0).toFloat()
-        measuredLayer = "gfxinfo ($pkg)"
+        val result = gfxCounter.onSample(pkg, timestamps, nowUptime)
+        val fps = result.recentFps
+        if (fps == null || fps <= 0f) {
+            return publishUnavailable(
+                source = "gfxinfo",
+                kind = FpsSourceKind.GFXINFO,
+                reason = "Waiting for $pkg to report frames",
+                availability = MetricAvailability.WARMING_UP,
+                nowUptime = nowUptime
+            )
+        }
 
-        history.add(fps.toFloat())
-        while (history.size > 20) history.removeFirst()
+        publish(
+            fps = fps,
+            frameTimeMs = result.frameTimeMs ?: (1000f / fps),
+            source = "gfxinfo (app UI thread)",
+            kind = FpsSourceKind.GFXINFO,
+            layer = pkg,
+            totalFrames = gfxCounter.totalUniqueFrames,
+            jankFrames = gfxCounter.totalJankFrames,
+            sampleAgeMs = gfxCounter.frameAgeMs(nowUptime),
+            windowMs = result.windowMs,
+            low1PercentFps = gfxCounter.low1PercentFps(),
+            low5PercentFps = gfxCounter.low5PercentFps(),
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
+    }
 
-        return FpsState(
-            fps = fps.toFloat(),
+    /** Starts the counters again because the app in front changed. */
+    private fun onTargetChanged(pkg: String?) {
+        latencyCounter.reset()
+        gfxCounter.reset()
+        timeStatsBase.clear()
+        timeStatsAt = 0L
+        timeStatsFrames = 0L
+        timeStatsJank = 0L
+        activeSource = FpsSourceKind.NONE
+        measuredLayer = null
+        history.clear()
+        if (pkg != null) {
+            _state.value = FpsState(
+                availability = MetricAvailability.WARMING_UP,
+                reason = "Waiting for $pkg to present frames"
+            )
+        }
+    }
+
+    /** Publishes a measurement. */
+    private fun publish(
+        fps: Float,
+        frameTimeMs: Float,
+        source: String,
+        kind: FpsSourceKind,
+        layer: String?,
+        totalFrames: Long,
+        jankFrames: Long,
+        sampleAgeMs: Long,
+        windowMs: Long,
+        low1PercentFps: Float? = null,
+        low5PercentFps: Float? = null,
+        appPackage: String? = null,
+        nowUptime: Long
+    ) {
+        history.addLast(fps)
+        while (history.size > HISTORY_SIZE) history.removeFirst()
+
+        _state.value = FpsState(
+            fps = fps,
             frameTimeMs = frameTimeMs,
             history = history.toList(),
-            totalFrames = totalFrames + timestamps.size - 1,
-            jankFrames = jankFrames,
-            source = "dumpsys gfxinfo",
-            surface = pkg,
+            totalFrames = totalFrames.toInt(),
+            jankFrames = jankFrames.toInt(),
+            source = source,
+            surface = layer,
             valid = true,
-            reason = null
+            reason = null,
+            availability = MetricAvailability.AVAILABLE,
+            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+            sampleAgeMs = sampleAgeMs,
+            measurementWindowMs = windowMs,
+            sourceKind = kind,
+            low1PercentFps = low1PercentFps,
+            low5PercentFps = low5PercentFps,
+            appPackage = appPackage
         )
     }
 
-    private suspend fun currentPackage(): String? {
-        // 1. Shell detection via dumpsys activity activities | grep mResumedActivity
-        val out = hub.execOrNull(
-            "{ dumpsys activity activities 2>/dev/null | grep -E 'topResumedActivity|mResumedActivity' ; " +
-                "dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' ; } | head -3",
-            2_000
-        )?.out
-
-        if (!out.isNullOrBlank()) {
-            val detected = Parsers.foregroundPackage(out)
-            if (!detected.isNullOrBlank() && detected != "null") return detected
-        }
-
-        // 2. Fallback: UsageStatsManager if granted
-        val ctx = context
-        if (ctx != null) {
-            val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
-            if (usm != null) {
-                val end = System.currentTimeMillis()
-                val begin = end - 10_000
-                val stats = runCatching { usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, begin, end) }.getOrNull()
-                val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
-                if (mostRecent != null && mostRecent.lastTimeUsed > begin) {
-                    return mostRecent.packageName
-                }
-            }
-        }
-
-        return null
+    /** Publishes the absence of a measurement, and why. */
+    private fun publishUnavailable(
+        source: String,
+        kind: FpsSourceKind,
+        reason: String,
+        availability: MetricAvailability,
+        nowUptime: Long
+    ): FpsState {
+        val state = FpsState(
+            fps = 0f,
+            frameTimeMs = 0f,
+            history = history.toList(),
+            totalFrames = latencyCounter.totalUniqueFrames.toInt(),
+            jankFrames = latencyCounter.totalJankFrames.toInt(),
+            source = source,
+            surface = null,
+            valid = false,
+            reason = reason,
+            availability = availability,
+            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+            sampleAgeMs = 0L,
+            measurementWindowMs = 0L,
+            sourceKind = kind
+        )
+        _state.value = state
+        return state
     }
 
-    private fun invalid(source: String, reason: String): FpsState = FpsState(
-        fps = 0f,
-        frameTimeMs = 0f,
-        history = history.toList(),
-        totalFrames = totalFrames,
-        jankFrames = jankFrames,
-        source = source,
-        surface = null,
-        valid = false,
-        reason = reason
-    )
+    /**
+     * The frame budget a frame has to meet to count as smooth.
+     *
+     * Derived from the refresh rate the user is aiming for, so a 120 Hz panel is judged
+     * against 8.3 ms and not against 16.6 ms.
+     */
+    private fun frameBudgetNs(targetFps: Int): Long {
+        val fps = targetFps.takeIf { it > 0 } ?: 60
+        return 1_000_000_000L / fps
+    }
+
+    /**
+     * How long to wait before the next attempt of a provider that keeps failing.
+     *
+     * The wait grows with every failure and is capped, so a provider that cannot work
+     * on this device stops costing a shell round trip on every poll.
+     */
+    private fun backoffNanos(failures: Int): Long {
+        val step = failures.coerceIn(1, 6)
+        return BASE_BACKOFF_NS * (1L shl (step - 1))
+    }
+
+    companion object {
+        private const val HISTORY_SIZE = 60
+        private const val BASE_BACKOFF_NS = 2_000_000_000L
+        private const val DEFAULT_FRAME_BUDGET_NS = 16_666_666L
+    }
 }

@@ -35,33 +35,26 @@ object ShellCommands {
     fun surfaceWindows(): String =
         "dumpsys window windows 2>/dev/null | grep -E 'SurfaceView|Surface\\[' | head -20"
 
-    /** Latency of whichever layer SurfaceFlinger considers active. */
-    fun surfaceLatencyDefault(): String = "dumpsys SurfaceFlinger --latency 2>/dev/null"
-
-    fun surfaceLatency(surface: String): String =
-        "dumpsys SurfaceFlinger --latency '${surface.replace("'", "")}' 2>/dev/null"
-
     /**
      * The latency of every layer of one app, in a single round trip.
      *
      * Asking the shell once per layer is slow, and a game can own a dozen
      * layers. One command that walks the list keeps the sample inside a
      * second even when the app has many surfaces.
+     *
+     * The output is not truncated. The latency dump is a rolling window of
+     * about 128 rows, and cutting it short can leave nothing but the empty
+     * rows at the front of the window - the frames that matter are the last
+     * ones.
      */
-    fun surfaceLatencyOfPackage(packageName: String, fallback: Boolean = false): String {
+    fun surfaceLatencyOfLayers(packageName: String): String {
         val pkg = packageName.replace("'", "")
-        val layers = if (fallback) {
-            // No layer carries the package name: walk the most recently
-            // created ones instead, the game is usually among them.
-            "dumpsys SurfaceFlinger --list 2>/dev/null | tail -12"
-        } else {
-            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'"
-        }
-        return "{ for L in \$($layers); do echo \"@@@\$L\"; " +
-            "dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null | head -40; " +
+        return "{ for L in \$(dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'); do echo \"@@@\$L\"; " +
+            "dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null; " +
             "B=\${L%%#*}; if [ \"\$B\" != \"\$L\" ]; then echo \"@@@\$B\"; " +
-            "dumpsys SurfaceFlinger --latency \"\$B\" 2>/dev/null | head -40; fi; done; }"
+            "dumpsys SurfaceFlinger --latency \"\$B\" 2>/dev/null; fi; done; }"
     }
+
 
     /**
      * The frame counters SurfaceFlinger keeps per layer.

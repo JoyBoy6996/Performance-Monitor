@@ -115,9 +115,9 @@ fun OverlayScreen(
                     }
                     Spacer(Modifier.width(Space.md))
                     if (running) {
-                        Button(
+                        FilledTonalButton(
                             onClick = { container.overlay.stop() },
-                            colors = ButtonDefaults.buttonColors(
+                            colors = ButtonDefaults.filledTonalButtonColors(
                                 containerColor = MaterialTheme.status.criticalContainer,
                                 contentColor = MaterialTheme.status.onCriticalContainer
                             )
@@ -162,7 +162,7 @@ fun OverlayScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = "The \"Display over other apps\" permission is missing.",
+                            text = "\"Display over other apps\" permission is missing.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.status.onWarnContainer,
                             modifier = Modifier.padding(start = Space.sm)
@@ -203,9 +203,8 @@ fun OverlayScreen(
                     }
                 )
                 Text(
-                    text = "Pill is the small in-game meter: one number, one unit. " +
-                        "Compact shows only the frame rate, Classic adds frame time, " +
-                        "Detailed shows every row, RTSS uses an Afterburner style block.",
+                    text = "Pill is the small meter with one number. Compact drops the frame time, " +
+                        "Classic keeps it, Detailed shows every row, RTSS uses an Afterburner block.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = Space.md)

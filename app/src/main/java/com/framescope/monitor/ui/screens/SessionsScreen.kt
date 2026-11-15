@@ -72,7 +72,7 @@ fun SessionsScreen(
                 EmptyState(
                     icon = Icons.Rounded.Timeline,
                     title = "No sessions yet",
-                    message = "Start a recording from the Monitor tab, then come back here for the full breakdown."
+                    message = "Record a run from the Monitor tab, then come back for the breakdown."
                 )
             }
             return@FrameScopeScreen

@@ -5,6 +5,8 @@ on:
   pull_request:
     branches: [ main, fix/fps-overlay ]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     name: Build FrameScope APK
@@ -13,9 +15,9 @@ jobs:
       ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
@@ -48,9 +50,27 @@ jobs:
           ./gradlew assembleDebug --no-daemon --stacktrace || \
             (echo "dobara try kar raha hoon" && sleep 20 && ./gradlew assembleDebug --no-daemon --stacktrace)
       - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: FrameScope-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: ignore
+      - name: Publish the APK as a release asset
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/fix/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="ci-framescope-${GITHUB_REF_NAME//\//-}"
+          apk=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          notes="$(sha256sum "$apk")"$'\n\n''Built from `'"$GITHUB_SHA"'` on `'"$GITHUB_REF_NAME"'`.'
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$tag"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$apk" --clobber
+            gh release edit "$tag" --title "FrameScope $GITHUB_REF_NAME" --notes "$notes"
+          else
+            gh release create "$tag" "$apk" --title "FrameScope $GITHUB_REF_NAME" --notes "$notes" --target "$GITHUB_SHA"
+          fi
+          echo "release tag: $tag"

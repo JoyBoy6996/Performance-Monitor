@@ -2,6 +2,8 @@ package com.framescope.monitor.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import com.framescope.monitor.ui.Diagnostics
@@ -91,6 +93,7 @@ fun DashboardScreen(
     LaunchedEffect(Unit) { crash = CrashLog.last(context) }
     val measuring by container.settings.measurementEnabled.flow.collectAsState()
     val setupDone by container.settings.setupCompleted.flow.collectAsState()
+    val probeReport by container.engine.probeReport.collectAsState()
 
     val accessColor = if (status.state == AccessState.READY) {
         MaterialTheme.status.good
@@ -143,26 +146,19 @@ fun DashboardScreen(
             }
         }
 
+        // The reading comes first. Everything below it explains the reading.
         item {
-            ProbePanel(container = container)
-        }
-
-        item {
-            DiagnosticsRow(container = container)
+            HeroPanel(
+                fps = if (measuring) fps else FpsState(),
+                layer = if (measuring) layer else null,
+                threshold = threshold
+            )
         }
 
         item {
             MeasurementPanel(
                 measuring = measuring,
                 onToggle = { container.settings.measurementEnabled.value = !measuring }
-            )
-        }
-
-        item {
-            HeroPanel(
-                fps = if (measuring) fps else FpsState(),
-                layer = if (measuring) layer else null,
-                threshold = threshold
             )
         }
 
@@ -214,6 +210,14 @@ fun DashboardScreen(
         item { SectionHeader("Device") }
 
         item { DevicePanel(system) }
+
+        if (probeReport.isNotBlank()) {
+            item { SectionHeader("Diagnostics") }
+
+            item { ProbePanel(container = container) }
+        }
+
+        item { DiagnosticsRow(container = container) }
     }
 }
 
@@ -271,16 +275,18 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
     }
 
     Panel {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            FpsGauge(
-                value = fps.fps,
-                target = threshold,
-                maxValue = ceiling,
-                diameter = 148.dp
-            )
-            Spacer(Modifier.width(Space.lg))
-            Column(Modifier.weight(1f)) {
-                StatusPill(text = stateText, color = stateColor)
+        BoxWithConstraints {
+            // The gauge and the numbers only sit side by side when there is room for both.
+            // On a narrow phone the reading stays square and the numbers go under it.
+            val stacked = maxWidth < 320.dp
+
+            val details: @Composable ColumnScope.() -> Unit = {
+                // The gauge already carries the colour. The chip is a label next to it.
+                StatusPill(
+                    text = stateText,
+                    color = stateColor,
+                    textColor = MaterialTheme.colorScheme.onSurface
+                )
                 Spacer(Modifier.height(Space.md))
                 MetricLine(
                     label = "Frame time",
@@ -322,6 +328,33 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
                     )
                 }
             }
+
+            if (stacked) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    FpsGauge(
+                        value = fps.fps,
+                        target = threshold,
+                        maxValue = ceiling,
+                        diameter = 168.dp
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    Column(Modifier.fillMaxWidth()) { details() }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FpsGauge(
+                        value = fps.fps,
+                        target = threshold,
+                        maxValue = ceiling,
+                        diameter = 148.dp
+                    )
+                    Spacer(Modifier.width(Space.lg))
+                    Column(Modifier.weight(1f)) { details() }
+                }
+            }
         }
     }
 }
@@ -342,8 +375,8 @@ private fun SelfMeasureNotice() {
             color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-            text = "Open the app or game you want to measure. The overlay keeps the " +
-                "numbers visible while you play.",
+            text = "Open the app or game you want to measure. The overlay keeps the numbers " +
+                "visible while you play.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp)
@@ -374,9 +407,9 @@ private fun MeasurementPanel(measuring: Boolean, onToggle: () -> Unit) {
                 )
                 Text(
                     text = if (measuring) {
-                        "The frame rate is sampled and the overlay follows. Turn it off to stop both."
+                        "The frame rate is sampled and the overlay follows."
                     } else {
-                        "Nothing is sampled and the overlay is hidden. Turn it on to measure again."
+                        "Nothing is sampled and the overlay is hidden."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -385,9 +418,9 @@ private fun MeasurementPanel(measuring: Boolean, onToggle: () -> Unit) {
             }
             Spacer(Modifier.width(Space.md))
             if (measuring) {
-                Button(
+                FilledTonalButton(
                     onClick = onToggle,
-                    colors = ButtonDefaults.buttonColors(
+                    colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = MaterialTheme.status.criticalContainer,
                         contentColor = MaterialTheme.status.onCriticalContainer
                     )
@@ -516,8 +549,8 @@ private fun DiagnosticsRow(container: AppContainer) {
 
     Panel {
         Text(
-            text = "Something looks wrong with the numbers? Copy the diagnostics and send " +
-                "them over - it shows exactly what FrameScope saw.",
+            text = "Wrong numbers? Copy the diagnostics and send them over. It shows exactly " +
+                "what FrameScope saw.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -703,7 +736,7 @@ private fun HistoryPanel(fps: FpsState, series: List<Float>, layer: String?, thr
 private fun HistoryStat(label: String, value: String) {
     Column(horizontalAlignment = Alignment.Start) {
         Text(
-            text = label.uppercase(),
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -758,9 +791,9 @@ private fun SessionPanel(
             }
 
             if (recording) {
-                Button(
+                FilledTonalButton(
                     onClick = onToggleRecording,
-                    colors = ButtonDefaults.buttonColors(
+                    colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = MaterialTheme.status.criticalContainer,
                         contentColor = MaterialTheme.status.onCriticalContainer
                     )
@@ -789,7 +822,7 @@ private fun SessionPanel(
 
         if (totalFrames == 0) {
             Text(
-                text = "Averages, lows and jank counts appear here once a recording has samples.",
+                text = "Averages, lows and jank appear once the recording has samples.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = Space.md)

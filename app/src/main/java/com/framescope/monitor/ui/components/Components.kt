@@ -55,9 +55,9 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
-import com.framescope.monitor.ui.theme.LocalGlassColors
 import com.framescope.monitor.ui.theme.LocalMotionEnabled
-import com.framescope.monitor.ui.theme.glass
+import com.framescope.monitor.ui.theme.LocalSurfaceColors
+import com.framescope.monitor.ui.theme.hairlineSurface
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -84,36 +84,21 @@ import kotlin.math.sin
 fun Panel(
     modifier: Modifier = Modifier,
     shape: Shape = MaterialTheme.shapes.large,
-    containerColor: Color = MaterialTheme.colorScheme.surfaceContainer,
+    containerColor: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = MaterialTheme.colorScheme.onSurface,
     borderColor: Color = MaterialTheme.colorScheme.outlineVariant,
-    glass: Boolean = true,
+    contentPadding: Dp = Space.lg,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    if (glass) {
-        val glassColors = LocalGlassColors.current
-        Box(
-            modifier = modifier.glass(
-                shape = shape,
-                tint = containerColor.copy(alpha = glassColors.fill.alpha),
-                hairline = glassColors.hairline,
-                elevation = 10.dp
-            )
-        ) {
-            CompositionLocalProvider(LocalContentColor provides contentColor) {
-                Column(Modifier.padding(Space.lg), content = content)
-            }
-        }
-    } else {
-        Surface(
-            modifier = modifier,
+    Box(
+        modifier = modifier.hairlineSurface(
             shape = shape,
-            color = containerColor,
-            contentColor = contentColor,
-            border = BorderStroke(1.dp, borderColor),
-            tonalElevation = 0.dp
-        ) {
-            Column(Modifier.padding(Space.lg), content = content)
+            fill = containerColor,
+            hairline = borderColor
+        )
+    ) {
+        CompositionLocalProvider(LocalContentColor provides contentColor) {
+            Column(Modifier.padding(contentPadding), content = content)
         }
     }
 }
@@ -124,15 +109,11 @@ fun PanelDivider(modifier: Modifier = Modifier) {
     HorizontalDivider(
         modifier = modifier,
         thickness = 1.dp,
-        color = if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
-            Color.White.copy(alpha = 0.08f)
-        } else {
-            Color.Black.copy(alpha = 0.12f)
-        }
+        color = MaterialTheme.colorScheme.outlineVariant
     )
 }
 
-/** Uppercase group label. */
+/** Group label above a block of content. */
 @Composable
 fun SectionHeader(
     text: String,
@@ -144,7 +125,7 @@ fun SectionHeader(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = text.uppercase(),
+            text = text,
             style = SectionLabel,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.weight(1f)
@@ -168,10 +149,10 @@ fun StatCell(
 ) {
     Column(modifier = modifier) {
         Text(
-            text = label.uppercase(),
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
         Row(verticalAlignment = Alignment.Bottom) {
@@ -207,7 +188,7 @@ fun MetricLine(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 5.dp),
+            .padding(vertical = Space.xs),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -224,24 +205,27 @@ fun MetricLine(
     }
 }
 
-/** Small state chip: a dot and a word. */
+/**
+ * Small state chip: a dot and a word.
+ *
+ * A flat tinted chip with a hairline, not a glowing pill. The colour carries the meaning, so
+ * the shape stays quiet and the label does the talking.
+ */
 @Composable
 fun StatusPill(
     text: String,
     color: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    textColor: Color = color
 ) {
+    val shape = RoundedCornerShape(6.dp)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .glass(
-                shape = RoundedCornerShape(50),
-                tint = color.copy(alpha = 0.14f),
-                hairline = color.copy(alpha = 0.30f),
-                blurRadius = 20.dp,
-                elevation = 2.dp
-            )
-            .padding(horizontal = 9.dp, vertical = 4.dp)
+            .clip(shape)
+            .background(color.copy(alpha = 0.12f))
+            .border(1.dp, color.copy(alpha = 0.30f), shape)
+            .padding(horizontal = Space.sm, vertical = Space.xs)
     ) {
         Box(
             Modifier
@@ -252,7 +236,7 @@ fun StatusPill(
         Text(
             text = text,
             style = MaterialTheme.typography.labelSmall,
-            color = color,
+            color = textColor,
             modifier = Modifier.padding(start = 6.dp),
             maxLines = 1
         )
@@ -316,8 +300,6 @@ fun Sparkline(
     trackColor: Color = MaterialTheme.status.track,
     gridColor: Color = MaterialTheme.status.grid
 ) {
-    val headAlpha = rememberPulseAlpha()
-
     Canvas(modifier = modifier) {
         if (values.size < 2) return@Canvas
         val ceiling = maxOf(
@@ -352,9 +334,11 @@ fun Sparkline(
         )
         drawPath(path = line, color = color, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
 
+        // The head marks the newest sample. It is a dot, not a pulse: a chart that keeps
+        // breathing after the run has ended reads as a live signal that is not there.
         val head = points.last()
-        drawCircle(color = color.copy(alpha = 0.25f), radius = 5.dp.toPx(), center = head)
-        drawCircle(color = color.copy(alpha = headAlpha), radius = 2.5.dp.toPx(), center = head)
+        drawCircle(color = color.copy(alpha = 0.22f), radius = 5.dp.toPx(), center = head)
+        drawCircle(color = color, radius = 2.5.dp.toPx(), center = head)
 
         // Baseline keeps the chart anchored when the values sit near the top.
         drawLine(
@@ -585,11 +569,13 @@ fun SegmentedOptions(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val shape = RoundedCornerShape(12.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(LocalGlassColors.current.fillNested)
+            .clip(shape)
+            .background(LocalSurfaceColors.current.fillNested)
+            .border(1.dp, LocalSurfaceColors.current.hairline, shape)
             .padding(3.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp)
     ) {
@@ -618,13 +604,9 @@ fun SegmentedOptions(
                     .weight(1f)
                     .then(
                         if (isSelected) {
-                            Modifier.glass(
-                                shape = RoundedCornerShape(8.dp),
-                                tint = background.copy(alpha = 0.90f),
-                                hairline = LocalGlassColors.current.hairlineHighlight,
-                                blurRadius = 20.dp,
-                                elevation = 2.dp
-                            )
+                            Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(background)
                         } else {
                             Modifier
                         }
@@ -678,22 +660,25 @@ fun ChipRow(
                 animationSpec = tween(160),
                 label = "chipContent"
             )
+            val shape = RoundedCornerShape(8.dp)
             Row(
                 modifier = Modifier
-                    .glass(
-                        shape = RoundedCornerShape(8.dp),
-                        tint = if (isSelected) {
-                            background.copy(alpha = 0.88f)
+                    .clip(shape)
+                    .background(
+                        if (isSelected) {
+                            background
                         } else {
-                            LocalGlassColors.current.fillNested
-                        },
-                        hairline = if (isSelected) {
-                            LocalGlassColors.current.hairlineHighlight
+                            LocalSurfaceColors.current.fillNested
+                        }
+                    )
+                    .border(
+                        1.dp,
+                        if (isSelected) {
+                            MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.28f)
                         } else {
-                            LocalGlassColors.current.hairline
+                            LocalSurfaceColors.current.hairline
                         },
-                        blurRadius = 20.dp,
-                        elevation = 2.dp
+                        shape
                     )
                     .clickable { onToggle(option) }
                     .padding(horizontal = 10.dp, vertical = 7.dp),
@@ -791,7 +776,14 @@ fun ValueSlider(
             value = value,
             onValueChange = onValueChange,
             valueRange = valueRange,
-            steps = steps
+            steps = steps,
+            colors = androidx.compose.material3.SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.primary,
+                activeTrackColor = MaterialTheme.colorScheme.primary,
+                inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                activeTickColor = MaterialTheme.colorScheme.onPrimary,
+                inactiveTickColor = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         )
     }
 }
@@ -807,10 +799,9 @@ fun EmptyState(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .glass(
-                tint = LocalGlassColors.current.fill,
-                hairline = LocalGlassColors.current.hairline
-            )
+            .clip(MaterialTheme.shapes.large)
+            .background(LocalSurfaceColors.current.fill)
+            .border(1.dp, LocalSurfaceColors.current.hairline, MaterialTheme.shapes.large)
             .padding(horizontal = Space.xl, vertical = 48.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -891,7 +882,7 @@ fun MonoField(
             .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceContainerHighest)
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)
-            .padding(horizontal = Space.md, vertical = 11.dp),
+            .padding(horizontal = Space.md, vertical = 12.dp),
         decorationBox = { inner ->
             if (value.isEmpty()) {
                 Text(

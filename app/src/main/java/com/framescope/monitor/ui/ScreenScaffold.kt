@@ -24,7 +24,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.ui.theme.Space
-import com.framescope.monitor.ui.theme.LocalGlassColors
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,8 +63,8 @@ fun FrameScopeScreen(
                 actions = actions,
                 windowInsets = WindowInsets(0, 0, 0, 0),
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = LocalGlassColors.current.fill,
-                    scrolledContainerColor = LocalGlassColors.current.fill
+                    containerColor = Color.Transparent,
+                    scrolledContainerColor = Color.Transparent
                 )
             )
         }

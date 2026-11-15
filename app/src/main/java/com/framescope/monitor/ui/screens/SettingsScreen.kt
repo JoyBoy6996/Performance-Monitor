@@ -126,7 +126,7 @@ fun SettingsScreen(
         bottomPadding = bottomPadding
     ) {
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Frame rate measurement",
                     supporting = if (measuring) {
@@ -152,7 +152,7 @@ fun SettingsScreen(
         item { SectionHeader("Privileged access") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Shizuku service",
                     supporting = status.detail.ifBlank {
@@ -230,11 +230,11 @@ fun SettingsScreen(
         item { SectionHeader("Shizuku setup") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SetupOption(
                     title = "Start Shizuku",
                     badge = "Required",
-                    description = "Install and start Shizuku using the official guide for your device, then grant FrameScope permission above. FrameScope verifies a real UserService command before showing Connected. Shell access is temporary and ends when Shizuku stops; it does not persistently grant Android permissions.",
+                    description = "Install and start Shizuku with the official guide for your device, then grant FrameScope permission above. FrameScope checks a real UserService command before it reports Connected. Shell access lasts only as long as Shizuku runs.",
                     context = context
                 )
             }
@@ -243,11 +243,11 @@ fun SettingsScreen(
         item { SectionHeader("Banking app protection") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Hide overlay in banking apps",
-                    supporting = "FrameScope needs no root, no accessibility and no device admin, and the " +
-                        "overlay steps aside for banking and payment apps.",
+                    supporting = "No root, no accessibility, no device admin. The overlay steps " +
+                        "aside for banking and payment apps.",
                     trailing = {
                         Switch(
                             checked = protectApps,
@@ -290,7 +290,7 @@ fun SettingsScreen(
         item { SectionHeader("Monitoring") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
                     ValueSlider(
                         label = "Sampling interval",
@@ -326,7 +326,7 @@ fun SettingsScreen(
         item { SectionHeader("Appearance") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
                     SegmentedOptions(
                         options = listOf("System", "Light", "Dark"),
@@ -356,7 +356,7 @@ fun SettingsScreen(
         item { SectionHeader("Backup") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Export backup",
                     supporting = "Writes every recorded session and all settings into one JSON file.",
@@ -486,7 +486,12 @@ private fun SetupOption(
             )
             if (badge != null) {
                 Spacer(Modifier.width(Space.sm))
-                StatusPill(text = badge, color = MaterialTheme.status.good)
+                // A requirement is not a health reading, so it stays a neutral chip.
+                StatusPill(
+                    text = badge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
         Text(

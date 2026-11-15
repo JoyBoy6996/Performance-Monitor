@@ -111,7 +111,7 @@ fun ToolsScreen(
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "Full bleed colour patches and a touch trail to spot dead pixels, " +
+                            text = "Full bleed colour patches and a touch trail for dead pixels, " +
                                 "banding and ghosting.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

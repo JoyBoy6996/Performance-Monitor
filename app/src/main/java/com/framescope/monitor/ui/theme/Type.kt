@@ -116,14 +116,14 @@ val FrameScopeTypography = Typography(
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 16.sp,
-        letterSpacing = 0.4.sp
+        letterSpacing = 0.2.sp
     ),
     labelSmall = TextStyle(
         fontFamily = Ui,
         fontWeight = FontWeight.Medium,
         fontSize = 11.sp,
         lineHeight = 14.sp,
-        letterSpacing = 0.5.sp
+        letterSpacing = 0.2.sp
     )
 )
 
@@ -163,13 +163,13 @@ val MonoCaption = TextStyle(
     letterSpacing = 0.sp
 )
 
-/** Uppercase group label above a block of content. */
+/** Group label above a block of content. */
 val SectionLabel = TextStyle(
     fontFamily = Ui,
-    fontWeight = FontWeight.SemiBold,
-    fontSize = 11.sp,
-    lineHeight = 14.sp,
-    letterSpacing = 1.1.sp
+    fontWeight = FontWeight.Medium,
+    fontSize = 12.sp,
+    lineHeight = 16.sp,
+    letterSpacing = 0.3.sp
 )
 
 /** Monospace body copy, used for shell output. */

@@ -67,6 +67,7 @@ import com.framescope.monitor.ui.theme.MonoCaption
 import com.framescope.monitor.ui.theme.MonoHero
 import com.framescope.monitor.ui.theme.MonoInline
 import com.framescope.monitor.ui.theme.MonoValue
+import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.ui.theme.SectionLabel
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
@@ -145,6 +146,7 @@ fun StatCell(
     unit: String? = null,
     accent: Color = MaterialTheme.colorScheme.onSurface,
     meter: Float? = null,
+    availability: MetricAvailability? = null,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier) {
@@ -166,6 +168,18 @@ fun StatCell(
                 )
             }
         }
+        // A reading that is not there says why it is not there. "Shizuku" tells the
+        // user that a privileged shell would fix it; "unsupported" tells them that
+        // nothing would.
+        if (availability != null && availability != MetricAvailability.AVAILABLE) {
+            Text(
+                text = availabilityLabel(availability),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                maxLines = 1,
+                modifier = Modifier.padding(top = 1.dp)
+            )
+        }
         if (meter != null) {
             Spacer(Modifier.height(Space.xs))
             BarMeter(
@@ -175,6 +189,17 @@ fun StatCell(
             )
         }
     }
+}
+
+/** The word that explains why a reading is missing. */
+private fun availabilityLabel(availability: MetricAvailability): String = when (availability) {
+    MetricAvailability.SHIZUKU_REQUIRED -> "needs Shizuku"
+    MetricAvailability.PERMISSION_REQUIRED -> "needs permission"
+    MetricAvailability.UNSUPPORTED -> "not reported"
+    MetricAvailability.STALE -> "out of date"
+    MetricAvailability.WARMING_UP -> "starting up"
+    MetricAvailability.ERROR -> "read failed"
+    MetricAvailability.AVAILABLE -> ""
 }
 
 /** Label on the left, measured value on the right. */

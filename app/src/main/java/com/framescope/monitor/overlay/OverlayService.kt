@@ -27,6 +27,7 @@ import com.framescope.monitor.FrameScopeApp
 import com.framescope.monitor.MainActivity
 import com.framescope.monitor.R
 import com.framescope.monitor.core.AppSettings
+import com.framescope.monitor.core.FpsSourceKind
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.OverlayStyle
 import com.framescope.monitor.core.SystemMetrics
@@ -429,10 +430,20 @@ class OverlayService : Service() {
         val target = settings.fpsThreshold.value
         val fpsVal = fpsState.fps
 
-        fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
-        fpsText?.setTextColor(OverlayViews.fpsColor(fpsVal, target))
+        // A reading that is older than a couple of seconds is not a live reading, and
+        // it says so instead of looking like a current number.
+        val stale = fpsState.valid && fpsState.sampleAgeMs > STALE_AFTER_MS
 
-        frameText?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else ""
+        fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
+        fpsText?.setTextColor(
+            if (stale) STALE_COLOR else OverlayViews.fpsColor(fpsVal, target)
+        )
+
+        frameText?.text = when {
+            !fpsState.valid -> ""
+            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs)
+            else -> "%.1f ms".format(fpsState.frameTimeMs)
+        }
 
         if (fpsState.history.isNotEmpty()) {
             graphView?.setValues(fpsState.history, target.toFloat())
@@ -460,6 +471,17 @@ class OverlayService : Service() {
         } else system.ramPercent?.let { "$it%" } ?: "--"
         rowViews["REFRESH"]?.text = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--"
         rowViews["APP"]?.text = if (appName.isNotBlank()) appName.substringAfterLast('.') else "--"
+        // Which provider the reading came from, so a number that is not the game's own
+        // frame rate is not mistaken for one.
+        rowViews["SRC"]?.text = sourceLabel(fpsState.sourceKind)
+    }
+
+    /** The short name of the provider a reading came from. */
+    private fun sourceLabel(kind: FpsSourceKind): String = when (kind) {
+        FpsSourceKind.SURFACE_FLAINGER_LATENCY -> "SF"
+        FpsSourceKind.TIMESTATS -> "TS"
+        FpsSourceKind.GFXINFO -> "GFX"
+        FpsSourceKind.NONE -> "--"
     }
 
     private fun createChannel() {
@@ -506,5 +528,11 @@ class OverlayService : Service() {
         const val ACTION_STOP = "com.framescope.monitor.overlay.STOP"
         private const val CHANNEL_ID = "framescope_overlay_channel"
         private const val NOTIFICATION_ID = 4040
+
+        /** A reading older than this is shown as out of date rather than as live. */
+        private const val STALE_AFTER_MS = 2_000L
+
+        /** The colour of a reading that is too old to be live. */
+        private val STALE_COLOR = Color.parseColor("#94A3B8")
     }
 }

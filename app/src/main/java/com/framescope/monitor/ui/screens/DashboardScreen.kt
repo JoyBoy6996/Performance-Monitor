@@ -51,6 +51,7 @@ import com.framescope.monitor.AppContainer
 import com.framescope.monitor.BuildConfig
 import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.core.FpsState
+import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
@@ -125,13 +126,22 @@ fun DashboardScreen(
         }
 
         if (status.state != AccessState.READY) {
+            // Shizuku only gates the readings that genuinely need a privileged shell.
+            // The native ones - battery, memory, refresh rate - keep working, so this
+            // is a note about what is missing rather than a blocker for everything.
             item {
                 AccessBanner(
-                    title = if (setupDone) "Not connected right now" else "Privileged access needed",
+                    title = if (setupDone) "Frame timing needs Shizuku" else "Privileged access needed",
                     detail = if (setupDone) {
-                        status.detail.ifBlank { "Shizuku is not answering. Open Settings to check the connection." }
+                        status.detail.ifBlank {
+                            "Shizuku is not answering, so the frame rate and the CPU and GPU " +
+                                "readings are paused. Battery, memory and refresh rate keep working."
+                        }
                     } else {
-                        status.detail.ifBlank { "Run the one-time setup to unlock real frame rate data." }
+                        status.detail.ifBlank {
+                            "Run the one-time setup to unlock the frame rate. Battery, memory " +
+                                "and refresh rate work without it."
+                        }
                     },
                     onOpenSettings = onOpenSettings
                 )
@@ -317,6 +327,26 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
                     value = fps.source,
                     accent = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // How old the frame behind the number is, and how long the number was
+                // measured over. Without them a number cannot be judged.
+                MetricLine(
+                    label = "Sample age",
+                    value = if (fps.valid) "${fps.sampleAgeMs} ms" else "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "Measured over",
+                    value = if (fps.valid) "${fps.measurementWindowMs} ms" else "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!fps.valid && !fps.reason.isNullOrBlank()) {
+                    Text(
+                        text = fps.reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = Space.xs)
+                    )
+                }
                 if (layer != null && fps.source.startsWith("SurfaceFlinger")) {
                     Text(
                         text = layer,
@@ -570,21 +600,13 @@ private fun DiagnosticsRow(container: AppContainer) {
                         val shell = result?.let { (it.out + "\n" + it.err).trim() }
                             ?.takeIf { it.isNotEmpty() }
                             ?: "Shizuku is unavailable. Start it and complete setup first."
-                        val probe = container.engine.probeReport.value.trim()
-                        val text = buildString {
-                            append("--- status ---")
-                            append('\n')
-                            append("state: ")
-                            append(status.state.name.lowercase())
-                            append('\n')
-                            append("privileged service: Shizuku UserService")
-                            append('\n')
-                            append("--- frame source ---")
-                            append('\n')
-                            append(if (probe.isBlank()) "(none)" else probe)
-                            append('\n')
-                            append(shell)
-                        }
+                        val text = com.framescope.monitor.metrics.DiagnosticsReport.build(
+                            context = context,
+                            hub = container.hub,
+                            engine = container.engine,
+                            settings = container.settings,
+                            shellOutput = shell
+                        )
                         Diagnostics.copy(context, text)
                         message = "Copied to the clipboard - paste it in the chat."
                         running = false
@@ -631,6 +653,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "%",
                 accent = MaterialTheme.colorScheme.onSurface,
                 meter = cpu?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.CPU_PERCENT),
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -639,6 +662,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 value = system.gpuFreqMHz?.toString() ?: "--",
                 unit = system.gpuFreqMHz?.let { "MHz" } ?: "",
                 accent = MaterialTheme.colorScheme.onSurface,
+                availability = system.availabilityOf(SystemMetric.GPU_FREQ_MHZ),
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -648,6 +672,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "°C",
                 accent = tempColor,
                 meter = temp?.let { (it / 60f).coerceIn(0f, 1f) },
+                availability = system.availabilityOf(SystemMetric.THERMAL_MAX_C),
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -662,6 +687,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "%",
                 accent = good,
                 meter = system.batteryLevel?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.BATTERY_LEVEL),
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -671,6 +697,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "%",
                 accent = MaterialTheme.colorScheme.onSurface,
                 meter = system.ramPercent?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.RAM_PERCENT),
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -679,6 +706,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 value = system.powerWatts?.let { String.format("%.1f", it) } ?: "--",
                 unit = "W",
                 accent = warn,
+                availability = system.availabilityOf(SystemMetric.POWER_WATTS),
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -905,34 +933,28 @@ private fun SessionPanel(
 @Composable
 private fun DevicePanel(system: SystemMetrics) {
     Panel {
-        system.gpuName?.let {
-            MetricLine(
-                label = "GPU",
-                value = it.take(34),
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
-        system.refreshHz?.let {
-            MetricLine(
-                label = "Refresh rate",
-                value = "${it.roundToInt()} Hz",
-                accent = MaterialTheme.status.good
-            )
-        }
-        system.cpuFreqMHz?.let {
-            MetricLine(
-                label = "CPU clock",
-                value = "$it MHz",
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
-        system.ramTotalGb?.let { total ->
-            MetricLine(
-                label = "Memory",
-                value = "${String.format("%.1f", system.ramUsedGb ?: 0f)} / ${String.format("%.1f", total)} GB",
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
+        MetricLine(
+            label = "GPU",
+            value = system.gpuName?.take(34) ?: "--",
+            accent = MaterialTheme.colorScheme.onSurface
+        )
+        MetricLine(
+            label = "Refresh rate",
+            value = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--",
+            accent = MaterialTheme.status.good
+        )
+        MetricLine(
+            label = "CPU clock",
+            value = system.cpuFreqMHz?.let { "$it MHz" } ?: "--",
+            accent = MaterialTheme.colorScheme.onSurface
+        )
+        MetricLine(
+            label = "Memory",
+            value = system.ramTotalGb?.let { total ->
+                "${String.format("%.1f", system.ramUsedGb ?: 0f)} / ${String.format("%.1f", total)} GB"
+            } ?: "--",
+            accent = MaterialTheme.colorScheme.onSurface
+        )
         system.cpuPercent?.let { cpu ->
             Spacer(Modifier.height(Space.sm))
             BarMeter(

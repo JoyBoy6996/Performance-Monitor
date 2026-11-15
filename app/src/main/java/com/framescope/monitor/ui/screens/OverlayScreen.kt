@@ -54,7 +54,7 @@ import com.framescope.monitor.ui.theme.status
 import java.util.Locale
 
 private val ALL_ROWS = listOf(
-    "FPS", "FRAME", "CPU", "CPUF", "GPU", "TEMP", "BAT", "POWER", "MEM", "REFRESH", "APP"
+    "FPS", "FRAME", "SRC", "CPU", "CPUF", "GPU", "TEMP", "BAT", "POWER", "MEM", "REFRESH", "APP"
 )
 
 private val STYLE_LABELS = listOf("Pill", "Compact", "Classic", "Detailed", "RTSS")

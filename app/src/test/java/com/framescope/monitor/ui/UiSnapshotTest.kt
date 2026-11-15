@@ -156,7 +156,10 @@ class UiSnapshotTest {
                 jankFrames = 37,
                 source = "SurfaceFlinger",
                 surface = "com.example.game/com.example.game.MainActivity",
-                valid = true
+                valid = true,
+                availability = com.framescope.monitor.core.MetricAvailability.AVAILABLE,
+                sourceKind = com.framescope.monitor.core.FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+                appPackage = "com.example.game"
             )
         )
         setDirectFlow(

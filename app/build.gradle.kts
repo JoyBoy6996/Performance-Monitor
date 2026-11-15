@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.joyboy6996.performancemonitor"
+    namespace = "com.framescope.monitor"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.framescope.monitor.dev"
+        applicationId = "com.framescope.monitor"
         minSdk = 26
         targetSdk = 35
         versionCode = 2
@@ -67,6 +67,11 @@ android {
         buildConfig = true
         aidl = true
     }
+}
+
+tasks.withType<Test>().configureEach {
+    systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
+    systemProperty("robolectric.dependency.repo.id", "central-mirror")
 }
 
 dependencies {

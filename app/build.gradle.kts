@@ -12,8 +12,8 @@ android {
         applicationId = "com.framescope.monitor"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -34,6 +34,20 @@ android {
         }
     }
 
+    // One key for every build, so a new APK always updates the installed one
+    // in place instead of asking to uninstall.
+    val stableKeystore = rootProject.file("keystore/framescope.jks")
+    signingConfigs {
+        if (stableKeystore.exists()) {
+            create("stable") {
+                storeFile = stableKeystore
+                storePassword = "framescope"
+                keyAlias = "framescope"
+                keyPassword = "framescope"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -41,9 +55,19 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = if (stableKeystore.exists()) {
+                signingConfigs.getByName("stable")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = if (stableKeystore.exists()) {
+                signingConfigs.getByName("stable")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

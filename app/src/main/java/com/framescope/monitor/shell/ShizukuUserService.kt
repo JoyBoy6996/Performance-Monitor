@@ -341,7 +341,15 @@ class ShizukuUserService : IShizukuService.Stub {
         private const val MAX_EXECUTION_ID_LENGTH = 128
         internal const val MAX_COMMAND_LENGTH = 32 * 1024
         // Parcel strings use UTF-16, so this keeps both output fields well below Binder's transaction limit.
-        internal const val MAX_OUTPUT_BYTES_PER_STREAM = 32 * 1024
+        /**
+         * How much one stream of a command may carry.
+         *
+         * The result travels through a binder transaction, and a string costs
+         * two bytes per character there, so a stream that is too big does not
+         * arrive at all. Two streams of 64 KB stay well inside the transaction
+         * and are twice what the latency dump of a game needs.
+         */
+        internal const val MAX_OUTPUT_BYTES_PER_STREAM = 64 * 1024
         internal const val MAX_RESULT_TEXT_CHARS = MAX_OUTPUT_BYTES_PER_STREAM + 256
         private const val MAX_PENDING_CANCELLATIONS = 4_096
         private const val MAX_RECORDED_COMPLETIONS = 4_096

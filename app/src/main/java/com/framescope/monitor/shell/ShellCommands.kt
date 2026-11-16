@@ -42,10 +42,12 @@ object ShellCommands {
      * layers. One command that walks the list keeps the sample inside a
      * second even when the app has many surfaces.
      *
-     * The output is not truncated. The latency dump is a rolling window of
-     * about 128 rows, and cutting it short can leave nothing but the empty
-     * rows at the front of the window - the frames that matter are the last
-     * ones.
+     * Every layer keeps only the refresh period and its newest frames. The
+     * latency dump is a rolling window of about 128 rows per layer, and ten
+     * layers of that size are bigger than what a shell call may carry - the
+     * dump then arrives cut in half and the frame rate of the game is lost.
+     * The frames that matter are the newest ones, so the old ones are dropped
+     * in the shell, where they cost nothing.
      */
     fun surfaceLatencyOfLayers(packageName: String, fallback: Boolean = false): String {
         val pkg = packageName.replace("'", "")
@@ -57,7 +59,7 @@ object ShellCommands {
             // A game owns a lot of surfaces. Every one of them is asked for its
             // latency, and that costs time, so only the newest ones are read -
             // the ones the running app created are at the end of the list.
-            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg' | tail -10"
+            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg' | tail -8"
         }
         // The list has to be walked line by line. A `for` loop over `$(...)` splits
         // every line at its spaces, and a SurfaceFlinger layer name contains spaces:
@@ -67,9 +69,10 @@ object ShellCommands {
         return "{ $layers | while IFS= read -r L; do " +
             "[ -z \"\$L\" ] && continue; " +
             "echo \"@@@\$L\"; " +
-            "dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null; " +
+            "${latencyOf("\$L")}" +
             "B=\${L%%#*}; if [ \"\$B\" != \"\$L\" ]; then echo \"@@@\$B\"; " +
-            "dumpsys SurfaceFlinger --latency \"\$B\" 2>/dev/null; fi; done; }"
+            "${latencyOf("\$B")}" +
+            "fi; done; }"
     }
 
 
@@ -89,8 +92,21 @@ object ShellCommands {
      */
     fun surfaceLatencyOfLayer(layer: String): String {
         val l = layer.replace("'", "").replace("\"", "")
-        return "dumpsys SurfaceFlinger --latency '$l' 2>/dev/null"
+        return latencyOf("'$l'")
     }
+
+    /**
+     * The latency of one layer, with only its newest frames.
+     *
+     * The first line of a latency dump is the refresh period, the rows after it
+     * are the frames. Keeping the period and the newest rows is enough to know
+     * the frame rate, and it keeps the output small enough to survive the trip
+     * through the shell.
+     */
+    private fun latencyOf(layer: String): String =
+        "dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | " +
+            "awk 'NR==1{print;next}{r[NR]=\$0}END{for(i=NR-29;i<=NR;i++)" +
+            "if(i>1&&(i in r))print r[i]}'; "
 
     fun surfaceTimeStatsEnable(): String = "dumpsys SurfaceFlinger --timestats -enable 2>/dev/null"
 

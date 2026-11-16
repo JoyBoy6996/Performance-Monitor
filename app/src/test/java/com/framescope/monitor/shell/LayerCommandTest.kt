@@ -34,4 +34,34 @@ class LayerCommandTest {
         val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
         assertTrue(command.contains("--latency \"\$L\""))
     }
+
+    /**
+     * The shell carries a limited amount of text.
+     *
+     * The latency dump is a rolling window of about 128 rows per layer, and a game
+     * owns a dozen layers. Ten of those windows do not fit into a shell call: the
+     * dump arrives cut in half, and the layers that are missing are the ones at the
+     * end - the ones that are actually drawing. The game then shows no frame rate
+     * while every other app works.
+     */
+    @Test
+    fun `every layer keeps only the refresh period and its newest frames`() {
+        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
+        assertTrue(command.contains("awk"))
+        assertTrue(command.contains("NR==1{print;next}"))
+        assertTrue(command.contains("i=NR-29"))
+    }
+
+    @Test
+    fun `the number of layers that are asked is limited`() {
+        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
+        assertTrue(command.contains("tail -8"))
+    }
+
+    @Test
+    fun `a single layer is trimmed as well`() {
+        val command = ShellCommands.surfaceLatencyOfLayer("SurfaceView[com.pubg.krmobile/x]#0")
+        assertTrue(command.contains("awk"))
+        assertTrue(command.contains("i=NR-29"))
+    }
 }

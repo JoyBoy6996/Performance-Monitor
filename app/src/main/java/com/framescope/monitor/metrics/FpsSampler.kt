@@ -319,6 +319,18 @@ class FpsSampler(
             }
         }
 
+        // The shell carries a limited amount of text. A game with many surfaces
+        // fills it, and the dump then arrives cut in half - the layers that come
+        // last, the ones that are drawing, are the ones that are missing. A cut
+        // dump is thrown away and every layer is asked on its own instead.
+        val cut = dump.contains("output truncated", ignoreCase = true) ||
+            fallbackDump.contains("output truncated", ignoreCase = true)
+        if (cut) {
+            samples = emptyList()
+            dump = "the shell cut this dump short, every layer was asked on its own"
+            fallbackDump = ""
+        }
+
         // Nothing answered. Every layer is asked on its own now: a game that owns
         // many surfaces can make one command for all of them too slow, and then
         // the whole dump is lost. One layer at a time gives each of them its own

@@ -70,8 +70,53 @@ object TimeStats {
             layerName.startsWith("$packageName/") ||
                 layerName.contains("[$packageName/") ||
                 layerName.contains("[$packageName]") ||
-                pkgRegex.containsMatchIn(layerName)
+                pkgRegex.containsMatchIn(layerName) ||
+                // A game surface is often named after the blast buffer it draws into:
+                // "BLAST#123(com.pubg.krmobile/com.pubg.krmobile.MainActivity)".
+                // The package sits behind a bracket that no pattern above covers.
+                layerName.contains(packageName, ignoreCase = true)
         }.map { Reading(it.first, it.second, it.third.first, it.third.second) }
+    }
+
+    /**
+     * Reads the counters of every layer in the dump, whatever it is called.
+     *
+     * Used when no layer carries the package name: the layer whose counters grow the
+     * fastest is the app in front, because only the visible app draws that many
+     * frames in a fraction of a second.
+     */
+    fun readAllUnfiltered(dump: String): List<Reading> {
+        val blocks = mutableListOf<Triple<String, Long, Pair<Long, Long>>>()
+        var layer = ""
+        var frames: Long? = null
+        var janky = 0L
+        var missed = 0L
+
+        for (raw in dump.lines()) {
+            val line = raw.trim()
+            if (line.isEmpty()) {
+                frames?.let { blocks += Triple(layer, it, janky to missed) }
+                frames = null
+                janky = 0L
+                missed = 0L
+                continue
+            }
+            FRAMES_RE.find(line)?.let { frames = it.groupValues[1].toLongOrNull() }
+            JANKY_RE.find(line)?.let { janky = it.groupValues[1].toLongOrNull() ?: janky }
+            MISSED_RE.find(line)?.let { missed = it.groupValues[1].toLongOrNull() ?: missed }
+            if (!line.contains(":") && line.length > 3 &&
+                (line.contains("[") || line.contains("(") || line.contains("Surface"))
+            ) {
+                frames?.let { blocks += Triple(layer, it, janky to missed) }
+                frames = null
+                janky = 0L
+                missed = 0L
+                layer = line
+            }
+        }
+        frames?.let { blocks += Triple(layer, it, janky to missed) }
+
+        return blocks.map { Reading(it.first, it.second, it.third.first, it.third.second) }
     }
 
     /** Reads the counters of the first layer that belongs to a package. */

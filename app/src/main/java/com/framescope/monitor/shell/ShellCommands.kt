@@ -54,7 +54,10 @@ object ShellCommands {
             // instead, because a game often renders into a surface of its own.
             "dumpsys SurfaceFlinger --list 2>/dev/null | tail -12"
         } else {
-            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'"
+            // A game owns a lot of surfaces. Every one of them is asked for its
+            // latency, and that costs time, so only the newest ones are read -
+            // the ones the running app created are at the end of the list.
+            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg' | tail -10"
         }
         // The list has to be walked line by line. A `for` loop over `$(...)` splits
         // every line at its spaces, and a SurfaceFlinger layer name contains spaces:
@@ -77,6 +80,18 @@ object ShellCommands {
      * timeline. A game that renders straight into a buffer queue has none, so
      * the counters of the renderer are the only source left.
      */
+    /**
+     * The latency dump of one single layer.
+     *
+     * Asking every layer on its own is slower than one command for all of them,
+     * but one layer that hangs the shell cannot take the whole dump with it, and
+     * every layer gets its own time.
+     */
+    fun surfaceLatencyOfLayer(layer: String): String {
+        val l = layer.replace("'", "").replace("\"", "")
+        return "dumpsys SurfaceFlinger --latency '$l' 2>/dev/null"
+    }
+
     fun surfaceTimeStatsEnable(): String = "dumpsys SurfaceFlinger --timestats -enable 2>/dev/null"
 
     fun surfaceTimeStatsDump(): String = "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null"

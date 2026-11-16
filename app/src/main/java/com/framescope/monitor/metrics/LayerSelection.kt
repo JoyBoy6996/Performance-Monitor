@@ -141,12 +141,15 @@ fun pickMostRecent(samples: List<LayerSample>): List<LayerSample> {
 fun classifyLayer(name: String): LayerKind {
     val lower = name.lowercase()
     return when {
-        lower.contains("surfaceview") || lower.contains("blast") || lower.contains("surfacetexture") ->
-            LayerKind.SURFACE_VIEW
-        lower.contains("systemui") || lower.contains("systemui") ||
+        // The system check comes first: a system surface is also a blast buffer
+        // ("BLAST#101(com.android.systemui)/StatusBar#0"), and it must never be
+        // mistaken for the surface of a game.
+        lower.contains("systemui") ||
             lower.contains("navigationbar") || lower.contains("statusbar") ||
             lower.contains("colorlayer") || lower.contains("colorspace") ->
             LayerKind.SYSTEM
+        lower.contains("surfaceview") || lower.contains("blast") || lower.contains("surfacetexture") ->
+            LayerKind.SURFACE_VIEW
         lower.contains("window{") || lower.contains("activityrecord") ->
             LayerKind.WINDOW
         else -> LayerKind.UNKNOWN
@@ -184,7 +187,8 @@ fun packageEvidenceOf(name: String, foregroundPackage: String): PackageEvidence 
  */
 fun selectVerifiedTarget(
     samples: List<LayerSample>,
-    foregroundPackage: String
+    foregroundPackage: String,
+    allowUnattributed: Boolean = false
 ): TargetSelection {
     if (samples.isEmpty()) {
         return TargetSelection(
@@ -213,6 +217,27 @@ fun selectVerifiedTarget(
     }
 
     if (matching.isEmpty()) {
+        // A game can draw into a surface whose name does not carry the package
+        // name at all. When nothing could be attributed, the layer that drew
+        // most recently is the app in front - the phone draws one app at a
+        // time, so the surface that is presenting right now is its surface.
+        if (allowUnattributed) {
+            val freshest = candidates
+                .filter { it.kind != LayerKind.SYSTEM }
+                .maxByOrNull { it.lastPresentNs }
+            if (freshest != null && freshest.lastPresentNs != Long.MIN_VALUE) {
+                candidates.filter { it !== freshest }.forEach { other ->
+                    rejected += other to "drew less recently than ${freshest.sample.name}"
+                }
+                return TargetSelection(
+                    target = freshest.sample,
+                    reason = "layer ${freshest.sample.name} - the surface that drew last; " +
+                        "its name does not carry the package name, so it is attributed by recency",
+                    candidates = candidates,
+                    rejected = rejected
+                )
+            }
+        }
         return TargetSelection(
             target = null,
             reason = "No layer of $foregroundPackage is drawing; " +

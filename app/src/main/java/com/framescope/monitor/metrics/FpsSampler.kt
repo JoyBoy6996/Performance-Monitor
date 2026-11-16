@@ -86,6 +86,12 @@ class FpsSampler(
     /** Which provider produced the reading that is on screen. */
     private var activeSource: FpsSourceKind = FpsSourceKind.NONE
 
+    /** Set when a layer was found but has not drawn two frames yet. */
+    private var pendingWarmUpReason: String? = null
+
+    /** When the layer sweep may run again. */
+    private var sweepNextAttemptAt = 0L
+
     private val history = ArrayDeque<Float>()
 
     // --- TimeStats provider state -------------------------------------------------
@@ -203,6 +209,8 @@ class FpsSampler(
             )
         }
 
+        pendingWarmUpReason = null
+
         // 1. Primary: presentation timestamps of a verified layer.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
@@ -215,6 +223,19 @@ class FpsSampler(
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
         if (fromGfx != null) return fromGfx
 
+        // A layer was found and it is still warming up - that is a better answer
+        // than "no source".
+        val warmUp = pendingWarmUpReason
+        if (warmUp != null) {
+            return publishUnavailable(
+                source = "SurfaceFlinger latency",
+                kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+                reason = warmUp,
+                availability = MetricAvailability.WARMING_UP,
+                nowUptime = nowUptime
+            )
+        }
+
         return publishUnavailable(
             source = "no source",
             kind = FpsSourceKind.NONE,
@@ -222,6 +243,49 @@ class FpsSampler(
             availability = MetricAvailability.UNSUPPORTED,
             nowUptime = nowUptime
         )
+    }
+
+    /**
+     * Asks every layer for its latency on its own.
+     *
+     * The layers of the app in front come first. A game can own a dozen of them
+     * and only one is drawing, so the newest ones are asked first and the rest
+     * is left out. When the app's own layers cannot be found, the newest layers
+     * of the device are asked instead - the surface that drew last belongs to
+     * the app in front.
+     */
+    private suspend fun sampleLayersOneByOne(pkg: String): List<LayerSample> {
+        val list = hub.execOrNull(ShellCommands.surfaceList(), 3_000)?.out.orEmpty()
+        val names = list.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (names.isEmpty()) return emptyList()
+
+        val own = names.filter { it.contains(pkg, ignoreCase = true) }
+        val candidates = if (own.isNotEmpty()) own.takeLast(6) else names.takeLast(10)
+
+        // The whole sweep has a budget. A layer that hangs the shell must not
+        // hold the measurement hostage, so the sweep stops when it is used up.
+        val deadline = SystemClock.elapsedRealtime() + SWEEP_BUDGET_MS
+        val samples = mutableListOf<LayerSample>()
+        for (name in candidates) {
+            if (SystemClock.elapsedRealtime() > deadline) break
+
+            val dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayer(name), 900)?.out.orEmpty()
+            if (dump.isNotBlank()) samples += parseLayerLatencies("@@@$name\n$dump")
+
+            // Some builds only answer to the layer name without its instance
+            // number, so that one is asked as well.
+            val base = name.substringBefore('#')
+            if (base != name && base.isNotBlank() &&
+                SystemClock.elapsedRealtime() <= deadline
+            ) {
+                val baseDump =
+                    hub.execOrNull(ShellCommands.surfaceLatencyOfLayer(base), 900)?.out.orEmpty()
+                if (baseDump.isNotBlank()) {
+                    samples += parseLayerLatencies("@@@$base\n$baseDump")
+                }
+            }
+        }
+        return samples
     }
 
     /**
@@ -236,7 +300,9 @@ class FpsSampler(
         targetFps: Int,
         nowUptime: Long
     ): FpsState? {
-        var dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayers(pkg), 2_500)?.out.orEmpty()
+        // A game owns many surfaces and every one of them is asked for its latency.
+        // The command needs room, or the whole dump is lost and the app looks dead.
+        var dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayers(pkg), 9_000)?.out.orEmpty()
         var samples = parseLayerLatencies(dump)
 
         // No layer of the app answered. A game can render into a surface that does
@@ -246,10 +312,23 @@ class FpsSampler(
         if (samples.isEmpty()) {
             fallbackDump = hub.execOrNull(
                 ShellCommands.surfaceLatencyOfLayers(pkg, fallback = true),
-                2_500
+                9_000
             )?.out.orEmpty()
             if (fallbackDump.isNotBlank()) {
                 samples = parseLayerLatencies(fallbackDump)
+            }
+        }
+
+        // Nothing answered. Every layer is asked on its own now: a game that owns
+        // many surfaces can make one command for all of them too slow, and then
+        // the whole dump is lost. One layer at a time gives each of them its own
+        // time and keeps the ones that answer.
+        if (samples.isEmpty() && SystemClock.elapsedRealtime() >= sweepNextAttemptAt) {
+            val oneByOne = sampleLayersOneByOne(pkg)
+            sweepNextAttemptAt = SystemClock.elapsedRealtime() + SWEEP_COOLDOWN_MS
+            if (oneByOne.isNotEmpty()) {
+                samples = oneByOne
+                dump = "one layer at a time:\n" + oneByOne.joinToString("\n") { it.name }
             }
         }
 
@@ -258,7 +337,7 @@ class FpsSampler(
                 "\nfallback (newest layers):\n" + buildProbeReport(pkg, fallbackDump)
             }
         _reports.value = retainReport(_reports.value, pkg, report)
-        val selection = selectVerifiedTarget(samples, pkg)
+        val selection = selectVerifiedTarget(samples, pkg, allowUnattributed = true)
         targetReason = selection.reason
 
         val target = selection.target ?: return null
@@ -278,14 +357,11 @@ class FpsSampler(
 
         val fps = result.recentFps
         if (fps == null || fps <= 0f) {
-            // The layer is verified but has not drawn two frames yet.
-            return publishUnavailable(
-                source = "SurfaceFlinger latency",
-                kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
-                reason = "Waiting for ${target.name} to present frames",
-                availability = MetricAvailability.WARMING_UP,
-                nowUptime = nowUptime
-            )
+            // The layer is verified but has not drawn two frames yet. A game can have
+            // a surface that never gets a timestamp row, so the next provider gets
+            // its turn before this is called a problem.
+            pendingWarmUpReason = "Waiting for ${target.name} to present frames"
+            return null
         }
 
         publish(
@@ -334,8 +410,12 @@ class FpsSampler(
             timeStatsEnableFailures = 0
         }
 
-        val dump = hub.execOrNull(ShellCommands.surfaceTimeStatsDump(), 2_500)?.out.orEmpty()
-        val readings = TimeStats.readAll(dump, pkg)
+        val dump = hub.execOrNull(ShellCommands.surfaceTimeStatsDump(), 6_000)?.out.orEmpty()
+        // When no layer carries the package name, every layer is read and the one
+        // whose counters grow the fastest is taken as the app in front.
+        val attributed = TimeStats.readAll(dump, pkg)
+        val readings = if (attributed.isNotEmpty()) attributed else TimeStats.readAllUnfiltered(dump)
+        val unattributed = attributed.isEmpty()
         if (readings.isEmpty()) {
             timeStatsNextAttemptAt = now + backoffNanos(++timeStatsFailures)
             return null
@@ -356,9 +436,12 @@ class FpsSampler(
         var best: TimeStats.Reading? = null
         var growth = 0L
         var jankGrowth = 0L
+        val growths = mutableListOf<Long>()
         for (reading in readings) {
             val before = previous[reading.layer] ?: continue
             val grew = reading.frames - before.frames
+            if (grew <= 0L) continue
+            growths.add(grew)
             if (grew > growth) {
                 growth = grew
                 best = reading
@@ -367,6 +450,17 @@ class FpsSampler(
         }
 
         val reading = best ?: return null
+
+        // Without a package name in the layer name, the layer that grew the most is
+        // only believable when it clearly beats the others. Two layers that grew
+        // about the same say nothing about which one is in front.
+        if (unattributed) {
+            val sorted = growths.sortedDescending()
+            if (sorted.size > 1 && sorted[1] * 3 / 2 > sorted[0]) {
+                timeStatsNextAttemptAt = now + backoffNanos(++timeStatsFailures)
+                return null
+            }
+        }
         if (growth <= 0L) {
             timeStatsNextAttemptAt = now + backoffNanos(++timeStatsFailures)
             return null
@@ -575,5 +669,11 @@ class FpsSampler(
         private const val HISTORY_SIZE = 60
         private const val BASE_BACKOFF_NS = 2_000_000_000L
         private const val DEFAULT_FRAME_BUDGET_NS = 16_666_666L
+
+        /** How long the layer sweep may run in total. */
+        private const val SWEEP_BUDGET_MS = 3_000L
+
+        /** How long the app waits before it sweeps the layers again. */
+        private const val SWEEP_COOLDOWN_MS = 4_000L
     }
 }

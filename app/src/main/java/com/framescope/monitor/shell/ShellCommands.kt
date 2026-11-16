@@ -47,9 +47,23 @@ object ShellCommands {
      * rows at the front of the window - the frames that matter are the last
      * ones.
      */
-    fun surfaceLatencyOfLayers(packageName: String): String {
+    fun surfaceLatencyOfLayers(packageName: String, fallback: Boolean = false): String {
         val pkg = packageName.replace("'", "")
-        return "{ for L in \$(dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'); do echo \"@@@\$L\"; " +
+        val layers = if (fallback) {
+            // No layer carries the package name: the newest layers are checked
+            // instead, because a game often renders into a surface of its own.
+            "dumpsys SurfaceFlinger --list 2>/dev/null | tail -12"
+        } else {
+            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'"
+        }
+        // The list has to be walked line by line. A `for` loop over `$(...)` splits
+        // every line at its spaces, and a SurfaceFlinger layer name contains spaces:
+        // "RequestedLayerState{ActivityRecord{219735033 u0 t4356 d0} 11-13#0}".
+        // Every piece of it is a layer that does not exist, so the dump comes back
+        // empty and the frame rate of that layer is never measured.
+        return "{ $layers | while IFS= read -r L; do " +
+            "[ -z \"\$L\" ] && continue; " +
+            "echo \"@@@\$L\"; " +
             "dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null; " +
             "B=\${L%%#*}; if [ \"\$B\" != \"\$L\" ]; then echo \"@@@\$B\"; " +
             "dumpsys SurfaceFlinger --latency \"\$B\" 2>/dev/null; fi; done; }"

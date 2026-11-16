@@ -48,6 +48,17 @@ class FpsSampler(
     var measuredLayer: String? = null
         private set
 
+    /**
+     * The package of FrameScope itself.
+     *
+     * It is read from the build so the name is never written twice.
+     */
+    private val ownPackage: String = runCatching {
+        Class.forName("com.framescope.monitor.BuildConfig")
+            .getField("APPLICATION_ID")
+            .get(null) as String
+    }.getOrDefault("com.framescope.monitor")
+
     /** Where the foreground answer came from. */
     @Volatile
     var foregroundSource: ForegroundDetector.Source = ForegroundDetector.Source.NONE
@@ -179,6 +190,19 @@ class FpsSampler(
             )
         }
 
+        // FrameScope cannot measure itself: its own layers have no frame timeline
+        // that belongs to a game, and walking them fills the report with noise.
+        // The reading of the app in front of it is what the user wants.
+        if (pkg == ownPackage) {
+            return publishUnavailable(
+                source = "no source",
+                kind = FpsSourceKind.NONE,
+                reason = "FrameScope is in front - open the game to measure it",
+                availability = MetricAvailability.UNSUPPORTED,
+                nowUptime = nowUptime
+            )
+        }
+
         // 1. Primary: presentation timestamps of a verified layer.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
@@ -212,10 +236,28 @@ class FpsSampler(
         targetFps: Int,
         nowUptime: Long
     ): FpsState? {
-        val dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayers(pkg), 2_500)?.out.orEmpty()
-        _reports.value = retainReport(_reports.value, pkg, buildProbeReport(pkg, dump))
+        var dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayers(pkg), 2_500)?.out.orEmpty()
+        var samples = parseLayerLatencies(dump)
 
-        val samples = parseLayerLatencies(dump)
+        // No layer of the app answered. A game can render into a surface that does
+        // not carry its package name, so the newest layers are checked as well and
+        // the one that drew last wins.
+        var fallbackDump = ""
+        if (samples.isEmpty()) {
+            fallbackDump = hub.execOrNull(
+                ShellCommands.surfaceLatencyOfLayers(pkg, fallback = true),
+                2_500
+            )?.out.orEmpty()
+            if (fallbackDump.isNotBlank()) {
+                samples = parseLayerLatencies(fallbackDump)
+            }
+        }
+
+        val report = buildProbeReport(pkg, dump) +
+            if (fallbackDump.isBlank()) "" else {
+                "\nfallback (newest layers):\n" + buildProbeReport(pkg, fallbackDump)
+            }
+        _reports.value = retainReport(_reports.value, pkg, report)
         val selection = selectVerifiedTarget(samples, pkg)
         targetReason = selection.reason
 

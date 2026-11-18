@@ -15,8 +15,18 @@ frame rate stayed empty while every other app was measured.
    layers produced 40-70 KB, so half of the dump was lost - the layers at the end,
    the ones that were drawing. Every layer now keeps only its newest 30 frames.
 4. The frame counters of SurfaceFlinger were only a fallback and their `-enable`
-   step had to succeed first, so the path never ran. They are now the primary
-   source, read with `--timestats -dump -clear` (one atomic window).
+   step had to succeed first, so the path never ran. They are now a source of
+   their own, read with `--timestats -dump -clear` (one atomic window).
+5. **The probe that actually worked was gone.** The first version of this app
+   asked SurfaceFlinger for the latency of the layer that is on the screen -
+   `dumpsys SurfaceFlinger --latency` without a layer name - and that is the
+   only probe that finds a game, because a game names its surface after its
+   engine. The rewrite asked for layers by package name only, and the frame
+   rate of every game was empty. The probe is back.
+
+   The same version also asked for *every* layer of the app and kept only the
+   first rows of each one; the rewrite kept only the newest layers, and the
+   layer that draws is not always the newest one.
 
 ## Verification on the phone
 Nothing here can be verified in the sandbox - there is no device. The phone has to

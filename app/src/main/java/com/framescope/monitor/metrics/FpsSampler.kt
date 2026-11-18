@@ -241,7 +241,14 @@ class FpsSampler(
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
-        // 3. Fallback: the app's own graphics pipeline.
+        // 3. Fallback: the layer that is on the screen right now. A game names
+        // its surface after its engine and not after its package, so the layer
+        // of the game cannot always be found by name - but it is the layer that
+        // is active, and that one SurfaceFlinger answers for by itself.
+        val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
+        if (fromActive != null) return fromActive
+
+        // 4. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
         if (fromGfx != null) return fromGfx
 
@@ -366,6 +373,57 @@ class FpsSampler(
         val collectors = NativeCollectors(ctx.applicationContext)
         val rate = collectors.refreshRate()
         return rate.value
+    }
+
+    /**
+     * The layer that is on the screen right now.
+     *
+     * SurfaceFlinger answers with the active layer when it is asked without a
+     * name, which is the app the user is looking at - the game, when a game is
+     * in front. This is the only probe that finds a game whose surface carries
+     * no package name at all.
+     */
+    private suspend fun sampleFromActiveLayer(
+        pkg: String,
+        targetFps: Int,
+        nowUptime: Long
+    ): FpsState? {
+        val dump = hub.execOrNull(ShellCommands.surfaceLatencyDefault(), 3_000)?.out.orEmpty()
+        if (dump.isBlank()) return null
+
+        val (_, presents) = Parsers.parseLatency(dump)
+        if (presents.size < 4) return null
+
+        // The same arithmetic every other source uses: the mean interval
+        // between the frames is the frame time, and the jank is every interval
+        // that misses the budget.
+        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+        val stats = computeFrameStats(deltas) ?: return null
+        val fps = stats.fps
+        if (fps <= 0f || fps > 1000f) return null
+
+        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
+        measuredLayer = "the layer that is on the screen"
+
+        latencyCounter.frameBudgetNs = frameBudgetNs(targetFps)
+        val result = latencyCounter.onSample("active", presents, nowUptime)
+
+        publish(
+            fps = fps,
+            frameTimeMs = stats.frameTimeMs,
+            source = "SurfaceFlinger (the layer on the screen)",
+            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+            layer = "active",
+            totalFrames = latencyCounter.totalUniqueFrames,
+            jankFrames = latencyCounter.totalJankFrames,
+            sampleAgeMs = latencyCounter.frameAgeMs(nowUptime),
+            windowMs = result.windowMs,
+            low1PercentFps = latencyCounter.low1PercentFps(),
+            low5PercentFps = latencyCounter.low5PercentFps(),
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
     }
 
     /**

@@ -31,6 +31,16 @@ object ShellCommands {
 
     fun surfaceList(): String = "dumpsys SurfaceFlinger --list 2>/dev/null"
 
+    /**
+     * The latency of the layer that is on the screen.
+     *
+     * Without a layer name SurfaceFlinger answers with the layer that is
+     * active - the app the user is looking at. A game draws into a surface
+     * that is named after its engine, so the layer of the game cannot always
+     * be found by its package name; this probe finds it anyway.
+     */
+    fun surfaceLatencyDefault(): String = "dumpsys SurfaceFlinger --latency 2>/dev/null"
+
     /** Fallback when SurfaceFlinger does not list layers: the window manager does. */
     fun surfaceWindows(): String =
         "dumpsys window windows 2>/dev/null | grep -E 'SurfaceView|Surface\\[' | head -20"
@@ -56,10 +66,10 @@ object ShellCommands {
             // instead, because a game often renders into a surface of its own.
             "dumpsys SurfaceFlinger --list 2>/dev/null | tail -12"
         } else {
-            // A game owns a lot of surfaces. Every one of them is asked for its
-            // latency, and that costs time, so only the newest ones are read -
-            // the ones the running app created are at the end of the list.
-            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg' | tail -8"
+            // Every layer of the app is asked. A game owns a dozen of them and
+            // the one that draws is not always the newest one, so nothing is
+            // left out here.
+            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'"
         }
         // The list has to be walked line by line. A `for` loop over `$(...)` splits
         // every line at its spaces, and a SurfaceFlinger layer name contains spaces:

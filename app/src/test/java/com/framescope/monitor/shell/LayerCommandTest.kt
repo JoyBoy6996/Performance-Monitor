@@ -53,9 +53,10 @@ class LayerCommandTest {
     }
 
     @Test
-    fun `the number of layers that are asked is limited`() {
+    fun `every layer of the app is asked, not only the newest ones`() {
         val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
-        assertTrue(command.contains("tail -8"))
+        assertTrue(command.contains("grep -F 'com.pubg.krmobile'"))
+        assertFalse(command.contains("tail -8"))
     }
 
     @Test

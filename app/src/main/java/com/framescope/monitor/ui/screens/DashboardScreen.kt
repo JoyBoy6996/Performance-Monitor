@@ -663,6 +663,23 @@ private fun DiagnosticsRow(container: AppContainer) {
                 modifier = Modifier.padding(top = Space.sm)
             )
         }
+        // The probe runs by itself when the screen opens. Asking the user to
+        // press a button to find out what the device answers is one step too
+        // many, and the answer is what a wrong reading has to be fixed with.
+        LaunchedEffect(Unit) {
+            val pkg = lastMeasured
+            val result = container.hub.execOrNull(
+                Diagnostics.probeCommand(pkg),
+                20_000
+            )
+            probeOutput = if (result == null) {
+                "Shizuku is not connected. Start it and grant permission first."
+            } else {
+                (result.out + "\n" + result.err).trim()
+            }
+            Diagnostics.copy(context, probeOutput)
+        }
+
         if (probeOutput.isNotEmpty()) {
             Spacer(Modifier.height(Space.md))
             Text(

@@ -79,15 +79,23 @@ fun parseLayerLatencies(dump: String): List<LayerSample> {
             ?.toLongOrNull()
             ?: 0L
 
-        val presents = body.drop(1)
-            .mapNotNull { row -> parseTimestampRow(row) }
-            // A timestamp of zero is the placeholder for "this frame was never drawn".
-            .filter { it > 0L }
-            // The same timestamp can appear twice; a frame is one timestamp.
-            .distinct()
-            // Presentation timestamps arrive in order, but a dump taken while the
-            // pipeline was catching up can be out of order.
-            .sorted()
+        // A row that holds a value that is not a number is refused. The columns
+        // of a row have to line up with the columns of the other rows, and one
+        // stray token would shift every column after it.
+        val rows = body.drop(1)
+            .map { row -> readRow(row) }
+            .filter { it.isNotEmpty() }
+
+        // The first row is the placeholder for "this frame was never drawn".
+        val real = if (rows.firstOrNull()?.all { it == 0L } == true) rows.drop(1) else rows
+        if (real.isEmpty()) continue
+
+        val series = readFrameSeries(real) ?: continue
+
+        // The same timestamp can appear twice; a frame is one timestamp.
+        // Presentation timestamps arrive in order, but a dump taken while the
+        // pipeline was catching up can be out of order.
+        val presents = series.distinct().sorted()
 
         if (presents.isNotEmpty()) {
             samples.add(LayerSample(block.name, refreshPeriodNs, presents))
@@ -97,22 +105,51 @@ fun parseLayerLatencies(dump: String): List<LayerSample> {
     return samples
 }
 
+/** The numbers of one row, or nothing when the row holds something else. */
+private fun readRow(row: String): List<Long> {
+    val columns = row.trim().split(WHITESPACE).filter { it.isNotEmpty() }
+    if (columns.isEmpty()) return emptyList()
+    val numbers = columns.map { it.toLongOrNull() ?: return emptyList() }
+    return numbers
+}
+
 /**
- * Reads the presentation timestamp out of one row.
+ * The frame series of a block.
  *
- * SurfaceFlinger prints three columns: the desired vsync, the actual present time and
- * the time the buffer became ready. The present time is the second one. Some builds
- * print a single column, where that column is the present time.
+ * The present time is normally the second column, but a build can order the
+ * columns differently, so every column is tried and the first one that moves
+ * forward at a steady pace wins.
+ *
+ * A series that does not move steadily is refused. A wrong series is worse
+ * than no series: it would report a frame rate that belongs to nothing.
  */
-private fun parseTimestampRow(row: String): Long? {
-    val columns = row.split(WHITESPACE)
-    if (columns.isEmpty()) return null
-    // Every column has to be a number, otherwise the columns cannot be trusted.
-    if (columns.any { it.toLongOrNull() == null }) return null
-    return when {
-        columns.size >= 2 -> columns[1].toLong()
-        else -> columns[0].toLong()
+private fun readFrameSeries(rows: List<List<Long>>): List<Long>? {
+    val columns = rows.first().size
+    for (index in preferredColumns(columns)) {
+        val series = rows.mapNotNull { it.getOrNull(index) }.filter { it > 0L }
+        if (looksLikeFrameSeries(series)) return series
     }
+    return null
+}
+
+/** The columns that can hold the present time, in the order they are tried. */
+private fun preferredColumns(columns: Int): List<Int> = when {
+    columns >= 3 -> listOf(1, 2, 0)
+    columns == 2 -> listOf(1, 0)
+    else -> listOf(0)
+}
+
+/** A real frame series moves forward at a steady pace. */
+private fun looksLikeFrameSeries(series: List<Long>): Boolean {
+    if (series.size < 4) return false
+    val deltas = series.zipWithNext { a, b -> b - a }.filter { it > 0L }
+    if (deltas.size < 3) return false
+    val median = deltas.sorted()[deltas.size / 2]
+    // A frame is never presented in under a millisecond and never takes a
+    // second; anything else is not a frame time.
+    if (median < 1_000_000L || median > 1_000_000_000L) return false
+    val clustered = deltas.count { it >= median / 2 && it <= median * 2 }
+    return clustered * 10 >= deltas.size * 6
 }
 
 private data class RawBlock(val name: String, val body: List<String>)

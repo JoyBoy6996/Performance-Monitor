@@ -347,7 +347,7 @@ class FpsSampler(
         } else {
             counted
         }
-        if (fps <= 0.0 || fps > 1000.0) return null
+        if (!isPlausibleFps(fps.toFloat())) return null
 
         _reports.value = retainReport(_reports.value, pkg, buildProbeReport(pkg, tick.raw))
 
@@ -365,6 +365,18 @@ class FpsSampler(
             nowUptime = nowUptime
         )
         return _state.value
+    }
+
+    /**
+     * True when a frame rate can belong to this screen.
+     *
+     * A screen cannot present more frames than it refreshes, so a number above
+     * that is a counter that was read wrong and not a frame rate.
+     */
+    private fun isPlausibleFps(fps: Float): Boolean {
+        if (fps <= 0f) return false
+        val ceiling = (refreshRateHz() ?: 240f) * 1.05f
+        return fps <= ceiling
     }
 
     /** The refresh rate of the display that is on, when the system can tell. */
@@ -400,7 +412,7 @@ class FpsSampler(
         val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
         val stats = computeFrameStats(deltas) ?: return null
         val fps = stats.fps
-        if (fps <= 0f || fps > 1000f) return null
+        if (!isPlausibleFps(fps)) return null
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = "the layer that is on the screen"
@@ -506,7 +518,7 @@ class FpsSampler(
         val result = latencyCounter.onSample(target.name, target.presents, nowUptime)
 
         val fps = result.recentFps
-        if (fps == null || fps <= 0f) {
+        if (fps == null || !isPlausibleFps(fps)) {
             // The layer is verified but has not drawn two frames yet. A game can have
             // a surface that never gets a timestamp row, so the next provider gets
             // its turn before this is called a problem.

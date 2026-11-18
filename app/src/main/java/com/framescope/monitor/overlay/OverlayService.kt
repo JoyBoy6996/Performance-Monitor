@@ -490,8 +490,11 @@ class OverlayService : Service() {
         rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
         rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
         rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")
-        rowViews["TEMP"]?.text = system.thermalMaxC?.let { "%.1f°C".format(it) }
-            ?: (system.batteryTempC?.let { "%.1f°C".format(it) } ?: "--")
+        val temperature = system.thermalMaxC ?: system.batteryTempC
+        rowViews["TEMP"]?.text = temperature?.let { "%.1f°C".format(it) } ?: "--"
+        // A warm phone throttles long before it is hot, so the temperature
+        // carries its own warning colour.
+        temperature?.let { rowViews["TEMP"]?.setTextColor(OverlayViews.temperatureColor(it)) }
         rowViews["BAT"]?.text = system.batteryLevel?.let { "$it%" } ?: "--"
         rowViews["POWER"]?.text = system.powerWatts?.let { "%.2f W".format(it) } ?: "--"
         rowViews["MEM"]?.text = if (system.ramUsedGb != null && system.ramTotalGb != null) {

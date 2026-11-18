@@ -52,6 +52,27 @@ object OverlayViews {
         fps > 0 -> Color.parseColor("#F87171")
         else -> Color.parseColor("#94A3B8")
     }
+
+    /** The colour of a temperature. */
+    fun temperatureColor(celsius: Float): Int = when (temperatureLevel(celsius)) {
+        TemperatureLevel.CRITICAL -> Color.parseColor("#EF4444")
+        TemperatureLevel.WARM -> Color.parseColor("#F59E0B")
+        TemperatureLevel.COOL -> Color.parseColor("#E2E8F0")
+    }
+}
+
+/**
+ * How warm the phone is.
+ *
+ * A phone that is already warm throttles long before it is hot, so the warning
+ * starts at 40 degrees and the alarm at 43.
+ */
+enum class TemperatureLevel { COOL, WARM, CRITICAL }
+
+fun temperatureLevel(celsius: Float): TemperatureLevel = when {
+    celsius >= 43f -> TemperatureLevel.CRITICAL
+    celsius >= 40f -> TemperatureLevel.WARM
+    else -> TemperatureLevel.COOL
 }
 
 /** Lightweight line graph used by the overlay and the dashboard preview. */

@@ -233,20 +233,22 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // 1. Primary: the frames SurfaceFlinger counted for the app in front.
-        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
-        if (fromCounters != null) return fromCounters
-
-        // 2. Fallback: presentation timestamps of a verified layer.
+        // 1. Primary: the presentation timestamps of the layer of the app in
+        // front. This is the reading that has always worked on this phone, for
+        // games as well as for ordinary apps.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
-        // 3. Fallback: the layer that is on the screen right now. A game names
+        // 2. Fallback: the layer that is on the screen right now. A game names
         // its surface after its engine and not after its package, so the layer
         // of the game cannot always be found by name - but it is the layer that
         // is active, and that one SurfaceFlinger answers for by itself.
         val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
         if (fromActive != null) return fromActive
+
+        // 3. Fallback: the frames SurfaceFlinger counted for the app.
+        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
+        if (fromCounters != null) return fromCounters
 
         // 4. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)

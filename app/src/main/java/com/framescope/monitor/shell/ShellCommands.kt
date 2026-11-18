@@ -106,17 +106,18 @@ object ShellCommands {
     }
 
     /**
-     * The latency of one layer, with only its newest frames.
+     * The latency of one layer.
      *
-     * The first line of a latency dump is the refresh period, the rows after it
-     * are the frames. Keeping the period and the newest rows is enough to know
-     * the frame rate, and it keeps the output small enough to survive the trip
-     * through the shell.
+     * Only the first rows of the dump are kept. The dump is a rolling window of
+     * about 128 rows per layer, and a game owns a dozen layers - ten of those
+     * windows do not fit into what a shell call may carry, and the dump then
+     * arrives cut in half with the layers that were drawing missing.
+     *
+     * Nothing but the tools that are on every phone is used here. A phone has
+     * no awk, and a command that is not there takes the whole answer with it.
      */
     private fun latencyOf(layer: String): String =
-        "dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | " +
-            "awk 'NR==1{print;next}{r[NR]=\$0}END{for(i=NR-29;i<=NR;i++)" +
-            "if(i>1&&(i in r))print r[i]}'; "
+        "dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | head -40; "
 
     fun surfaceTimeStatsEnable(): String = "dumpsys SurfaceFlinger --timestats -enable 2>/dev/null"
 

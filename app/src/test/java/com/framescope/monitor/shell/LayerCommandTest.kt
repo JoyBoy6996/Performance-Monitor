@@ -45,11 +45,38 @@ class LayerCommandTest {
      * while every other app works.
      */
     @Test
-    fun `every layer keeps only the refresh period and its newest frames`() {
+    fun `every layer keeps only the first rows of its dump`() {
+        // The dump is a rolling window of about 128 rows per layer and a game
+        // owns a dozen layers. Keeping only the first rows of each one keeps
+        // the whole answer inside what a shell call may carry.
         val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
-        assertTrue(command.contains("awk"))
-        assertTrue(command.contains("NR==1{print;next}"))
-        assertTrue(command.contains("i=NR-29"))
+        assertTrue(command.contains("head -40"))
+    }
+
+    /**
+     * A phone has no awk.
+     *
+     * Toybox, which is what a phone runs, has no awk, and a command that is
+     * not there takes the whole answer with it: the dump comes back empty and
+     * every app looks like it renders nothing.
+     */
+    @Test
+    fun `no tool is used that a phone does not have`() {
+        val commands = listOf(
+            ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile"),
+            ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile", fallback = true),
+            ShellCommands.surfaceLatencyOfLayer("SurfaceView[com.pubg.krmobile/Main]#0"),
+            ShellCommands.surfaceLatencyDefault(),
+            ShellCommands.surfaceTimeStatsWindow(),
+            ShellCommands.surfaceList()
+        )
+
+        for (command in commands) {
+            assertFalse(command.contains("awk"))
+            assertFalse(command.contains("perl"))
+            assertFalse(command.contains("python"))
+            assertFalse(command.contains("bc "))
+        }
     }
 
     @Test
@@ -62,7 +89,6 @@ class LayerCommandTest {
     @Test
     fun `a single layer is trimmed as well`() {
         val command = ShellCommands.surfaceLatencyOfLayer("SurfaceView[com.pubg.krmobile/x]#0")
-        assertTrue(command.contains("awk"))
-        assertTrue(command.contains("i=NR-29"))
+        assertTrue(command.contains("head -40"))
     }
 }

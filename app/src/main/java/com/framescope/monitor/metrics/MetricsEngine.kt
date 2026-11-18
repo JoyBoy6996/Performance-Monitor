@@ -43,6 +43,9 @@ class MetricsEngine(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fpsSampler = FpsSampler(hub)
+
+    /** The last app that was measured, for the diagnostics. */
+    val lastMeasuredPackage: StateFlow<String?> get() = fpsSampler.lastMeasuredPackage
     private val systemSampler = SystemSampler(hub)
     private val sessionLogger = SessionLogger(store)
 

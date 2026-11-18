@@ -63,6 +63,7 @@ import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.Sparkline
 import com.framescope.monitor.ui.components.StatCell
 import com.framescope.monitor.ui.components.StatusPill
+import com.framescope.monitor.ui.components.TerminalBlock
 import com.framescope.monitor.ui.components.fpsStateColor
 import com.framescope.monitor.ui.components.rememberPulseAlpha
 import com.framescope.monitor.ui.theme.MonoInline
@@ -574,8 +575,11 @@ private fun DiagnosticsRow(container: AppContainer) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val status by container.hub.status.collectAsState()
+    val lastMeasured by container.engine.lastMeasuredPackage.collectAsState()
     var message by remember { mutableStateOf<String?>(null) }
     var running by remember { mutableStateOf(false) }
+    var probeOutput by remember { mutableStateOf("") }
+    var probing by remember { mutableStateOf(false) }
 
     Panel {
         Text(
@@ -590,6 +594,36 @@ private fun DiagnosticsRow(container: AppContainer) {
                 .padding(top = Space.md),
             horizontalArrangement = Arrangement.spacedBy(Space.sm)
         ) {
+            FilledTonalButton(
+                enabled = !probing,
+                onClick = {
+                    probing = true
+                    probeOutput = "Reading the layers..."
+                    scope.launch {
+                        val pkg = lastMeasured
+                        val result = container.hub.execOrNull(
+                            Diagnostics.probeCommand(pkg),
+                            20_000
+                        )
+                        probeOutput = if (result == null) {
+                            "Shizuku is not connected. Start it and grant permission first."
+                        } else {
+                            (result.out + "\n" + result.err).trim()
+                        }
+                        probing = false
+                    }
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    if (lastMeasured.isNullOrBlank()) "Raw probe" else "Raw probe (${lastMeasured})",
+                    modifier = Modifier.padding(start = 6.dp)
+                )
+            }
             FilledTonalButton(
                 enabled = !running,
                 onClick = {
@@ -628,6 +662,17 @@ private fun DiagnosticsRow(container: AppContainer) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = Space.sm)
             )
+        }
+        if (probeOutput.isNotEmpty()) {
+            Spacer(Modifier.height(Space.md))
+            Text(
+                text = "What SurfaceFlinger answers for " +
+                    (lastMeasured ?: "the last app") + " - a screenshot of this is enough to fix it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(Space.sm))
+            TerminalBlock(text = probeOutput, maxLines = 40)
         }
     }
 }

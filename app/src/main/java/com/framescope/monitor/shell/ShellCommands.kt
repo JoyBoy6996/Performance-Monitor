@@ -112,6 +112,18 @@ object ShellCommands {
 
     fun surfaceTimeStatsDump(): String = "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null"
 
+    /**
+     * One second of frame counters.
+     *
+     * The counters are dumped and cleared in the same command, so the frames in
+     * the dump are exactly the frames since the last tick and nothing else. The
+     * collection is switched on again right after, because clearing it also
+     * stops it.
+     */
+    fun surfaceTimeStatsWindow(): String =
+        "dumpsys SurfaceFlinger --timestats -dump -clear 2>/dev/null; " +
+            "dumpsys SurfaceFlinger --timestats -enable 2>/dev/null"
+
     fun gfxInfo(packageName: String): String =
         "dumpsys gfxinfo $packageName framestats 2>/dev/null"
 

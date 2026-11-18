@@ -77,6 +77,25 @@ class FpsSampler(
     private val _reports = MutableStateFlow<Map<String, String>>(emptyMap())
     val reports: StateFlow<Map<String, String>> = _reports.asStateFlow()
 
+    /**
+     * The last app that was measured.
+     *
+     * FrameScope itself is never measured, so this is the app that was in front
+     * of the user before the app was opened - the game, usually. The diagnostics
+     * need that name to ask SurfaceFlinger about the right layers.
+     */
+    private val _lastMeasuredPackage = MutableStateFlow<String?>(null)
+    val lastMeasuredPackage: StateFlow<String?> = _lastMeasuredPackage.asStateFlow()
+
+    /**
+     * The frame counters of SurfaceFlinger.
+     *
+     * This is the source that works for games: a game draws into a buffer
+     * queue that keeps no frame timeline, so its presentation timestamps are
+     * empty, but SurfaceFlinger still counts the frames it presents.
+     */
+    private val counters = FpsPollingEngine(hub, ownPackage)
+
     /** Counts the frames of the primary provider. */
     private val latencyCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
 
@@ -168,6 +187,9 @@ class FpsSampler(
             onTargetChanged(pkg)
         }
         foregroundApp = pkg
+        if (!pkg.isNullOrBlank() && pkg != ownPackage) {
+            _lastMeasuredPackage.value = pkg
+        }
 
         if (pkg.isNullOrBlank()) {
             return publishUnavailable(
@@ -211,13 +233,13 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // 1. Primary: presentation timestamps of a verified layer.
+        // 1. Primary: the frames SurfaceFlinger counted for the app in front.
+        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
+        if (fromCounters != null) return fromCounters
+
+        // 2. Fallback: presentation timestamps of a verified layer.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
-
-        // 2. Fallback: SurfaceFlinger's frame counters for the same app.
-        val fromTimeStats = sampleFromTimeStats(pkg, targetFps, nowUptime)
-        if (fromTimeStats != null) return fromTimeStats
 
         // 3. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
@@ -286,6 +308,64 @@ class FpsSampler(
             }
         }
         return samples
+    }
+
+    /**
+     * The primary provider: the frames SurfaceFlinger counted for the app.
+     *
+     * The counters are cleared after every read, so they hold the frames of one
+     * window and the frame rate is simply the number of frames divided by the
+     * length of that window. A screen that is standing still sends no buffers
+     * at all; there the display refresh rate is shown instead of a zero that
+     * would look like a broken app.
+     */
+    private suspend fun sampleFromCounters(
+        pkg: String,
+        targetFps: Int,
+        nowUptime: Long
+    ): FpsState? {
+        val tick = counters.tick(pkg) ?: return null
+        activeSource = FpsSourceKind.TIMESTATS
+        measuredLayer = tick.layer
+
+        val windowSeconds = if (tick.windowNs > 0L) tick.windowNs / 1_000_000_000.0 else 0.0
+        if (windowSeconds <= 0.0) return null
+
+        val counted = tick.frames.toDouble() / windowSeconds
+        // A screen that is standing still sends no buffers at all. There the
+        // display refresh rate is shown, because that is what the screen is
+        // running at, and a zero would look like a broken app.
+        val fps: Double = if (tick.staticScreen) {
+            refreshRateHz()?.toDouble() ?: return null
+        } else {
+            counted
+        }
+        if (fps <= 0.0 || fps > 1000.0) return null
+
+        _reports.value = retainReport(_reports.value, pkg, buildProbeReport(pkg, tick.raw))
+
+        publish(
+            fps = fps.toFloat(),
+            frameTimeMs = (1000.0 / fps).toFloat(),
+            source = "SurfaceFlinger counters",
+            kind = FpsSourceKind.TIMESTATS,
+            layer = tick.layer,
+            totalFrames = tick.frames,
+            jankFrames = tick.janky,
+            sampleAgeMs = 0L,
+            windowMs = (windowSeconds * 1000.0).toLong(),
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
+    }
+
+    /** The refresh rate of the display that is on, when the system can tell. */
+    private fun refreshRateHz(): Float? {
+        val ctx = context ?: return null
+        val collectors = NativeCollectors(ctx.applicationContext)
+        val rate = collectors.refreshRate()
+        return rate.value
     }
 
     /**

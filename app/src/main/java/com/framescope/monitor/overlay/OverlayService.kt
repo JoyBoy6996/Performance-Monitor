@@ -117,6 +117,29 @@ class OverlayService : Service() {
         root = null
     }
 
+    /**
+     * Asks the system for the two exemptions the overlay needs.
+     *
+     * The Settings app hides overlays it does not trust, and a privileged shell
+     * can switch that off. Without it the overlay disappears the moment the
+     * user opens the Settings app, which is where the overlay permission is.
+     */
+    private fun grantOverlayExemptions(app: FrameScopeApp) {
+        val pkg = applicationContext.packageName
+        app.container.scope.launch(Dispatchers.IO) {
+            runCatching {
+                app.container.hub.execOrNull(
+                    "cmd appops set $pkg HIDE_OVERLAY_WINDOWS allow",
+                    4_000
+                )
+                app.container.hub.execOrNull(
+                    "cmd appops set $pkg SYSTEM_ALERT_WINDOW allow",
+                    4_000
+                )
+            }
+        }
+    }
+
     private fun buildOverlay() {
         graphView = null
         if (!Settings.canDrawOverlays(this)) return
@@ -124,11 +147,16 @@ class OverlayService : Service() {
         val app = applicationContext as? FrameScopeApp ?: return
         val settings = app.container.settings
 
+        grantOverlayExemptions(app)
+
         currentStyle = runCatching {
             OverlayStyle.valueOf(settings.overlayStyle.value)
         }.getOrDefault(OverlayStyle.CLASSIC)
         currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
-        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
+        // Android does not let a window that covers more than this much of the
+        // screen pass touches through, so the Settings app and its permission
+        // dialogs would stop working with the overlay on top of them.
+        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, MAX_OVERLAY_OPACITY)
         currentRows = settings.overlayRows.value
         showGraph = settings.overlayShowGraph.value
         graphHeight = settings.overlayGraphHeight.value
@@ -404,7 +432,7 @@ class OverlayService : Service() {
     private fun restyleOverlay(settings: AppSettings) {
         val rootLayout = root ?: return
         val lp = params ?: return
-        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
+        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, MAX_OVERLAY_OPACITY)
         currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
         showGraph = settings.overlayShowGraph.value
         graphHeight = settings.overlayGraphHeight.value
@@ -526,6 +554,15 @@ class OverlayService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.framescope.monitor.overlay.STOP"
+
+        /**
+         * The most the overlay may cover.
+         *
+         * Android refuses to pass touches through a window that hides more than
+         * this much of the screen, so anything above it would block the
+         * Settings app and its permission dialogs.
+         */
+        private const val MAX_OVERLAY_OPACITY = 0.8f
         private const val CHANNEL_ID = "framescope_overlay_channel"
         private const val NOTIFICATION_ID = 4040
 

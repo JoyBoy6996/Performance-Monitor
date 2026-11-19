@@ -196,11 +196,11 @@ class FpsPollingEngine(
         // the middle of three.
         var fps = if (frames <= 0L) 0.0 else recentRates.sorted()[recentRates.size / 2]
 
-        // A screen cannot present more frames than it refreshes. The rate
-        // SurfaceFlinger recorded for this very layer is the true ceiling, and
-        // it is bucketed in steps of 30 Hz - so 144 Hz reads as 150 and a
-        // correct 148 fps is never clipped.
-        val ceiling = target.displayRefreshRate?.toFloat() ?: displayHz
+        // A screen cannot present more frames than it refreshes. Use the
+        // display's own refresh rate (not the 30 Hz bucketed rate SurfaceFlinger
+        // prints, which rounds 144 Hz up to 150) as the ceiling, so we never
+        // publish a frame rate the screen cannot physically show.
+        val ceiling = displayHz ?: target.displayRefreshRate?.toFloat()
         if (ceiling != null && ceiling > 0f && fps > ceiling * 1.02) {
             if (fps > ceiling * 1.5) {
                 lastReason = "The counters of ${target.layer} read faster than the display"

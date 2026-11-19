@@ -68,6 +68,10 @@ class FrameCounter(
     /** Presentation timestamps inside the current rolling window. */
     private val recentTimestamps = ArrayDeque<Long>()
 
+    /** Seen timestamps, for deduplication. Ring-buffer overlaps can repeat the same
+     *  timestamp across polls; without dedup they inflate the count. */
+    private val seenTimestamps = LinkedHashSet<Long>(256)
+
     /** Frame times in milliseconds, bounded so a long run cannot grow without limit. */
     private val frameTimesMs = ArrayDeque<Double>()
 
@@ -192,8 +196,13 @@ class FrameCounter(
         val fresh = presents.filter { it > cursorPresentNs }
         var newFrames = 0
         var newJank = 0
+        var addedAny = false
 
         for (timestamp in fresh) {
+            // Deduplicate: ring-buffer overlaps can repeat the same timestamp
+            // across polls. Without this, the same frame is counted twice.
+            if (!seenTimestamps.add(timestamp)) continue
+
             newFrames++
             val interval = if (previousPresentNs == Long.MIN_VALUE) 0L else timestamp - previousPresentNs
 
@@ -214,15 +223,27 @@ class FrameCounter(
                 recentTimestamps.addLast(timestamp)
             }
             previousPresentNs = timestamp
+            addedAny = true
         }
 
-        if (fresh.isNotEmpty()) {
+        // Bound the seen set so memory never grows over long sessions
+        while (seenTimestamps.size > 1024) {
+            val oldest = seenTimestamps.first()
+            seenTimestamps.remove(oldest)
+        }
+
+        if (addedAny) {
             cursorPresentNs = fresh.last()
             lastPresentSourceNs = fresh.last()
             totalUniqueFrames += newFrames
             totalJankFrames += newJank
             lastPresentElapsedNanos = nowElapsedNanos
         }
+
+        // Stale check: if no new frames arrived and the last frame is older
+        // than the stale timeout, the scene is static/paused. Drop to 0 FPS.
+        val isStale = !addedAny && lastPresentElapsedNanos > 0L &&
+            (nowElapsedNanos - lastPresentElapsedNanos) > 350_000_000L
 
         // Keep the rolling window bounded.
         val windowStart = cursorPresentNs - recentWindowNs
@@ -233,9 +254,9 @@ class FrameCounter(
         return Result(
             newFrames = newFrames,
             newJank = newJank,
-            recentFps = recentFps(),
-            frameTimeMs = meanFrameTimeMs(),
-            averageFps = averageFps(nowElapsedNanos),
+            recentFps = if (isStale) null else recentFps(),
+            frameTimeMs = if (isStale) null else meanFrameTimeMs(),
+            averageFps = if (isStale) null else averageFps(nowElapsedNanos),
             sampleAgeMs = sampleAgeMs(nowElapsedNanos),
             windowMs = windowMs(),
             sourceReset = false,
@@ -334,6 +355,7 @@ class FrameCounter(
         startedAtElapsedNanos = 0L
         baselined = false
         recentTimestamps.clear()
+        seenTimestamps.clear()
         sortedFrameTimes = null
         frameTimesMs.clear()
     }

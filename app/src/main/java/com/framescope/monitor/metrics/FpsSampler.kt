@@ -110,6 +110,7 @@ class FpsSampler(
 
     /** Counts the frames of the primary provider. */
     private val latencyCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
+    private val sceneFpsCalculator = SceneFpsCalculator(windowMs = 500L, staleTimeoutMs = 350L)
 
     /** Counts the frames of the gfxinfo provider. */
     private val gfxCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)

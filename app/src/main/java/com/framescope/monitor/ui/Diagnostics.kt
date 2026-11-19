@@ -46,6 +46,14 @@ object Diagnostics {
         val pkg = (packageName ?: "").replace("'", "").replace("\"", "")
         val app = if (pkg.isBlank()) "" else pkg
         return listOf(
+            // The counters come first: they are the text that decides the
+            // frame rate of a game, and they are the part a screenshot has to
+            // show.
+            "echo '--- counters of $app ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -B 6 -A 14 -F '$app' | head -50",
+            "echo '--- counters of every layer (first blocks) ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | head -24",
             "echo '--- who is running this ---'",
             "id 2>/dev/null",
             "echo '--- how many layers ---'",

@@ -173,3 +173,17 @@ Two reasons, both fixed here:
 
 The counters of the whole device are still asked for every few seconds, for a game
 that names its surface after its engine and not after its package.
+
+## 1.1.11 - the recorder took the app down with it
+
+The app crashed on the phone with
+`SecurityException: Unable to start service Intent { cmp=com.framescope.monitor/.recorder.ScreenRecorderService }`.
+Android 14 and later refuse a foreground service that captures the screen when the
+app does not hold `android.permission.PROJECT_MEDIA`. The service then never
+promotes itself, the system takes it away after five seconds, and the whole app
+dies with it - and with it the frame rate the user came for.
+
+- The permission is declared now.
+- A refusal is caught: the service stops quietly instead of killing the app.
+- The raw probe prints the counters of the app first, because they are the text
+  that decides the frame rate of a game.

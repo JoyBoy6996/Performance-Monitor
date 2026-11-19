@@ -367,7 +367,10 @@ class FpsSampler(
         // so that is what is shown, named as what it is.
         val idle = tick.staticScreen
         val fps: Double = if (idle) {
-            (tick.displayRefreshRate ?: refreshRateHz()?.toInt())?.toDouble() ?: return null
+            // Use the actual display refresh rate, not the 30 Hz bucketed rate
+            // SurfaceFlinger prints (144 Hz → 150). Showing 150 on a 144 Hz
+            // phone is wrong.
+            (refreshRateHz()?.toInt() ?: tick.displayRefreshRate)?.toDouble() ?: return null
         } else {
             tick.fps
         }

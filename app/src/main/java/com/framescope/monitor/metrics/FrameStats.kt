@@ -41,3 +41,16 @@ fun computeFrameStats(deltas: List<Long>): FrameStats? {
         jank = jank
     )
 }
+
+/**
+ * True when a frame rate can belong to this screen.
+ *
+ * A screen presents at most as many frames as it refreshes, so a number above
+ * that is a counter that was read wrong and not a frame rate. A 144 Hz screen
+ * cannot show 298 frames per second.
+ */
+fun isPlausibleFps(fps: Float, refreshRateHz: Float?): Boolean {
+    if (fps <= 0f) return false
+    val ceiling = (refreshRateHz?.takeIf { it > 0f } ?: 240f) * 1.05f
+    return fps <= ceiling
+}

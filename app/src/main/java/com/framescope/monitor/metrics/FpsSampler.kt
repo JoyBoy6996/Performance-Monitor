@@ -504,11 +504,8 @@ class FpsSampler(
      * A screen cannot present more frames than it refreshes, so a number above
      * that is a counter that was read wrong and not a frame rate.
      */
-    private fun isPlausibleFps(fps: Float): Boolean {
-        if (fps <= 0f) return false
-        val ceiling = (refreshRateHz() ?: 240f) * 1.05f
-        return fps <= ceiling
-    }
+    private fun isPlausibleFps(fps: Float): Boolean =
+        isPlausibleFps(fps, refreshRateHz())
 
     /** The refresh rate of the display that is on, when the system can tell. */
     private fun refreshRateHz(): Float? {
@@ -713,6 +710,10 @@ class FpsSampler(
 
         val result = gfxCounter.onSample(pkg, timestamps, nowUptime)
         val fps = result.recentFps
+        // A number that no screen can show is a timestamp that was read wrong,
+        // not a frame rate. The 144 Hz panel cannot present 298 frames, and
+        // that is what the interface showed before this check.
+        if (fps != null && fps > 0f && !isPlausibleFps(fps)) return null
         if (fps == null || fps <= 0f) {
             return publishUnavailable(
                 source = "gfxinfo",

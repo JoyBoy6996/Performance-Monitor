@@ -90,7 +90,7 @@ fun parseLayerLatencies(dump: String): List<LayerSample> {
         val real = if (rows.firstOrNull()?.all { it == 0L } == true) rows.drop(1) else rows
         if (real.isEmpty()) continue
 
-        val series = readFrameSeries(real) ?: continue
+        val series = readFrameSeries(real, refreshPeriodNs) ?: continue
 
         // The same timestamp can appear twice; a frame is one timestamp.
         // Presentation timestamps arrive in order, but a dump taken while the
@@ -123,7 +123,7 @@ private fun readRow(row: String): List<Long> {
  * A series that does not move steadily is refused. A wrong series is worse
  * than no series: it would report a frame rate that belongs to nothing.
  */
-private fun readFrameSeries(rows: List<List<Long>>): List<Long>? {
+private fun readFrameSeries(rows: List<List<Long>>, refreshNs: Long): List<Long>? {
     val columns = rows.first().size
     for (index in preferredColumns(columns)) {
         val series = rows.mapNotNull { it.getOrNull(index) }
@@ -131,7 +131,7 @@ private fun readFrameSeries(rows: List<List<Long>>): List<Long>? {
             // INT64_MAX, and a zero means "no frame". Both are the absence of
             // a frame, not a frame that was presented 292 years after boot.
             .filter { it > 0L && it < MAX_PLAUSIBLE_PRESENT_NS }
-        if (looksLikeFrameSeries(series)) return series
+        if (looksLikeFrameSeries(series, refreshNs)) return series
     }
     return null
 }
@@ -147,7 +147,7 @@ private fun preferredColumns(columns: Int): List<Int> = when {
 }
 
 /** A real frame series moves forward at a steady pace. */
-private fun looksLikeFrameSeries(series: List<Long>): Boolean {
+private fun looksLikeFrameSeries(series: List<Long>, refreshNs: Long = 0L): Boolean {
     if (series.size < 4) return false
     val deltas = series.zipWithNext { a, b -> b - a }.filter { it > 0L }
     if (deltas.size < 3) return false
@@ -155,6 +155,11 @@ private fun looksLikeFrameSeries(series: List<Long>): Boolean {
     // A frame is never presented in under a millisecond and never takes a
     // second; anything else is not a frame time.
     if (median < 1_000_000L || median > 1_000_000_000L) return false
+    // A screen cannot present more frames than it refreshes. A column that
+    // advances twice per refresh period is not the frame time - it is the
+    // other column of the same row, and reading it gives a frame rate that no
+    // screen can reach.
+    if (refreshNs > 0L && median * 10 < refreshNs * 8) return false
     val clustered = deltas.count { it >= median / 2 && it <= median * 2 }
     return clustered * 10 >= deltas.size * 6
 }

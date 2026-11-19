@@ -127,3 +127,22 @@ answer two things:
 - `git pull --rebase origin fix/fps-overlay` before a commit and before a push.
 - Never force push. No merge commits.
 - Every change keeps a test. One build is one commit.
+
+## 1.1.8 - two numbers that no screen could show
+
+Both were shown on the phone while the frame rate of a game was still missing:
+
+1. **298 FPS on a 144 Hz panel.** The `gfxinfo` path published its number without
+   any limit. Every other source is limited to what the screen can present; that
+   path was not, and a timestamp that was read wrong became a frame rate. The
+   rule now lives in one place (`isPlausibleFps`) and every source has to pass it.
+2. **A column that moves twice per refresh period.** The latency dump holds three
+   columns. One of them advances twice per refresh period - it is the other column
+   of the same row, not the frame time. Read as a frame time it gives twice the
+   frame rate of the screen. A column that is faster than the screen can present is
+   now refused, and the next column is read.
+
+## Rules of this repo
+- `git pull --rebase origin fix/fps-overlay` before a commit and before a push.
+- Never force push. No merge commits.
+- Every change keeps a test. One build is one commit.

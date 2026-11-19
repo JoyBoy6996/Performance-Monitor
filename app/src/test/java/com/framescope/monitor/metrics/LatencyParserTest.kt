@@ -216,4 +216,52 @@ class LatencyParserTest {
             samples[0].presents
         )
     }
+
+    @Test
+    fun aColumnThatMovesTwicePerRefreshPeriodIsNotTheFrameTime() {
+        // The panel refreshes every 6.94 ms. One column of the dump moves twice
+        // as fast - it is the other column of the same row, not the frame time.
+        // Reading it gives 288 frames per second on a 144 Hz screen.
+        val period = 6_944_444L
+        val dump = buildString {
+            appendLine(period.toString())
+            for (i in 0 until 6) {
+                appendLine(
+                    listOf(
+                        1_000_000_000L + i * period,
+                        1_000_000_000L + i * (period / 2),
+                        1_000_000_000L + i * period + 1L
+                    ).joinToString(" ")
+                )
+            }
+        }
+
+        val samples = parseLayerLatencies(dump)
+
+        assertEquals(1, samples.size)
+        val step = samples[0].presents.zipWithNext { a, b -> b - a }.first()
+        assertTrue(
+            "the frame time must be the refresh period, not half of it, but was $step",
+            step == period || step == period + 1L
+        )
+    }
+
+    @Test
+    fun aDumpWhereEveryColumnIsTooFastIsRefused() {
+        val period = 6_944_444L
+        val dump = buildString {
+            appendLine(period.toString())
+            for (i in 0 until 6) {
+                appendLine(
+                    listOf(
+                        1_000_000_000L + i * (period / 2),
+                        1_000_000_000L + i * (period / 2) + 1L,
+                        1_000_000_000L + i * (period / 2) + 2L
+                    ).joinToString(" ")
+                )
+            }
+        }
+
+        assertTrue(parseLayerLatencies(dump).isEmpty())
+    }
 }

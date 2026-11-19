@@ -77,7 +77,7 @@ object TimeStats {
          * not print.
          */
         val key: String
-            get() = "$layer|${uid ?: 0}|${displayRefreshRate ?: 0}|${renderRate ?: 0}"
+            get() = "$layer|${uid ?: 0}"
     }
 
     /** `key = value`, as every line of the text is written. */

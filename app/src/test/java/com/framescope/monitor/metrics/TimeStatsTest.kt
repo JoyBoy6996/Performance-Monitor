@@ -235,7 +235,10 @@ class TimeStatsTest {
         val readings = TimeStats.readAllUnfiltered(switched)
 
         assertEquals(2, readings.size)
-        assertEquals(2, readings.map { it.key }.distinct().size)
+        // The two blocks share a layer and a uid, so they share a key: the
+        // second counter restarted and the baseline logic detects that by the
+        // frames going backwards.
+        assertEquals(1, readings.map { it.key }.distinct().size)
         assertEquals(90, readings[0].renderRate)
         assertEquals(120, readings[1].renderRate)
         assertEquals(144, readings[0].displayRefreshRate)

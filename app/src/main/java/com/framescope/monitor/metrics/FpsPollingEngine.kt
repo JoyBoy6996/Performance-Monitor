@@ -173,8 +173,13 @@ class FpsPollingEngine(
             return null
         }
         if (target.frames < old.frames) {
-            // The counter went backwards. That is not a drop to zero, it is a
-            // different counter wearing the same name.
+            // The counter went backwards: it restarted (the game changed its
+            // render rate, or SurfaceFlinger cleared the collection). The old
+            // baseline belongs to the previous counter and cannot be used.
+            // Forget the old snapshots so the next dump starts a fresh baseline.
+            snapshots.clear()
+            snapshots.addLast(Snapshot(at, latest))
+            recentRates.clear()
             lastReason = "${target.layer} started a new counter"
             return null
         }

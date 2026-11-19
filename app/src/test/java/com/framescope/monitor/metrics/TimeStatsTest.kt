@@ -8,55 +8,151 @@ import org.junit.Test
 /**
  * The counters SurfaceFlinger keeps per layer.
  *
- * They are the fallback for a game that renders without a frame timeline, so
- * they have to be read from the right layer and refused when the dump does not
- * say which layer it belongs to.
+ * The text below is the text SurfaceFlinger really prints
+ * (`TimeStatsHelper::TimeStatsLayer::toString()` and
+ * `TimeStatsHelper::TimeStatsGlobal::toString()`): a global section first, then
+ * one block per layer, each block introduced by its `layerName = ` line and
+ * headed by the refresh rate, the render rate and the uid printed *before* the
+ * name.
+ *
+ * The global section carries a `totalFrames` of its own. That number belongs to
+ * the display, not to the app, and reporting it as the app's frame rate is the
+ * one mistake this parser must never make - so every test here would fail if
+ * the two counters were confused.
  */
 class TimeStatsTest {
 
     private val dump = """
-        SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity](BLAST)#0
-           Total frames rendered: 1234
-           Janky frames: 12 (1.0%)
-           50th percentile: 8ms
-           Number Missed Vsync: 3
-           Histogram of frame times:
-           0-1: 0
+        SurfaceFlinger TimeStats:
+        Legacy stats are as follows:
+        statsStart = 1763520000
+        statsEnd = 1763520060
+        totalFrames = 9999
+        missedFrames = 7
+        clientCompositionFrames = 0
+        refreshRateSwitches = 2
+        displayOnTime = 60000 ms
+        displayConfigStats is as below:
+        144fps = 60000ms
 
-        SurfaceView[com.android.launcher3/.Launcher](BLAST)#0
-           Total frames rendered: 900
-           Janky frames: 0 (0.0%)
+        Global aggregated jank payload (Timeline stats):
+        displayRefreshRate = 144 fps
+        renderRate = 120 fps
+        totalTimelineFrames = 400
+        jankyFrames = 9
+        sfLongCpuJankyFrames = 2
+
+        displayRefreshRate = 144 fps
+        renderRate = 120 fps
+        uid = 10234
+        layerName = SurfaceView[com.pubg.imobile/com.pubg.imobile.MainActivity](BLAST)#0
+        packageName = com.pubg.imobile
+        gameMode = Unsupported
+        totalFrames = 118
+        droppedFrames = 1
+        lateAcquireFrames = 0
+        badDesiredPresentFrames = 0
+        Jank payload for this layer:
+        totalTimelineFrames = 118
+        jankyFrames = 4
+        sfLongCpuJankyFrames = 1
+        SetFrameRate vote for this layer:
+        frameRate = 120.00
+        averageFPS = 118.532
+        present2present histogram is as below:
+        8ms=100 9ms=18
+
+        displayRefreshRate = 144 fps
+        renderRate = 60 fps
+        uid = 1000
+        layerName = SurfaceView[com.android.systemui/com.android.systemui]Splash Screen#0
+        packageName = com.android.systemui
+        gameMode = Unsupported
+        totalFrames = 2
+        droppedFrames = 0
+        lateAcquireFrames = 0
+        badDesiredPresentFrames = 0
+        Jank payload for this layer:
+        totalTimelineFrames = 2
+        jankyFrames = 0
     """.trimIndent()
 
     @Test
-    fun `reads the counter of the layer that belongs to the package`() {
-        val reading = TimeStats.read(dump, "com.pubg.krmobile")
+    fun `reads the counters of the layer that belongs to the package`() {
+        val reading = TimeStats.read(dump, "com.pubg.imobile")
 
-        assertEquals(1234L, reading?.frames)
-        assertTrue(reading!!.layer.contains("com.pubg.krmobile"))
+        assertEquals(118L, reading?.frames)
+        assertEquals("com.pubg.imobile", reading?.packageName)
+        assertTrue(reading!!.layer.contains("com.pubg.imobile"))
     }
 
     @Test
-    fun `reads the janky frames and the missed vsyncs`() {
-        val reading = TimeStats.read(dump, "com.pubg.krmobile")
+    fun `the global display counter is never read as the app's counter`() {
+        val readings = TimeStats.readAllUnfiltered(dump)
 
-        assertEquals(12L, reading?.jankyFrames)
-        assertEquals(3L, reading?.missedVsync)
+        assertEquals(2, readings.size)
+        assertTrue(readings.none { it.frames == 9999L })
+    }
+
+    @Test
+    fun `reads the janky frames and the dropped frames`() {
+        val reading = TimeStats.read(dump, "com.pubg.imobile")
+
+        assertEquals(4L, reading?.jankyFrames)
+        assertEquals(1L, reading?.missedVsync)
+    }
+
+    @Test
+    fun `reads the rates of the block, not of the block before it`() {
+        val reading = TimeStats.read(dump, "com.pubg.imobile")
+
+        assertEquals(120, reading?.renderRate)
+        assertEquals(144, reading?.displayRefreshRate)
+    }
+
+    @Test
+    fun `reads the average frame rate only when SurfaceFlinger printed one`() {
+        val readings = TimeStats.readAllUnfiltered(dump)
+
+        assertEquals(118.532f, readings[0].averageFps!!, 0.001f)
+        // The second block has no present2present histogram, so it has no average.
+        assertNull(readings[1].averageFps)
+    }
+
+    @Test
+    fun `the second block keeps its own header`() {
+        val readings = TimeStats.readAllUnfiltered(dump)
+
+        assertEquals("com.android.systemui", readings[1].packageName)
+        assertEquals(60, readings[1].renderRate)
+        assertEquals(144, readings[1].displayRefreshRate)
     }
 
     @Test
     fun `every layer of the package is read`() {
-        val dump = """
-            SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity](BLAST)#0
-               Total frames rendered: 1200
-               Janky frames: 12
+        val twoLayers = """
+            displayRefreshRate = 144 fps
+            renderRate = 120 fps
+            uid = 10234
+            layerName = SurfaceView[com.pubg.imobile/com.pubg.imobile.MainActivity](BLAST)#0
+            packageName = com.pubg.imobile
+            totalFrames = 1200
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 12
 
-            SurfaceView[com.pubg.krmobile/com.pubg.krmobile.Hud](BLAST)#0
-               Total frames rendered: 900
-               Janky frames: 4
+            displayRefreshRate = 144 fps
+            renderRate = 120 fps
+            uid = 10234
+            layerName = SurfaceView[com.pubg.imobile/com.pubg.imobile.Hud](BLAST)#0
+            packageName = com.pubg.imobile
+            totalFrames = 900
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 4
         """.trimIndent()
 
-        val readings = TimeStats.readAll(dump, "com.pubg.krmobile")
+        val readings = TimeStats.readAll(twoLayers, "com.pubg.imobile")
 
         assertEquals(2, readings.size)
         assertTrue(readings.any { it.frames == 1200L })
@@ -64,24 +160,62 @@ class TimeStatsTest {
     }
 
     @Test
-    fun `a package without a layer has no reading`() {
-        val reading = TimeStats.read(dump, "com.example.other")
+    fun `a layer without a package name is found by its layer name`() {
+        val unnamed = """
+            displayRefreshRate = 120 fps
+            renderRate = 90 fps
+            uid = 10234
+            layerName = BLAST#123(com.pubg.imobile/com.pubg.imobile.MainActivity)#0
+            packageName =
+            totalFrames = 60
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 1
+        """.trimIndent()
 
-        assertNull(reading)
+        val reading = TimeStats.read(unnamed, "com.pubg.imobile")
+
+        assertEquals(60L, reading?.frames)
+        assertNull(reading?.packageName)
+    }
+
+    @Test
+    fun `a package without a layer has no reading`() {
+        assertNull(TimeStats.read(dump, "com.example.other"))
     }
 
     @Test
     fun `a dump without layer names is refused`() {
         val global = """
-            Total frames rendered: 5000
-            Janky frames: 10
+            SurfaceFlinger TimeStats:
+            Legacy stats are as follows:
+            totalFrames = 5000
+            missedFrames = 10
         """.trimIndent()
 
-        assertNull(TimeStats.read(global, "com.pubg.krmobile"))
+        assertTrue(TimeStats.readAllUnfiltered(global).isEmpty())
+        assertNull(TimeStats.read(global, "com.pubg.imobile"))
     }
 
     @Test
     fun `an empty dump has no reading`() {
-        assertNull(TimeStats.read("", "com.pubg.krmobile"))
+        assertNull(TimeStats.read("", "com.pubg.imobile"))
+        assertTrue(TimeStats.readAllUnfiltered("").isEmpty())
+    }
+
+    @Test
+    fun `the old text is still read`() {
+        val legacy = """
+            SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity](BLAST)#0
+               Total frames rendered: 1234
+               Janky frames: 12 (1.0%)
+               Number Missed Vsync: 3
+        """.trimIndent()
+
+        val reading = TimeStats.read(legacy, "com.pubg.krmobile")
+
+        assertEquals(1234L, reading?.frames)
+        assertEquals(12L, reading?.jankyFrames)
+        assertEquals(3L, reading?.missedVsync)
     }
 }

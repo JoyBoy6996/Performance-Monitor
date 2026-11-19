@@ -81,30 +81,46 @@ class GameLayerTest {
     @Test
     fun readsTheCountersOfAGameSurfaceNamedAfterItsBlastBuffer() {
         val dump = """
-            BLAST#123($pkg/com.pubg.krmobile.MainActivity)#0
-               Total frames rendered: 120
-               Janky frames: 3 (1.0%)
-               Number Missed Vsync: 1
+            displayRefreshRate = 144 fps
+            renderRate = 120 fps
+            uid = 10234
+            layerName = BLAST#123($pkg/com.pubg.krmobile.MainActivity)#0
+            packageName = $pkg
+            totalFrames = 120
+            droppedFrames = 1
+            Jank payload for this layer:
+            jankyFrames = 3
         """.trimIndent()
 
         val readings = TimeStats.readAll(dump, pkg)
 
         assertEquals(1, readings.size)
         assertEquals(120L, readings.first().frames)
+        assertEquals(3L, readings.first().jankyFrames)
     }
 
     @Test
     fun readsEveryLayerWhenNoLayerNamesThePackage() {
         val dump = """
-            BLAST#101(com.android.systemui)/StatusBar#0
-               Total frames rendered: 300
-               Janky frames: 0 (0.0%)
-               Number Missed Vsync: 0
+            displayRefreshRate = 144 fps
+            renderRate = 120 fps
+            uid = 1000
+            layerName = BLAST#101(com.android.systemui)/StatusBar#0
+            packageName =
+            totalFrames = 300
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 0
 
-            BLAST#123(com.example.engine)/UnityMain#0
-               Total frames rendered: 60
-               Janky frames: 1 (0.5%)
-               Number Missed Vsync: 0
+            displayRefreshRate = 144 fps
+            renderRate = 120 fps
+            uid = 10234
+            layerName = BLAST#123(com.example.engine)/UnityMain#0
+            packageName =
+            totalFrames = 60
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 1
         """.trimIndent()
 
         val readings = TimeStats.readAllUnfiltered(dump)

@@ -134,7 +134,11 @@ class MetricsEngine(
                 null
             } else {
                 try {
-                    kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                    // The budget is the sum of what the sources inside need, not
+                    // less: the counters get four seconds, the layer sweep three,
+                    // and a sample cancelled halfway through never reaches the
+                    // source that would have answered.
+                    kotlinx.coroutines.withTimeoutOrNull(SAMPLE_TIMEOUT_MS) {
                         fpsSampler.sample(settings.fpsThreshold.value)
                     } ?: run {
                         _diagnostic.value = "Frame sampler timed out"
@@ -375,6 +379,15 @@ class MetricsEngine(
 
     companion object {
         private const val MIN_AUTO_RECORD_MS = 3_000L
+
+        /**
+         * The longest one frame-rate sample may take.
+         *
+         * It has to cover the slowest source inside it - the counters wait up to
+         * four seconds for SurfaceFlinger - or the sample is cancelled before the
+         * source that works for a game gets its turn.
+         */
+        private const val SAMPLE_TIMEOUT_MS = 12_000L
 
         /** How often the native device metrics are read. */
         private const val NATIVE_INTERVAL_MS = 1_000L

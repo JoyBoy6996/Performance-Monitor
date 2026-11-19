@@ -20,6 +20,9 @@ class FpsPollingEngineTest {
     private fun select(readings: List<TimeStats.Reading>, pkg: String) =
         selectCountedLayer(readings, pkg, "com.framescope.monitor")
 
+    private fun earlier(vararg pairs: Pair<String, Long>): Map<String, TimeStats.Reading> =
+        pairs.associate { (layer, frames) -> layer to TimeStats.Reading(layer, frames, 0L, 0L) }
+
     @Test
     fun `the layer of the app in front wins`() {
         val picked = select(
@@ -71,5 +74,34 @@ class FpsPollingEngineTest {
         )
 
         assertEquals("BLAST#123(com.example.engine)/UnityMain#0", picked?.layer)
+    }
+
+    @Test
+    fun `the layer that drew in this window wins over one that only drew before`() {
+        val stale = "SurfaceView[com.pubg.krmobile/com.pubg.krmobile.Splash]#0"
+        val live = "SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity]#0"
+
+        val picked = selectCountedLayer(
+            listOf(reading(stale, 900L), reading(live, 120L)),
+            "com.pubg.krmobile",
+            "com.framescope.monitor",
+            earlier(stale to 900L, live to 60L)
+        )
+
+        assertEquals(live, picked?.layer)
+    }
+
+    @Test
+    fun `a screen that is standing still still names the app in front`() {
+        val layer = "SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity]#0"
+
+        val picked = selectCountedLayer(
+            listOf(reading(layer, 900L), reading("BLAST#9(com.other)/Other#0", 100L)),
+            "com.pubg.krmobile",
+            "com.framescope.monitor",
+            earlier(layer to 900L)
+        )
+
+        assertEquals(layer, picked?.layer)
     }
 }

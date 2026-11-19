@@ -64,8 +64,9 @@ object Diagnostics {
             "N=\$(dumpsys SurfaceFlinger --list 2>/dev/null | tail -1); " +
                 "echo \"layer=\$N\"; " +
                 "if [ -n \"\$N\" ]; then dumpsys SurfaceFlinger --latency \"\$N\" 2>&1 | head -6; fi",
-            "echo '--- timestats ---'",
-            "dumpsys SurfaceFlinger --timestats -dump 2>&1 | head -10",
+            "echo '--- timestats: the layer blocks ---'",
+            "dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1; " +
+                "dumpsys SurfaceFlinger --timestats -dump 2>&1 | grep -A9 -m3 'layerName = '",
             "echo '--- gfxinfo of $app ---'",
             "if [ -n '$app' ]; then dumpsys gfxinfo '$app' framestats 2>&1 | head -6; fi",
             "echo '--- the window in front ---'",

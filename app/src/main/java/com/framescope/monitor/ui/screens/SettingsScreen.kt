@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,6 +48,7 @@ import com.framescope.monitor.core.ProtectedApps
 import com.framescope.monitor.core.ThemeMode
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
+import com.framescope.monitor.ui.Diagnostics
 import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.MonoField
 import com.framescope.monitor.ui.components.Panel
@@ -237,6 +239,62 @@ fun SettingsScreen(
                     description = "Install and start Shizuku with the official guide for your device, then grant FrameScope permission above. FrameScope checks a real UserService command before it reports Connected. Shell access lasts only as long as Shizuku runs.",
                     context = context
                 )
+            }
+        }
+
+        item { SectionHeader("Permanent shell access") }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                Column(Modifier.padding(Space.lg)) {
+                    Text(
+                        text = "Grant the app the right to run dumpsys itself",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Text(
+                        text = "With this permission the frame rate is read in the app's own " +
+                            "shell: the answer is never cut short and the reading of a game " +
+                            "is the same one the device itself gives. It is granted once and " +
+                            "lasts until the app is removed.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    val dumpGranted = container.hub.hasDumpPermission()
+                    Text(
+                        text = if (dumpGranted) {
+                            "Granted - the app reads the frame timings by itself."
+                        } else {
+                            "Not granted yet."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        FilledTonalButton(
+                            enabled = !dumpGranted,
+                            onClick = {
+                                scope.launch {
+                                    container.hub.tryGrantDumpPermission()
+                                    container.hub.refresh()
+                                }
+                            }
+                        ) {
+                            Text("Grant it now")
+                        }
+                        OutlinedButton(onClick = {
+                            Diagnostics.copy(
+                                context,
+                                "pm grant ${context.packageName} android.permission.DUMP"
+                            )
+                        }) {
+                            Text("Copy the command")
+                        }
+                    }
+                }
             }
         }
 

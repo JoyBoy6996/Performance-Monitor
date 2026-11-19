@@ -115,15 +115,20 @@ class ForegroundDetector(
             )
 
         val end = System.currentTimeMillis()
-        val begin = end - 5_000L
+        // The window is five minutes, not five seconds. An app that is in front
+        // for a long time - a game - reports its last use long after it was
+        // opened, and a short window misses it completely.
+        val begin = end - 300_000L
         // The query is the truth: it returns nothing when usage access is missing and
         // it also returns nothing when the user has not opened anything for a while.
         val stats = runCatching {
-            usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, begin, end)
+            usm.queryUsageStats(UsageStatsManager.INTERVAL_BEST, begin, end)
         }.getOrNull()
 
-        val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
-        if (mostRecent != null && mostRecent.lastTimeUsed > begin) {
+        val mostRecent = stats
+            ?.filter { it.lastTimeUsed > begin && it.totalTimeInForeground > 0L }
+            ?.maxByOrNull { it.lastTimeUsed }
+        if (mostRecent != null) {
             return Detection(
                 packageName = mostRecent.packageName,
                 source = Source.USAGE_STATS,

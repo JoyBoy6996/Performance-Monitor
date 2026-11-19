@@ -146,3 +146,8 @@ Both were shown on the phone while the frame rate of a game was still missing:
 - `git pull --rebase origin fix/fps-overlay` before a commit and before a push.
 - Never force push. No merge commits.
 - Every change keeps a test. One build is one commit.
+
+## 1.1.9 - the app is built for Android 16
+
+`compileSdk` and `targetSdk` are 36 now, and the build asks the runner for platform
+36 and build-tools 36. The app was built for API 35 while the phone runs Android 16.

@@ -366,10 +366,20 @@ class FpsSampler(
         // would look like a broken measurement. The display is still refreshing,
         // so that is what is shown, named as what it is.
         val idle = tick.staticScreen
+        if (idle && TimeStats.belongsTo(
+                TimeStats.Reading(tick.layer, 0L, 0L, 0L),
+                pkg
+            )
+        ) {
+            // The layer belongs to the foreground app but presented zero frames
+            // in this window. This can mean the app is truly idle, but it can
+            // also mean the counter is frozen or the app is using a different
+            // surface. Return null so the app tries other sources (exact latency,
+            // gfxinfo) instead of showing a misleading display Hz.
+            return null
+        }
         val fps: Double = if (idle) {
-            // Use the actual display refresh rate, not the 30 Hz bucketed rate
-            // SurfaceFlinger prints (144 Hz → 150). Showing 150 on a 144 Hz
-            // phone is wrong.
+            // Use the actual display refresh rate, not the 30 Hz bucketed rate.
             (refreshRateHz()?.toInt() ?: tick.displayRefreshRate)?.toDouble() ?: return null
         } else {
             tick.fps

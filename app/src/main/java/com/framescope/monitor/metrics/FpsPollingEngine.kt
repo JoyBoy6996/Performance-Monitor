@@ -302,8 +302,15 @@ fun selectCountedLayer(
     val own = drawable.filter { TimeStats.belongsTo(it, foregroundPackage) }
     val pool = if (own.isNotEmpty()) own else drawable
 
+    // A counter with no baseline has no growth to compare: its total is every
+    // frame it ever presented, not the frames of this window. When the first
+    // dump has no baseline at all, the totals are all there is to rank by.
+    val byGrowth = pool.any { earlier.containsKey(it.key) }
+    fun weight(reading: TimeStats.Reading): Long =
+        if (byGrowth) growth(reading) else reading.frames
+
     val ranked = pool.sortedWith(
-        compareByDescending<TimeStats.Reading> { growth(it) }
+        compareByDescending<TimeStats.Reading> { weight(it) }
             .thenByDescending { if (preferredKey != null && it.key == preferredKey) 1 else 0 }
             .thenByDescending { it.frames }
     )
@@ -312,7 +319,7 @@ fun selectCountedLayer(
     // believable when it is ahead of the next one. Two layers that grew within
     // a few percent of each other say nothing about which one is in front.
     if (own.isEmpty() && ranked.size > 1 &&
-        growth(ranked[1]) * 3L / 2L > growth(best)
+        weight(ranked[1]) * 3L / 2L > weight(best)
     ) {
         return null
     }

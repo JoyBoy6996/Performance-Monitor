@@ -43,14 +43,16 @@ class LayerCommandTest {
      * dump arrives cut in half, and the layers that are missing are the ones at the
      * end - the ones that are actually drawing. The game then shows no frame rate
      * while every other app works.
+     *
+     * The rows are oldest first, so "the newest rows" are the LAST ones. Keeping
+     * the first rows kept the oldest frames of each layer, the ones that are no
+     * longer being presented.
      */
     @Test
-    fun `every layer keeps only the first rows of its dump`() {
-        // The dump is a rolling window of about 128 rows per layer and a game
-        // owns a dozen layers. Keeping only the first rows of each one keeps
-        // the whole answer inside what a shell call may carry.
+    fun `every layer keeps only the newest rows of its dump`() {
         val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
-        assertTrue(command.contains("head -40"))
+        assertTrue(command.contains("tail -n 60"))
+        assertFalse(command.contains("head -40"))
     }
 
     /**
@@ -87,8 +89,13 @@ class LayerCommandTest {
     }
 
     @Test
-    fun `a single layer is trimmed as well`() {
+    fun `a single layer keeps its whole dump`() {
+        // One layer is a single rolling window that fits in a shell call, and
+        // the parser reads it from the oldest row to the newest. Trimming it -
+        // to the first rows in particular - would keep the oldest frames.
         val command = ShellCommands.surfaceLatencyOfLayer("SurfaceView[com.pubg.krmobile/x]#0")
-        assertTrue(command.contains("head -40"))
+        assertFalse(command.contains("head"))
+        assertFalse(command.contains("tail"))
+        assertTrue(command.contains("--latency 'SurfaceView[com.pubg.krmobile/x]#0'"))
     }
 }

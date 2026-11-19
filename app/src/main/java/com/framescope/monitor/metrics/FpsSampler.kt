@@ -466,9 +466,15 @@ class FpsSampler(
             (elapsed - newest) in 0L..EXACT_MAX_AGE_NS
         if (!fresh) return null
 
-        latencyCounter.frameBudgetNs = frameBudgetNs(targetFps)
-        val result = latencyCounter.onSample(layer, sample.presents, uptime)
-        val fps = result.recentFps ?: return null
+        // Use SceneFpsCalculator for the FPS value: deduplication prevents
+        // ring-buffer overlaps from inflating the count, and the stale timeout
+        // drops to 0 when no new frames arrive.
+        val displayHz = refreshRateHz() ?: 60f
+        val sceneResult = sceneFpsCalculator.calculate(
+            sample.presents, displayHz, SystemClock.elapsedRealtime()
+        )
+        if (!sceneResult.isSceneActive || sceneResult.fps <= 0) return null
+        val fps = sceneResult.fps.toFloat()
         if (!isPlausibleFps(fps)) return null
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
@@ -476,16 +482,16 @@ class FpsSampler(
 
         publish(
             fps = fps,
-            frameTimeMs = result.frameTimeMs ?: (1000f / fps),
+            frameTimeMs = sceneResult.avgFrameTimeMs.takeIf { it > 0f } ?: (1000f / fps),
             source = "SurfaceFlinger frame times",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = layer,
-            totalFrames = latencyCounter.totalUniqueFrames,
-            jankFrames = latencyCounter.totalJankFrames,
-            sampleAgeMs = result.sampleAgeMs,
-            windowMs = result.windowMs,
-            low1PercentFps = latencyCounter.low1PercentFps(),
-            low5PercentFps = latencyCounter.low5PercentFps(),
+            totalFrames = sample.presents.size.toLong(),
+            jankFrames = sceneResult.jankFrames.toLong(),
+            sampleAgeMs = 0L,
+            windowMs = (sceneResult.avgFrameTimeMs * sceneResult.fps).toLong().coerceAtLeast(0L),
+            low1PercentFps = null,
+            low5PercentFps = null,
             appPackage = pkg,
             nowUptime = uptime
         )

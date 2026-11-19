@@ -90,6 +90,21 @@ class FpsSampler(
     val reports: StateFlow<Map<String, String>> = _reports.asStateFlow()
 
     /**
+     * The counters the device printed the last time it was asked.
+     *
+     * This is the text that decides the frame rate of a game. When the number
+     * is wrong, this text says why.
+     */
+    @Volatile
+    var lastCounterDump: String = ""
+        private set
+
+    /** The text the foreground query answered with the last time it ran. */
+    @Volatile
+    var lastForegroundOutput: String = ""
+        private set
+
+    /**
      * The last app that was measured.
      *
      * FrameScope itself is never measured, so this is the app that was in front
@@ -189,6 +204,7 @@ class FpsSampler(
             detector.detect().also {
                 lastDetection = it
                 lastDetectionAtMs = nowMs
+                lastForegroundOutput = detector.lastOutput
             }
         }
 
@@ -359,6 +375,7 @@ class FpsSampler(
     ): FpsState? {
         val tick = counters.tick(pkg, refreshRateHz()) ?: return null
         measuredLayer = tick.layer
+        lastCounterDump = tick.raw
 
         val windowSeconds = if (tick.windowNs > 0L) tick.windowNs / 1_000_000_000.0 else 0.0
         if (windowSeconds <= 0.0) return null

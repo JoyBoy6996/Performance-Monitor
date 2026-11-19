@@ -57,10 +57,10 @@ class ForegroundDetector(
      */
     suspend fun detect(): Detection {
         val privileged = detectPrivileged()
-        if (privileged.known) return privileged
-
         val usage = detectWithUsageStats()
-        if (usage.known) return usage
+
+        val chosen = chooseForeground(privileged, usage.detection, usage.lastUsedAt)
+        if (chosen.known) return chosen
 
         return Detection(
             packageName = null,
@@ -72,8 +72,19 @@ class ForegroundDetector(
     }
 
     /** Reads the resumed activity out of the window manager. */
+    /**
+     * The text the last query answered with.
+     *
+     * It is kept because a wrong answer to "which app is in front" is the
+     * one thing that cannot be seen in a number, only in the text.
+     */
+    @Volatile
+    var lastOutput: String = ""
+        private set
+
     private suspend fun detectPrivileged(): Detection {
         val out = hub.execOrNull(ShellCommands.foregroundPackage(), 2_000)?.out
+        lastOutput = out.orEmpty()
         if (!out.isNullOrBlank()) {
             val detected = Parsers.foregroundPackage(out)
             if (!detected.isNullOrBlank() && detected != "null") {
@@ -98,20 +109,26 @@ class ForegroundDetector(
      * The resolution of this source is coarse and it lags behind a real switch, so the
      * answer is marked as not confident.
      */
-    private suspend fun detectWithUsageStats(): Detection {
-        val ctx = context ?: return Detection(
-            packageName = null,
-            source = Source.NONE,
-            confident = false,
-            detail = "No context for usage access"
-        )
-
-        val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
-            ?: return Detection(
+    private suspend fun detectWithUsageStats(): UsageReading {
+        val ctx = context ?: return UsageReading(
+            Detection(
                 packageName = null,
                 source = Source.NONE,
                 confident = false,
-                detail = "Usage stats service is not available"
+                detail = "No context for usage access"
+            ),
+            emptyMap()
+        )
+
+        val usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
+            ?: return UsageReading(
+                Detection(
+                    packageName = null,
+                    source = Source.NONE,
+                    confident = false,
+                    detail = "Usage stats service is not available"
+                ),
+                emptyMap()
             )
 
         val end = System.currentTimeMillis()
@@ -125,29 +142,46 @@ class ForegroundDetector(
             usm.queryUsageStats(UsageStatsManager.INTERVAL_BEST, begin, end)
         }.getOrNull()
 
-        val mostRecent = stats
+        val used = stats
             ?.filter { it.lastTimeUsed > begin && it.totalTimeInForeground > 0L }
-            ?.maxByOrNull { it.lastTimeUsed }
+            ?: emptyList()
+        val lastUsedAt = used.associate { it.packageName to it.lastTimeUsed }
+        val mostRecent = used.maxByOrNull { it.lastTimeUsed }
         if (mostRecent != null) {
-            return Detection(
-                packageName = mostRecent.packageName,
-                source = Source.USAGE_STATS,
-                confident = false,
-                detail = "Detected through usage access, which can lag behind a switch"
+            return UsageReading(
+                Detection(
+                    packageName = mostRecent.packageName,
+                    source = Source.USAGE_STATS,
+                    confident = false,
+                    detail = "Detected through usage access, which can lag behind a switch"
+                ),
+                lastUsedAt
             )
         }
 
-        return Detection(
-            packageName = null,
-            source = Source.NONE,
-            confident = false,
-            detail = if (hasUsageAccess(ctx)) {
-                "Usage access has no recent app to report"
-            } else {
-                "Usage access is not granted, so the foreground app is unknown"
-            }
+        return UsageReading(
+            Detection(
+                packageName = null,
+                source = Source.NONE,
+                confident = false,
+                detail = if (hasUsageAccess(ctx)) {
+                    "Usage access has no recent app to report"
+                } else {
+                    "Usage access is not granted, so the foreground app is unknown"
+                }
+            ),
+            lastUsedAt
         )
     }
+
+    /**
+     * The answer of the usage access, with when every app was last in front.
+     */
+    private data class UsageReading(
+        val detection: Detection,
+        /** When each app was last in front of the user. */
+        val lastUsedAt: Map<String, Long>
+    )
 
     /**
      * Whether the system says that usage access was granted.
@@ -163,4 +197,49 @@ class ForegroundDetector(
     } catch (e: Exception) {
         false
     }
+
+    companion object {
+        /**
+         * How much more recent an app has to be before the window manager's
+         * answer is treated as stale.
+         *
+         * The usage access is coarse, so a small difference means nothing. A
+         * clear difference means the window manager is naming something that is
+         * on the screen but not in front.
+         */
+        const val STALE_ANSWER_MS = 1_500L
+    }
+}
+
+/**
+ * Picks the answer that names the app the user is looking at.
+ *
+ * The window manager can name a window that is on the screen but is not in
+ * front: an overlay of another app, a launcher that keeps the focus while a
+ * game is drawn over it. The usage access knows which app was in front a
+ * moment ago. When the two disagree and one of them is clearly more recent,
+ * that one is the answer.
+ *
+ * A small difference means nothing - the usage access is coarse - and the
+ * window manager wins, because it is exact.
+ */
+fun chooseForeground(
+    privileged: ForegroundDetector.Detection,
+    usage: ForegroundDetector.Detection,
+    lastUsedAt: Map<String, Long>
+): ForegroundDetector.Detection {
+    if (!privileged.known) return usage
+    if (!usage.known) return privileged
+    if (usage.packageName == privileged.packageName) return privileged
+
+    val privilegedUsedAt = lastUsedAt[privileged.packageName]
+    val usageUsedAt = lastUsedAt[usage.packageName]
+    if (privilegedUsedAt == null || usageUsedAt == null) return privileged
+    if (usageUsedAt <= privilegedUsedAt + ForegroundDetector.STALE_ANSWER_MS) return privileged
+
+    return usage.copy(
+        confident = false,
+        detail = "The window manager named ${privileged.packageName}, but " +
+            "${usage.packageName} was in front more recently"
+    )
 }

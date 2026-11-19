@@ -46,6 +46,12 @@ class MetricsEngine(
 
     /** The last app that was measured, for the diagnostics. */
     val lastMeasuredPackage: StateFlow<String?> get() = fpsSampler.lastMeasuredPackage
+
+    /** The counters the device printed the last time it was asked. */
+    fun lastCounterDump(): String = fpsSampler.lastCounterDump
+
+    /** The text the foreground query answered with the last time it ran. */
+    fun lastForegroundOutput(): String = fpsSampler.lastForegroundOutput
     private val systemSampler = SystemSampler(hub)
     private val sessionLogger = SessionLogger(store)
 

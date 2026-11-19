@@ -187,3 +187,21 @@ dies with it - and with it the frame rate the user came for.
 - A refusal is caught: the service stops quietly instead of killing the app.
 - The raw probe prints the counters of the app first, because they are the text
   that decides the frame rate of a game.
+
+## 1.1.12 - the app measured the launcher while the game was in front
+
+The overlay showed **144 FPS** while the game was set to 120 and the phone's own
+frame meter showed 91. The probe named `com.android.launcher3` as the app that had
+been measured last - and the launcher really does run at 144, so the number was
+right for the wrong app.
+
+The window manager can name a window that is on the screen and not in front: an
+overlay of another app, a launcher that keeps the focus while a game is drawn over
+it. The usage access knows which app was in front a moment ago. The two answers
+are now compared, and when they differ clearly the app that was used last is the
+one that is measured. A small difference means nothing and the window manager
+wins, because it is exact.
+
+The diagnostics now carry the evidence: what the window manager answered, and the
+counters the device printed the last time it was asked. A wrong number can now be
+explained from the text and not from a guess.

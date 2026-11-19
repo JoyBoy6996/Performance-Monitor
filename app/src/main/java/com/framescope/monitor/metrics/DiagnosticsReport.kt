@@ -59,6 +59,23 @@ object DiagnosticsReport {
         sb.appendLine("detected by: ${engine.foregroundSourceName()}")
         sb.appendLine("exact: ${engine.foregroundIsExact()}")
 
+        // --- What the device answered --------------------------------------------
+        val foregroundText = engine.lastForegroundOutput()
+        if (foregroundText.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine("--- what the window manager answered ---")
+            sb.append(foregroundText.trim())
+            sb.appendLine()
+        }
+
+        val counterText = engine.lastCounterDump()
+        if (counterText.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine("--- the counters the device printed (first 6000 characters) ---")
+            sb.append(counterText.take(6000).trim())
+            sb.appendLine()
+        }
+
         // --- The frame rate ------------------------------------------------------
         val fps = engine.fps.value
         sb.appendLine()

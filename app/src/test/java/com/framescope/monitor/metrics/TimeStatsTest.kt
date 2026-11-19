@@ -204,6 +204,46 @@ class TimeStatsTest {
     }
 
     @Test
+    fun `two counters of the same layer are two different counters`() {
+        // A game that changes its frame rate gets a new counter from
+        // SurfaceFlinger, keyed by the new render rate, and the old one stays
+        // in the dump. Reading them as one counter compares a fresh total of
+        // 30 with an old total of 2000, and the growth of that comparison is
+        // not a frame rate at all.
+        val switched = """
+            displayRefreshRate = 144 fps
+            renderRate = 90 fps
+            uid = 10234
+            layerName = SurfaceView[com.pubg.imobile/com.pubg.imobile.MainActivity](BLAST)#0
+            packageName = com.pubg.imobile
+            totalFrames = 2000
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 20
+
+            displayRefreshRate = 120 fps
+            renderRate = 120 fps
+            uid = 10234
+            layerName = SurfaceView[com.pubg.imobile/com.pubg.imobile.MainActivity](BLAST)#0
+            packageName = com.pubg.imobile
+            totalFrames = 30
+            droppedFrames = 0
+            Jank payload for this layer:
+            jankyFrames = 0
+        """.trimIndent()
+
+        val readings = TimeStats.readAllUnfiltered(switched)
+
+        assertEquals(2, readings.size)
+        assertEquals(2, readings.map { it.key }.distinct().size)
+        assertEquals(90, readings[0].renderRate)
+        assertEquals(120, readings[1].renderRate)
+        assertEquals(144, readings[0].displayRefreshRate)
+        assertEquals(120, readings[1].displayRefreshRate)
+        assertEquals(10234, readings[0].uid)
+    }
+
+    @Test
     fun `the old text is still read`() {
         val legacy = """
             SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity](BLAST)#0

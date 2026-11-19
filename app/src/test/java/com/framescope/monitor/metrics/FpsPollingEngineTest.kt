@@ -21,7 +21,10 @@ class FpsPollingEngineTest {
         selectCountedLayer(readings, pkg, "com.framescope.monitor")
 
     private fun earlier(vararg pairs: Pair<String, Long>): Map<String, TimeStats.Reading> =
-        pairs.associate { (layer, frames) -> layer to TimeStats.Reading(layer, frames, 0L, 0L) }
+        pairs.associate { (layer, frames) ->
+            val reading = TimeStats.Reading(layer, frames, 0L, 0L)
+            reading.key to reading
+        }
 
     @Test
     fun `the layer of the app in front wins`() {
@@ -103,5 +106,23 @@ class FpsPollingEngineTest {
         )
 
         assertEquals(layer, picked?.layer)
+    }
+
+    @Test
+    fun `a screen that is standing still keeps the layer that was measured last`() {
+        val game = "BLAST#123(com.example.engine)/UnityMain#0"
+        val other = "SurfaceView[com.other.other]/Other#0"
+        val gameReading = reading(game, 120L)
+        val otherReading = reading(other, 5000L)
+
+        val picked = selectCountedLayer(
+            listOf(otherReading, gameReading),
+            "com.pubg.krmobile",
+            "com.framescope.monitor",
+            mapOf(gameReading.key to gameReading, otherReading.key to otherReading),
+            preferredKey = gameReading.key
+        )
+
+        assertEquals(game, picked?.layer)
     }
 }

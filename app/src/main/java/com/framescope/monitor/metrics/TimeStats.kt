@@ -60,8 +60,25 @@ object TimeStats {
         /** The refresh rate the display presented this layer at, in Hz. */
         val displayRefreshRate: Int? = null,
         /** The package SurfaceFlinger names for this layer, when it prints one. */
-        val packageName: String? = null
-    )
+        val packageName: String? = null,
+        /** The uid that SurfaceFlinger records for the layer. */
+        val uid: Int? = null
+    ) {
+
+        /**
+         * The counter this reading belongs to.
+         *
+         * SurfaceFlinger does not keep one counter per layer. Its table is keyed
+         * by the layer, its uid and the refresh and render rates, so a game that
+         * switches from its 60 fps menu to a 120 fps match gets a *new* counter
+         * that starts at zero while the old one stays in the dump. Comparing a
+         * reading against a baseline of another counter invents a frame rate
+         * neither counter saw, which is exactly the kind of spike this app must
+         * not print.
+         */
+        val key: String
+            get() = "$layer|${uid ?: 0}|${displayRefreshRate ?: 0}|${renderRate ?: 0}"
+    }
 
     /** `key = value`, as every line of the text is written. */
     private val PAIR = Regex("^([A-Za-z][A-Za-z0-9_]*)\\s*=\\s*(.*)$")
@@ -128,7 +145,8 @@ object TimeStats {
                     renderRate = fpsValue(fields["renderrate"]),
                     displayRefreshRate = fpsValue(fields["displayrefreshrate"]),
                     packageName = fields["packagename"]
-                        ?.takeIf { it.isNotBlank() && it != "none" }
+                        ?.takeIf { it.isNotBlank() && it != "none" },
+                    uid = fields["uid"]?.takeWhile { it.isDigit() }?.toIntOrNull()
                 )
             }
             current = null

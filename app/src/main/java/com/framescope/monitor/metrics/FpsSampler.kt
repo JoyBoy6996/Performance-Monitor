@@ -25,7 +25,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * its own state:
  *
  * 1. SurfaceFlinger's frame counters for the app, which count the frames it presented.
- * 2. Presentation timestamps of a layer that was verified to belong to the app.
+ * 2. The presentation timestamps of that very layer, when the build still keeps them.
+ *    They are the frames themselves, not a count between two clock readings, and they
+ *    are used whenever they are there - this is the source a desktop frame meter reads.
  * 3. The app's own graphics pipeline, which only describes that app's UI thread.
  */
 class FpsSampler(
@@ -336,19 +338,25 @@ class FpsSampler(
     /**
      * The primary provider: the frames SurfaceFlinger counted for the app.
      *
-     * The counters are cumulative, so this is the growth between two dumps
-     * divided by the time between them: the frames of one window, and the length
-     * of that window. A screen that is standing still presents nothing, and there
-     * the display refresh rate is shown instead of a zero that would look like a
-     * broken app.
+     * The counters are cumulative, so this is the growth over a one second
+     * window divided by the length of that window. The window is a second and
+     * not the gap between two polls: a game at 120 fps presents 48 frames in
+     * 400 ms, and one dump that arrives late moves that rate by several
+     * frames, while over a second it moves it by less than one.
+     *
+     * Once the counters name the layer, its own presentation timestamps are
+     * asked for. When the build keeps them, they are the exact frames and
+     * they answer first; when it does not - Android is deprecating the frame
+     * tracker - the counters are the whole answer. A screen that is standing
+     * still presents nothing, and there the display refresh rate is shown
+     * instead of a zero that would look like a broken app.
      */
     private suspend fun sampleFromCounters(
         pkg: String,
         targetFps: Int,
         nowUptime: Long
     ): FpsState? {
-        val tick = counters.tick(pkg) ?: return null
-        activeSource = FpsSourceKind.TIMESTATS
+        val tick = counters.tick(pkg, refreshRateHz()) ?: return null
         measuredLayer = tick.layer
 
         val windowSeconds = if (tick.windowNs > 0L) tick.windowNs / 1_000_000_000.0 else 0.0
@@ -361,10 +369,25 @@ class FpsSampler(
         val fps: Double = if (idle) {
             (tick.displayRefreshRate ?: refreshRateHz()?.toInt())?.toDouble() ?: return null
         } else {
-            val counted = tick.frames.toDouble() / windowSeconds
-            if (!isPlausibleFps(counted.toFloat())) return null
-            counted
+            tick.fps
         }
+        if (fps <= 0.0) return null
+        // When the layer named its display rate, the counters already clamped
+        // the growth to it - and that rate is bucketed in 30 Hz steps, so a
+        // 165 Hz panel reads as 180 and must not be judged against 165.
+        if (!idle && tick.displayRefreshRate == null && !isPlausibleFps(fps.toFloat())) {
+            return null
+        }
+
+        // The exact frame times of the layer the counters picked. They are the
+        // frames themselves, so they are preferred over the count as soon as
+        // two dumps of them exist.
+        if (!idle) {
+            val exact = sampleExactLatency(pkg, tick.layer, targetFps)
+            if (exact != null) return exact
+        }
+
+        activeSource = FpsSourceKind.TIMESTATS
 
         // The counters are described by their own report: a SurfaceFlinger
         // dump is hundreds of lines, and putting it in a StateFlow on every
@@ -400,6 +423,69 @@ class FpsSampler(
             windowMs = (windowSeconds * 1000.0).toLong(),
             appPackage = pkg,
             nowUptime = nowUptime
+        )
+        return _state.value
+    }
+
+    /**
+     * The exact presentation times of one layer.
+     *
+     * `dumpsys SurfaceFlinger --latency <layer>` answers with the timestamps
+     * SurfaceFlinger recorded for every frame the layer presented. Nothing has
+     * to be divided by a clock the two processes share, so a slow dump cannot
+     * move the number - the only thing a desktop frame meter does differently
+     * is draw it.
+     *
+     * Nothing is published when the layer has no timestamps: a game on a build
+     * that has deprecated the frame tracker answers with nothing, and the
+     * counters are then the only source.
+     */
+    private suspend fun sampleExactLatency(
+        pkg: String,
+        layer: String,
+        targetFps: Int
+    ): FpsState? {
+        val dump = hub.execOrNull(
+            ShellCommands.surfaceLatencyOfLayer(layer),
+            EXACT_LATENCY_TIMEOUT_MS
+        )?.out.orEmpty()
+        if (dump.isBlank()) return null
+
+        val sample = parseLayerLatencies("@@@$layer\n$dump").firstOrNull() ?: return null
+        if (sample.presents.size < MIN_EXACT_FRAMES) return null
+
+        // The presentation times are on CLOCK_MONOTONIC. The app asks about
+        // both clocks it can compare with, so a build that reports the other
+        // one is not mistaken for a layer that stopped drawing.
+        val uptime = SystemClock.uptimeNanos()
+        val elapsed = SystemClock.elapsedRealtimeNanos()
+        val newest = sample.presents.last()
+        val fresh = (uptime - newest) in 0L..EXACT_MAX_AGE_NS ||
+            (elapsed - newest) in 0L..EXACT_MAX_AGE_NS
+        if (!fresh) return null
+
+        latencyCounter.frameBudgetNs = frameBudgetNs(targetFps)
+        val result = latencyCounter.onSample(layer, sample.presents, uptime)
+        val fps = result.recentFps ?: return null
+        if (!isPlausibleFps(fps)) return null
+
+        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
+        measuredLayer = layer
+
+        publish(
+            fps = fps,
+            frameTimeMs = result.frameTimeMs ?: (1000f / fps),
+            source = "SurfaceFlinger frame times",
+            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+            layer = layer,
+            totalFrames = latencyCounter.totalUniqueFrames,
+            jankFrames = latencyCounter.totalJankFrames,
+            sampleAgeMs = result.sampleAgeMs,
+            windowMs = result.windowMs,
+            low1PercentFps = latencyCounter.low1PercentFps(),
+            low5PercentFps = latencyCounter.low5PercentFps(),
+            appPackage = pkg,
+            nowUptime = uptime
         )
         return _state.value
     }
@@ -771,6 +857,25 @@ class FpsSampler(
 
         /** How long the layer sweep may run in total. */
         private const val SWEEP_BUDGET_MS = 3_000L
+
+        /**
+         * How long the exact timestamps of one known layer may take.
+         *
+         * That is one small dump, not a sweep, so it has to be quick: it runs
+         * on every poll, after the counters have already named the layer.
+         */
+        private const val EXACT_LATENCY_TIMEOUT_MS = 1_200L
+
+        /** Fewer frames than this say nothing about a frame rate. */
+        private const val MIN_EXACT_FRAMES = 8
+
+        /**
+         * How old the newest frame of a layer may be to still be its meter.
+         *
+         * A layer that stopped drawing half a second ago is not the surface
+         * the user is looking at, and its last few frames are not a live rate.
+         */
+        private const val EXACT_MAX_AGE_NS = 500_000_000L
 
         /**
          * How long the latency dump of a package's layers may take.

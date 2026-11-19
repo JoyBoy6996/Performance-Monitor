@@ -52,12 +52,11 @@ object ShellCommands {
      * layers. One command that walks the list keeps the sample inside a
      * second even when the app has many surfaces.
      *
-     * Every layer keeps only the refresh period and its newest frames. The
-     * latency dump is a rolling window of about 128 rows per layer, and ten
-     * layers of that size are bigger than what a shell call may carry - the
-     * dump then arrives cut in half and the frame rate of the game is lost.
-     * The frames that matter are the newest ones, so the old ones are dropped
-     * in the shell, where they cost nothing.
+     * Every layer keeps only its newest frames. The latency dump is a rolling
+     * window of about 128 rows per layer, and ten of those windows are bigger
+     * than what a shell call may carry - the dump then arrives cut in half and
+     * the frame rate of the game is lost. The frames that matter are the newest
+     * ones, so the old ones are dropped in the shell, where they cost nothing.
      */
     fun surfaceLatencyOfLayers(packageName: String, fallback: Boolean = false): String {
         val pkg = packageName.replace("'", "")
@@ -87,13 +86,6 @@ object ShellCommands {
 
 
     /**
-     * The frame counters SurfaceFlinger keeps per layer.
-     *
-     * The latency dump only has timestamps for layers that keep a frame
-     * timeline. A game that renders straight into a buffer queue has none, so
-     * the counters of the renderer are the only source left.
-     */
-    /**
      * The latency dump of one single layer.
      *
      * Asking every layer on its own is slower than one command for all of them,
@@ -101,24 +93,37 @@ object ShellCommands {
      * every layer gets its own time.
      */
     fun surfaceLatencyOfLayer(layer: String): String {
-        val l = layer.replace("'", "").replace("\"", "")
-        return latencyOf("'$l'")
+        // The name is handed to the shell in single quotes. It used to be
+        // wrapped in a second pair of quotes, so SurfaceFlinger was asked for
+        // a layer whose name *contains* quotes, matched nothing, and answered
+        // with an empty dump. The whole layer-by-layer probe never worked.
+        val l = layer.replace("'", "")
+        return "dumpsys SurfaceFlinger --latency '$l' 2>/dev/null; "
     }
 
     /**
-     * The latency of one layer.
+     * The latency of one layer, when it is a variable of the walk above.
      *
-     * Only the first rows of the dump are kept. The dump is a rolling window of
-     * about 128 rows per layer, and a game owns a dozen layers - ten of those
-     * windows do not fit into what a shell call may carry, and the dump then
-     * arrives cut in half with the layers that were drawing missing.
+     * The rows are oldest first, so the newest frames are at the END of the
+     * dump. Keeping the first rows - which this used to do - kept the oldest
+     * frames of the layer, the ones that are no longer being presented, and
+     * the rate was read from a stale window. A sweep of many layers keeps the
+     * newest rows to stay inside what a shell call can carry.
      *
      * Nothing but the tools that are on every phone is used here. A phone has
      * no awk, and a command that is not there takes the whole answer with it.
      */
     private fun latencyOf(layer: String): String =
-        "dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | head -40; "
+        "dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | tail -n 60; "
 
+    /**
+     * The frame counters SurfaceFlinger keeps per layer.
+     *
+     * A game that renders straight into a buffer queue keeps no frame
+     * timeline, so the per-frame timestamps are empty on builds that have
+     * deprecated the frame tracker - and the counters are then the source
+     * that still answers.
+     */
     fun surfaceTimeStatsEnable(): String = "dumpsys SurfaceFlinger --timestats -enable 2>/dev/null"
 
     fun surfaceTimeStatsDump(): String = "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null"

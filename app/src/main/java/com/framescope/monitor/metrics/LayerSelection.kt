@@ -126,11 +126,18 @@ private fun readRow(row: String): List<Long> {
 private fun readFrameSeries(rows: List<List<Long>>): List<Long>? {
     val columns = rows.first().size
     for (index in preferredColumns(columns)) {
-        val series = rows.mapNotNull { it.getOrNull(index) }.filter { it > 0L }
+        val series = rows.mapNotNull { it.getOrNull(index) }
+            // A record that was never filled keeps FrameTracker's sentinel,
+            // INT64_MAX, and a zero means "no frame". Both are the absence of
+            // a frame, not a frame that was presented 292 years after boot.
+            .filter { it > 0L && it < MAX_PLAUSIBLE_PRESENT_NS }
         if (looksLikeFrameSeries(series)) return series
     }
     return null
 }
+
+/** A monotonic timestamp larger than this is a sentinel, not a time. */
+private const val MAX_PLAUSIBLE_PRESENT_NS = 1_000_000_000_000_000_000L
 
 /** The columns that can hold the present time, in the order they are tried. */
 private fun preferredColumns(columns: Int): List<Int> = when {

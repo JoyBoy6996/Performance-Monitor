@@ -63,10 +63,47 @@ frame rate stayed empty while every other app was measured.
 8. Foreground detection (`dumpsys window` plus usage stats) ran on every poll,
    every 400 ms. A known answer is now trusted for one second.
 
+## Accuracy, second pass (the number itself)
+9. **The rate was measured over the gap between two polls.** A game at 120 fps
+   presents 48 frames in 400 ms; one dump that arrives 20 ms late turns that
+   into 123. The window is now one second - the newest dump of the last two
+   seconds that is at least a second old - and the middle of the last three
+   windows is reported, so one stray dump cannot move the number.
+10. **A counter was identified by its layer name alone.** SurfaceFlinger's
+    table is keyed by `{refreshRateBucket, renderRateBucket}` and, inside that,
+    by `{uid, layerName, gameMode}` (`TimeStats::setPresentTime` ->
+    `flushAvailableRecordsToStatsLocked`). A game that changes its frame rate
+    gets a *new* counter that starts at zero while the old one stays in the
+    dump. Comparing the two invents a rate neither saw. A reading now carries
+    `uid` and a `key` of layer + uid + rates, and a baseline is found by that
+    key.
+11. **The layer-by-layer latency probe asked for a name with quotes in it.**
+    The name was wrapped in single quotes and then in double quotes, so the
+    argument SurfaceFlinger received began with a literal `'`, matched no
+    layer, and the probe never returned a row. The single layer is now quoted
+    once.
+12. **The latency rows were read from the wrong end.** `FrameTracker::dumpStats`
+    prints its 128 records oldest first, so `head -40` kept the oldest frames -
+    the ones no longer presented. One layer now keeps the whole dump; a sweep
+    of many layers keeps `tail -60`.
+13. **The exact frame times are used when the build keeps them.** Once the
+    counters name the layer, `--latency <layer>` is asked for that one layer.
+    When it answers with fresh timestamps, the rate, the frame time and the
+    1%/5% lows come from the frames themselves - the same data and the same
+    arithmetic a desktop frame meter uses. When the build has deprecated the
+    frame tracker (aconfig `deprecate_frame_tracker`, checked in
+    `Layer::dumpFrameStats`), it answers with nothing and the counters remain.
+14. A rate above the refresh rate SurfaceFlinger recorded for that layer is
+    clamped to it. That rate is bucketed in 30 Hz steps
+    (`REFRESH_RATE_BUCKET_WIDTH = 30`), so 144 Hz is printed as 150 and a
+    correct 148 is never clipped.
+
 ## Known limitation
 `jankyFrames` per layer is counted from the frame timeline, and a game does not
-fill one. For a game the counters give the frame rate and the frame time, but
-the jank count reads zero because there is nothing to count.
+fill one. When the build has deprecated the frame tracker, `--latency` of a
+game is empty as well, so the counters give the frame rate and the frame time
+but the jank count reads zero. When the frame tracker is there, the exact frame
+times give jank and the 1%/5% lows as well.
 
 ## Verification on the phone
 Nothing here can be verified in the sandbox - there is no device. The phone has to

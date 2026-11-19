@@ -1,7 +1,9 @@
 package com.framescope.monitor.metrics
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -124,5 +126,28 @@ class FpsPollingEngineTest {
         )
 
         assertEquals(game, picked?.layer)
+    }
+
+
+    @Test
+    fun `a dump that was cut short is refused`() {
+        val cut = "layerName = SurfaceView[com.pubg.krmobile/Main]#0\ntotalFrames = 120\n"
+        val whole = cut + "__FS_TIMESTATS_END__\n"
+
+        assertFalse(isCompleteCounterDump(cut))
+        assertTrue(isCompleteCounterDump(whole))
+    }
+
+    @Test
+    fun `a layer of another app is not the app in front`() {
+        val foreign = TimeStats.Reading(
+            "SurfaceView[com.android.launcher3/.Launcher]#0", 0L, 0L, 0L
+        )
+        val own = TimeStats.Reading(
+            "SurfaceView[com.pubg.krmobile/com.pubg.krmobile.MainActivity]#0", 120L, 0L, 0L
+        )
+
+        assertFalse(TimeStats.belongsTo(foreign, "com.pubg.krmobile"))
+        assertTrue(TimeStats.belongsTo(own, "com.pubg.krmobile"))
     }
 }

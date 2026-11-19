@@ -129,6 +129,33 @@ object ShellCommands {
     fun surfaceTimeStatsDump(): String = "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null"
 
     /**
+     * The counters of one app, without the counters of every other app.
+     *
+     * The dump of the whole device holds a block for every layer it has, and a
+     * phone with hundreds of layers answers with hundreds of kilobytes. That
+     * answer does not fit in the time a measurement may take, and a dump that
+     * arrives cut in half has lost the layers that come last - the ones that
+     * are drawing. The blocks of the app in front are picked out in the shell,
+     * where the text never travels.
+     *
+     * The end marker says that the whole answer arrived. A dump without it was
+     * cut short, and a cut dump is refused rather than read.
+     */
+    fun surfaceTimeStatsDumpOf(packageName: String): String {
+        val pkg = packageName.replace("'", "").replace("\\", "")
+        return "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+            "grep -B 6 -A 14 -F '$pkg'; " +
+            "echo $TIMESTATS_END_MARKER"
+    }
+
+    /** The counters of every layer of the device. */
+    fun surfaceTimeStatsDumpMarked(): String =
+        "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null; echo $TIMESTATS_END_MARKER"
+
+    /** Says that the whole answer arrived. */
+    const val TIMESTATS_END_MARKER = "__FS_TIMESTATS_END__"
+
+    /**
      * One second of frame counters.
      *
      * The counters are dumped and cleared in the same command, so the frames in

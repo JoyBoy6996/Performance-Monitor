@@ -98,4 +98,23 @@ class LayerCommandTest {
         assertFalse(command.contains("tail"))
         assertTrue(command.contains("--latency 'SurfaceView[com.pubg.krmobile/x]#0'"))
     }
+
+
+    @Test
+    fun `the counters of one app are asked for without the counters of the whole device`() {
+        val command = ShellCommands.surfaceTimeStatsDumpOf("com.pubg.krmobile")
+
+        // The dump of every layer of the device does not fit in the time a
+        // measurement may take, and a cut dump has lost the layers that draw.
+        assertTrue(command.contains("grep -B 6 -A 14 -F 'com.pubg.krmobile'"))
+        assertTrue(command.contains(ShellCommands.TIMESTATS_END_MARKER))
+    }
+
+    @Test
+    fun `the counters of the whole device say that they arrived`() {
+        assertTrue(
+            ShellCommands.surfaceTimeStatsDumpMarked()
+                .contains(ShellCommands.TIMESTATS_END_MARKER)
+        )
+    }
 }

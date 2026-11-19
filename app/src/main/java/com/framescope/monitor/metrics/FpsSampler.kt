@@ -366,7 +366,11 @@ class FpsSampler(
         // A screen that is standing still presents no frames at all, and a zero
         // would look like a broken measurement. The display is still refreshing,
         // so that is what is shown, named as what it is.
-        val idle = tick.staticScreen
+        // The display refresh rate is only shown when the app in front is the
+        // one that is standing still. A layer of somebody else standing still
+        // says nothing about the game, and showing its rate is a number that
+        // belongs to nothing - the game at 120 fps would read as 144.
+        val idle = tick.staticScreen && tick.belongsToApp
         val fps: Double = if (idle) {
             // Use the actual display refresh rate, not the 30 Hz bucketed rate.
             (refreshRateHz()?.toInt() ?: tick.displayRefreshRate)?.toDouble() ?: return null

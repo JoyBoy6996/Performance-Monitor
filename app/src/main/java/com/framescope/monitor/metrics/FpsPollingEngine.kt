@@ -54,6 +54,14 @@ class FpsPollingEngine(
         val renderRate: Int?,
         /** The refresh rate the display presented this layer at, in Hz. */
         val displayRefreshRate: Int?,
+        /**
+         * True when the layer that was measured belongs to the app in front.
+         *
+         * A layer of somebody else that is standing still says nothing about
+         * the app the user is looking at, and its refresh rate must not be
+         * shown as that app's frame rate.
+         */
+        val belongsToApp: Boolean,
         /** The raw dump, for the report. */
         val raw: String
     ) {
@@ -78,6 +86,9 @@ class FpsPollingEngine(
      * the app in front and keeps the answer.
      */
     private var lastTargetKey: String? = null
+
+    /** When the whole device may be asked again, because that answer is big. */
+    private var nextFullDumpAttemptNs = 0L
 
     private var enabled = false
     private var enableFailures = 0
@@ -109,14 +120,41 @@ class FpsPollingEngine(
     suspend fun tick(foregroundPackage: String, displayHz: Float? = null): Tick? {
         if (!ensureEnabled()) return null
 
-        val dump = hub.execOrNull(ShellCommands.surfaceTimeStatsDump(), DUMP_TIMEOUT_MS)
-            ?.out.orEmpty()
+        // Only the blocks of the app in front are asked for. The dump of the
+        // whole device is hundreds of kilobytes and arrives cut in half, and a
+        // cut dump has lost the layers that are drawing.
+        var dump = hub.execOrNull(
+            ShellCommands.surfaceTimeStatsDumpOf(foregroundPackage),
+            DUMP_TIMEOUT_MS
+        )?.out.orEmpty()
+
+        // The blocks of the app were not in the answer. Then the app names its
+        // surface after its engine and not after its package, and the whole
+        // device has to be asked - every few seconds, because that answer is
+        // the big one.
+        if (!dump.contains("layerName", ignoreCase = true) &&
+            System.nanoTime() >= nextFullDumpAttemptNs
+        ) {
+            nextFullDumpAttemptNs = System.nanoTime() + FULL_DUMP_COOLDOWN_NS
+            dump = hub.execOrNull(
+                ShellCommands.surfaceTimeStatsDumpMarked(),
+                FULL_DUMP_TIMEOUT_MS
+            )?.out.orEmpty()
+        }
         // The text was written by SurfaceFlinger before the shell handed it
         // over, so the moment the answer arrived is closer to the dump than the
         // middle of the call. Under load - in a fight - a dump can take a large
         // part of the window, and half of that delay is exactly the error that
         // turns 120 into 123.
         val at = System.nanoTime()
+
+        // The end marker says the whole answer arrived. Without it the answer
+        // was cut short, and the layers that are missing are exactly the ones
+        // that were drawing.
+        if (!isCompleteCounterDump(dump)) {
+            lastReason = "SurfaceFlinger's answer was cut short"
+            return null
+        }
 
         val readings = TimeStats.readAllUnfiltered(dump)
         if (readings.isEmpty()) {
@@ -223,6 +261,7 @@ class FpsPollingEngine(
             fps = fps,
             renderRate = target.renderRate,
             displayRefreshRate = target.displayRefreshRate,
+            belongsToApp = TimeStats.belongsTo(target, foregroundPackage),
             raw = dump
         )
     }
@@ -260,8 +299,14 @@ class FpsPollingEngine(
     companion object {
         private const val ENABLE_TIMEOUT_MS = 2_000L
 
-        /** A dump of every layer and its histograms needs room to arrive. */
-        private const val DUMP_TIMEOUT_MS = 4_000L
+        /** A dump of the blocks of one app needs room to arrive. */
+        private const val DUMP_TIMEOUT_MS = 6_000L
+
+        /** The dump of every layer of the device is the big one. */
+        private const val FULL_DUMP_TIMEOUT_MS = 12_000L
+
+        /** How long the device is left alone after it was asked for everything. */
+        private const val FULL_DUMP_COOLDOWN_NS = 5_000_000_000L
 
         /** The window one reading covers. */
         private const val WINDOW_NS = 1_000_000_000L
@@ -341,3 +386,14 @@ fun isNoiseLayer(layer: String, ownPackage: String): Boolean {
         lower.contains("shizuku") ||
         lower.contains("framescope")
 }
+
+/**
+ * True when the whole answer arrived.
+ *
+ * The shell prints an end marker after the dump. A dump without it was cut
+ * short, and the layers that are missing from a cut dump are the ones that
+ * come last - the ones that were drawing. A cut dump is refused rather than
+ * read: it would name an idle layer as the app in front.
+ */
+fun isCompleteCounterDump(dump: String): Boolean =
+    dump.contains(ShellCommands.TIMESTATS_END_MARKER)

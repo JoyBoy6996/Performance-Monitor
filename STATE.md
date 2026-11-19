@@ -151,3 +151,25 @@ Both were shown on the phone while the frame rate of a game was still missing:
 
 `compileSdk` and `targetSdk` are 36 now, and the build asks the runner for platform
 36 and build-tools 36. The app was built for API 35 while the phone runs Android 16.
+
+## 1.1.10 - the number was the display's, not the game's
+
+On the phone the overlay showed **144 FPS** while the game was set to 120 and the
+phone's own frame meter showed **121**. 144 is the refresh rate of the panel: the
+counters had not grown, and a layer that stands still is answered with the refresh
+rate of the screen.
+
+Two reasons, both fixed here:
+
+1. **The dump of the counters was cut short.** It holds a block for every layer of
+   the device - 434 of them on this phone - and that answer does not fit in the time
+   a measurement may take. A cut dump has lost the layers that come last, the ones
+   that were drawing, and what was left named an idle layer. The blocks of the app in
+   front are now picked out in the shell, where the text never travels, and the
+   shell prints an end marker: a dump without it was cut and is refused.
+2. **A layer of somebody else was answered with the refresh rate of the screen.** The
+   refresh rate is only shown when the app in front is the one that is standing
+   still. A game at 120 fps must not read as 144.
+
+The counters of the whole device are still asked for every few seconds, for a game
+that names its surface after its engine and not after its package.

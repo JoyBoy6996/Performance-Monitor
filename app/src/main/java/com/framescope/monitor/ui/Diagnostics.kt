@@ -58,15 +58,22 @@ object Diagnostics {
             "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$app' | head -8",
             "echo '--- latency of the first of them ---'",
             "L=\$(dumpsys SurfaceFlinger --list 2>/dev/null | grep -m1 -F '$app'); " +
-                "echo \"layer=\$L\"; " +
-                "if [ -n \"\$L\" ]; then dumpsys SurfaceFlinger --latency \"\$L\" 2>&1 | head -6; fi",
+                "echo \"layer=\$L rows=\$(dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null | wc -l)\"; " +
+                "if [ -n \"\$L\" ]; then dumpsys SurfaceFlinger --latency \"\$L\" 2>&1 | tail -6; fi",
             "echo '--- latency of the newest layer ---'",
             "N=\$(dumpsys SurfaceFlinger --list 2>/dev/null | tail -1); " +
-                "echo \"layer=\$N\"; " +
-                "if [ -n \"\$N\" ]; then dumpsys SurfaceFlinger --latency \"\$N\" 2>&1 | head -6; fi",
+                "echo \"layer=\$N rows=\$(dumpsys SurfaceFlinger --latency \"\$N\" 2>/dev/null | wc -l)\"; " +
+                "if [ -n \"\$N\" ]; then dumpsys SurfaceFlinger --latency \"\$N\" 2>&1 | tail -6; fi",
             "echo '--- timestats: the layer blocks ---'",
             "dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1; " +
-                "dumpsys SurfaceFlinger --timestats -dump 2>&1 | grep -A9 -m3 'layerName = '",
+                "dumpsys SurfaceFlinger --timestats -dump 2>&1 | grep -A14 -m4 'layerName = '",
+            "echo '--- counters now ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -E 'displayRefreshRate = |renderRate = |uid = |layerName = |totalFrames = ' | head -60",
+            "sleep 2",
+            "echo '--- counters two seconds later ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -E 'displayRefreshRate = |renderRate = |uid = |layerName = |totalFrames = ' | head -60",
             "echo '--- gfxinfo of $app ---'",
             "if [ -n '$app' ]; then dumpsys gfxinfo '$app' framestats 2>&1 | head -6; fi",
             "echo '--- the window in front ---'",

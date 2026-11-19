@@ -97,6 +97,16 @@ frame rate stayed empty while every other app was measured.
     clamped to it. That rate is bucketed in 30 Hz steps
     (`REFRESH_RATE_BUCKET_WIDTH = 30`), so 144 Hz is printed as 150 and a
     correct 148 is never clipped.
+15. **The overlay judged the frame rate against 45.** That setting is a warning
+    threshold, not a frame rate any game is supposed to reach: on a 144 Hz
+    phone every reading above 45 was green and the graph flattened at 56. The
+    colour and the graph now use the display's own refresh rate, which is also
+    the value the `REFRESH` row prints.
+16. The `Raw probe` now prints the counters twice, two seconds apart, so the
+    frames a layer really presented in that time can be counted by hand, and
+    it prints the *last* rows of `--latency` with their row count instead of
+    the first ones. That is the evidence needed to tell whether this phone
+    keeps the frame timestamps at all.
 
 ## Known limitation
 `jankyFrames` per layer is counted from the frame timeline, and a game does not

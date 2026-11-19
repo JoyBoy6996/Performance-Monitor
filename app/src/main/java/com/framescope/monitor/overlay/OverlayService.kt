@@ -455,7 +455,13 @@ class OverlayService : Service() {
     }
 
     private fun updateValues(fpsState: FpsState, system: SystemMetrics, settings: AppSettings) {
-        val target = settings.fpsThreshold.value
+        // The display's own refresh rate is what a frame rate has to be judged
+        // against. A phone that presents 144 frames a second has not drawn a
+        // slow game at 100, and a phone that presents 60 has not drawn a fast
+        // one at 45. The fixed 45 that used to be the target said nothing about
+        // either screen; it only described one old setting.
+        val target = system.refreshHz?.roundToInt()?.takeIf { it > 0 }
+            ?: settings.fpsThreshold.value
         val fpsVal = fpsState.fps
 
         // A reading that is older than a couple of seconds is not a live reading, and

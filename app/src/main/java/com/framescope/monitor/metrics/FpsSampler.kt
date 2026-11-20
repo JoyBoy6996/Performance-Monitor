@@ -323,20 +323,26 @@ class FpsSampler(
         // and give the median frame time. The counters are a fallback for the
         // builds where a game keeps no timestamps.
         //
-        // 1. The presentation timestamps of a layer of the app.
-        val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
-        if (fromLatency != null) return fromLatency
-
-        // 2. The layer SurfaceFlinger is presenting right now. This is the probe
+        // 1. The layer SurfaceFlinger is presenting right now. This is the probe
         // that measured the game correctly in the build the user confirmed: a
         // game names its surface after its engine, so looking for the package
-        // in the layer list finds nothing while the game is drawing. It is used
-        // only while the game itself is in front; when FrameScope or the launcher
-        // is in front the same answer describes a system surface and is refused.
+        // in the layer list finds nothing while the game is drawing. It runs
+        // first, because the named-layer probe below can otherwise pick an
+        // unrelated layer by recency and publish its rate as the game's. It is
+        // used only while the game itself is in front; when FrameScope or the
+        // launcher is in front the same answer describes a system surface and
+        // is refused.
         if (foregroundIsTarget) {
             val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
             if (fromActive != null) return fromActive
         }
+
+        // 2. The presentation timestamps of a layer that actually carries the
+        // app's name. An unnamed layer is never accepted here: the device showed
+        // one being chosen by recency and reporting 2.6 fps for a game that was
+        // drawing at 90-120.
+        val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
+        if (fromLatency != null) return fromLatency
 
         // 3. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
@@ -711,7 +717,10 @@ class FpsSampler(
             } +
             if (staleCount > 0) "\nignored $staleCount layer(s) with old frames" else ""
         _reports.value = retainReport(_reports.value, pkg, report)
-        val selection = selectVerifiedTarget(freshSamples, pkg, allowUnattributed = true)
+        // A layer must actually name the app. The newest unnamed layer on this
+        // device turned out to be an unrelated surface; calling it the game gave
+        // a 2.6 fps reading while the game was drawing normally.
+        val selection = selectVerifiedTarget(freshSamples, pkg, allowUnattributed = false)
         targetReason = selection.reason
 
         val target = selection.target ?: return null

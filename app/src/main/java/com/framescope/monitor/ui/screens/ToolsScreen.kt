@@ -201,7 +201,12 @@ fun ToolsScreen(
                     OutlinedButton(
                         enabled = !running && diagnosticsOutput.isNotBlank(),
                         onClick = {
-                            com.framescope.monitor.ui.Diagnostics.copy(context, diagnosticsOutput)
+                            com.framescope.monitor.ui.Diagnostics.copy(
+                                context,
+                                diagnosticsOutput.lines().joinToString("\n") { line ->
+                                    if (line.isBlank()) "#" else "# $line"
+                                }
+                            )
                             diagnosticsOutput = diagnosticsOutput + "\n\n[copied to the clipboard]"
                         }
                     ) {

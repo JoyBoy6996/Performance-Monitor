@@ -564,6 +564,10 @@ private fun ProbePanel(container: AppContainer) {
     }
 }
 
+/** Makes copied evidence harmless if it is pasted into a shell by mistake. */
+private fun shellSafeText(text: String): String =
+    text.lines().joinToString("\n") { line -> if (line.isBlank()) "#" else "# $line" }
+
 /**
  * One button that copies the evidence for a wrong reading.
  *
@@ -642,7 +646,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                             settings = container.settings,
                             shellOutput = shell
                         )
-                        Diagnostics.copy(context, text)
+                        Diagnostics.copy(context, shellSafeText(text))
                         message = "Copied to the clipboard - paste it in the chat."
                         running = false
                     }
@@ -678,7 +682,7 @@ private fun DiagnosticsRow(container: AppContainer) {
             } else {
                 (result.out + "\n" + result.err).trim()
             }
-            Diagnostics.copy(context, probeOutput)
+            Diagnostics.copy(context, shellSafeText(probeOutput))
         }
 
         if (probeOutput.isNotEmpty()) {

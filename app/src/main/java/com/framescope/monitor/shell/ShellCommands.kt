@@ -184,10 +184,12 @@ object ShellCommands {
             "/sys/devices/platform/*.gpu/devfreq/cur_freq; do " +
             "[ -r \"\$f\" ] && echo \"GPUFREQ=\$(cat \$f)\" && break; done"
 
+    // The fastest core is the useful number on big.LITTLE chips. Reading only cpu0
+    // would show a small efficiency core while the performance cores are busy.
     fun cpuFreq(): String =
-        "for f in /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq " +
-            "/sys/devices/system/cpu/cpufreq/scaling_cur_freq; do " +
-            "[ -r \"\$f\" ] && echo \"CPUFREQ=\$(cat \$f)\" && break; done"
+        "f=\$(for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq; " +
+            "do [ -r \"\$f\" ] && cat \"\$f\"; done | sort -nr | head -1); " +
+            "[ -n \"\$f\" ] && echo \"CPUFREQ=\$f\""
 
     fun displayInfo(): String =
         "dumpsys display 2>/dev/null | grep -m3 -E 'refreshRate|fps=' ; " +

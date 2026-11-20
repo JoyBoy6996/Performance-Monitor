@@ -168,7 +168,8 @@ private data class DeviceFacts(
     val status: String? = null,
     val storageFreeGb: Float? = null,
     val storageTotalGb: Float? = null,
-    val display: String? = null
+    val display: String? = null,
+    val kernel: String? = null
 )
 
 /**
@@ -223,23 +224,53 @@ private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceF
         else -> value
     }
 
-    // "charge counter" is remaining charge in µAh, not a cycle count. Only a
-    // real cycle counter is shown; an absent one stays "--" instead of being faked.
+    fun health(value: Int?): String? = when (value) {
+        null -> null
+        1 -> "Unknown"
+        2 -> "Good"
+        3 -> "Overheat"
+        4 -> "Dead"
+        5 -> "Overvoltage"
+        6 -> "Unspecified failure"
+        7 -> "Cold"
+        else -> value.toString()
+    }
+
+    fun status(value: Int?): String? = when (value) {
+        null -> null
+        2 -> "Charging"
+        3 -> "Discharging"
+        4 -> "Full"
+        5 -> "Not charging"
+        else -> value.toString()
+    }
+
+    val battery = runCatching { NativeCollectors(context).battery().value }.getOrNull()
+
+    // "charge counter" is remaining charge in µAh, not a cycle count. Use the
+    // public API first, then the fuel-gauge nodes a device may expose. An absent
+    // cycle count stays "--" instead of being invented from charge counter.
     val cycleDump = runCatching {
-        hub.execOrNull("cat /sys/class/power_supply/battery/cycle_count 2>/dev/null")?.out.orEmpty()
+        hub.execOrNull(
+            "for f in /sys/class/power_supply/battery/cycle_count " +
+                "/sys/class/power_supply/battery/battery_cycle " +
+                "/sys/class/power_supply/battery/cycles; do " +
+                "[ -r \"\$f\" ] && cat \"\$f\" && break; done"
+        )?.out.orEmpty()
     }.getOrDefault("")
     val cycles = listOf(
+        battery?.cycleCount?.toString(),
         cycleDump.lineSequence().firstOrNull { it.isNotBlank() }?.trim(),
         batteryField("cycle_count", "cycles", "cycle")
     ).mapNotNull { raw ->
         raw?.toIntOrNull()?.takeIf { it in 0..10_000 }
     }.firstOrNull()?.toString()
 
-    val battery = runCatching { NativeCollectors(context).battery().value }.getOrNull()
-
-    // Storage is sold in decimal GB: 256 GB means 256,000,000,000 bytes, not 238 GiB.
+    // User-visible internal storage is what "256 GB" means. /data is a different
+    // partition on some phones, so prefer the shared storage path reported to users.
     val storage = runCatching {
-        val stat = android.os.StatFs(android.os.Environment.getDataDirectory().path)
+        val path = android.os.Environment.getExternalStorageDirectory().path
+        val stat = android.os.StatFs(path)
         val gb = 1_000_000_000f
         Pair(
             stat.availableBlocksLong * stat.blockSizeLong / gb,
@@ -247,24 +278,51 @@ private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceF
         )
     }.getOrNull()
 
-    val metrics = context.resources.displayMetrics
-    val display = "${metrics.widthPixels} x ${metrics.heightPixels} · ${metrics.densityDpi} dpi"
+    // getRealMetrics reports the panel, not the window minus system bars.
+    val realMetrics = android.util.DisplayMetrics()
+    runCatching {
+        val manager = context.getSystemService(Context.DISPLAY_SERVICE)
+            as? android.hardware.display.DisplayManager
+        @Suppress("DEPRECATION")
+        manager?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.getRealMetrics(realMetrics)
+    }
+    val display = if (realMetrics.widthPixels > 0 && realMetrics.heightPixels > 0) {
+        "${realMetrics.widthPixels} x ${realMetrics.heightPixels} · ${realMetrics.densityDpi} dpi"
+    } else null
+
+    val kernel = runCatching {
+        hub.execOrNull("uname -r 2>/dev/null")?.out?.lineSequence()
+            ?.firstOrNull { it.isNotBlank() }?.trim()?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    val officialSoc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        Build.SOC_MODEL.takeIf { it.isNotBlank() && !it.equals("unknown", true) }
+    } else null
+    val officialVendor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        Build.SOC_MANUFACTURER.takeIf { it.isNotBlank() && !it.equals("unknown", true) }
+    } else null
 
     return DeviceFacts(
         platform = prop("platform"),
-        soc = prop("soc"),
-        vendor = prop("vendor"),
+        soc = officialSoc ?: prop("soc"),
+        vendor = officialVendor ?: prop("vendor"),
         chipset = prop("chipset"),
-        processor = chipsetDisplayName(prop("soc"), prop("vendor"), prop("platform"), prop("chipset")),
+        processor = chipsetDisplayName(
+            officialSoc ?: prop("soc"),
+            officialVendor ?: prop("vendor"),
+            prop("platform"),
+            prop("chipset")
+        ),
         cpu = cpu,
         battery = battery,
-        health = health(batteryField("health")),
-        technology = batteryField("technology"),
+        health = battery?.health?.let { health(it) } ?: health(batteryField("health")),
+        technology = battery?.technology ?: batteryField("technology"),
         cycles = cycles,
-        status = status(batteryField("status")),
+        status = battery?.status?.let { status(it) } ?: status(batteryField("status")),
         storageFreeGb = storage?.first,
         storageTotalGb = storage?.second,
-        display = display
+        display = display,
+        kernel = kernel
     )
 }
 
@@ -523,6 +581,8 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         MetricLine("Board", Build.BOARD, onSurface)
         MetricLine("Hardware", Build.HARDWARE, onSurface)
         MetricLine("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})", onSurface)
+        MetricLine("Build ID", Build.ID, onSurface)
+        facts.kernel?.let { MetricLine("Kernel", it, muted) }
         MetricLine(
             "Architecture",
             Build.SUPPORTED_ABIS.joinToString(", ").ifBlank { "--" },
@@ -539,7 +599,7 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         facts.vendor?.let { MetricLine("SoC vendor", it, muted) }
         facts.platform?.let { MetricLine("Platform", it, muted) }
         facts.cpu?.let { MetricLine("CPU", it.take(48), onSurface) }
-        MetricLine("CPU clock", system.cpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
+        MetricLine("CPU clock (fastest)", system.cpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
         system.cpuPercent?.let {
             MetricLine("CPU load", String.format(java.util.Locale.US, "%.0f%%", it), onSurface)
         }

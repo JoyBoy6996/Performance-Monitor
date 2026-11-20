@@ -39,7 +39,15 @@ class NativeCollectors(private val context: Context) {
         val temperatureC: Float?,
         val currentMicroAmps: Int?,
         val voltageMilliVolts: Int?,
-        val charging: Boolean
+        val charging: Boolean,
+        /** BatteryManager.EXTRA_STATUS, when the sticky broadcast reports it. */
+        val status: Int? = null,
+        /** BatteryManager.EXTRA_HEALTH, when the sticky broadcast reports it. */
+        val health: Int? = null,
+        /** BatteryManager.EXTRA_TECHNOLOGY, when the sticky broadcast reports it. */
+        val technology: String? = null,
+        /** BatteryManager.EXTRA_CYCLE_COUNT (API 34+), when the platform reports it. */
+        val cycleCount: Int? = null
     ) {
         /**
          * The power the battery is moving, in watts.
@@ -209,9 +217,20 @@ class NativeCollectors(private val context: Context) {
             val voltage = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, Int.MIN_VALUE)
                 ?.takeIf { it != Int.MIN_VALUE && it > 0 }
 
-            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                ?.takeIf { it >= 0 }
             val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
+            val health = intent?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)
+                ?.takeIf { it >= 0 }
+            val technology = intent?.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY)
+                ?.takeIf { it.isNotBlank() }
+            // Android 14 added a public cycle count. Older versions have no public
+            // API for it, so the Tools screen falls back to a guarded sysfs read.
+            val cycleCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                intent?.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1)
+                    ?.takeIf { it in 0..10_000 }
+            } else null
 
             if (percent == null && temperature == null) {
                 return MetricValue.unavailable(
@@ -228,7 +247,11 @@ class NativeCollectors(private val context: Context) {
                     temperatureC = temperature,
                     currentMicroAmps = currentMicroAmps,
                     voltageMilliVolts = voltage,
-                    charging = charging
+                    charging = charging,
+                    status = status,
+                    health = health,
+                    technology = technology,
+                    cycleCount = cycleCount
                 ),
                 "BatteryManager",
                 nowElapsedNanos

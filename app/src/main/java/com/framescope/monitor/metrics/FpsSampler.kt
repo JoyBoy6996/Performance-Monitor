@@ -425,7 +425,7 @@ class FpsSampler(
      * The per-layer counter of a game can stay frozen while the game keeps
      * presenting frames; on this device the total at the top of the timestats
      * dump grows by the game's real frame count (264 frames in two seconds for
-     * a game running at 120). The growth between two polls is therefore the
+     * a game running at 120). The growth over the two-second window is the
      * reading, and it cannot pick a wrong layer because it names no layer.
      */
     private suspend fun sampleFromGlobalCounter(
@@ -468,7 +468,7 @@ class FpsSampler(
             source = "SurfaceFlinger presented frames",
             kind = FpsSourceKind.TIMESTATS,
             layer = measuredLayer,
-            totalFrames = frames - previous,
+            totalFrames = frames - baseline.second,
             jankFrames = 0L,
             sampleAgeMs = 0L,
             windowMs = elapsedMs,

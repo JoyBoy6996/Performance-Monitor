@@ -63,6 +63,12 @@ import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
 import kotlinx.coroutines.launch
 
+/** A failure that would otherwise close the app is shown where the user tapped. */
+private fun Throwable.describe(): String {
+    val detail = message?.takeIf { it.isNotBlank() }
+    return if (detail != null) "$detail (${javaClass.simpleName})" else javaClass.name
+}
+
 @Composable
 fun SettingsScreen(
     container: AppContainer,
@@ -89,6 +95,7 @@ fun SettingsScreen(
         }.getOrNull()
     }
     var checking by remember { mutableStateOf(false) }
+    var connectMessage by remember { mutableStateOf<String?>(null) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -193,8 +200,11 @@ fun SettingsScreen(
                         enabled = !checking,
                         onClick = {
                             checking = true
+                            connectMessage = "Checking the connection..."
                             scope.launch {
-                                container.hub.refresh(forceReconnect = true)
+                                runCatching { container.hub.refresh(forceReconnect = true) }
+                                    .onFailure { connectMessage = it.describe() }
+                                    .onSuccess { connectMessage = it.detail.ifBlank { "Connection checked." } }
                                 checking = false
                             }
                         }
@@ -210,9 +220,13 @@ fun SettingsScreen(
                         enabled = !checking,
                         onClick = {
                             checking = true
+                            connectMessage = "Asking for permission..."
                             scope.launch {
-                                container.hub.requestPermission()
-                                container.hub.refresh(forceReconnect = true)
+                                runCatching {
+                                    container.hub.requestPermission()
+                                    container.hub.refresh(forceReconnect = true)
+                                }.onFailure { connectMessage = it.describe() }
+                                    .onSuccess { connectMessage = it.detail.ifBlank { "Connection checked." } }
                                 checking = false
                             }
                         }
@@ -225,6 +239,32 @@ fun SettingsScreen(
                             }
                         )
                     }
+                }
+                val message = connectMessage
+                if (message != null) {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = Space.lg, vertical = Space.sm)
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        val crash = com.framescope.monitor.core.CrashLog.last(context)
+                        Diagnostics.copy(
+                            context,
+                            crash ?: "No crash was recorded on this device."
+                        )
+                        connectMessage = if (crash == null) {
+                            "No crash was recorded on this device."
+                        } else {
+                            "Last crash copied - paste it here."
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = Space.lg, vertical = Space.sm)
+                ) {
+                    Text("Copy last crash")
                 }
             }
         }

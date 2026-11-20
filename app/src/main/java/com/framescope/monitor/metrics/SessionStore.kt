@@ -20,6 +20,27 @@ import java.io.File
 /** Never write NaN or infinity into an export; it makes the backup invalid. */
 private fun List<Float>.finiteDoubles(): List<Double> = mapNotNull { it.finiteOrNull()?.toDouble() }
 
+/** Reads cap changes from JSON, ignoring anything that does not parse. */
+private fun JSONArray?.toCapChanges(): List<CapChange> {
+    if (this == null) return emptyList()
+    val out = ArrayList<CapChange>()
+    for (i in 0 until length()) {
+        val item = optJSONObject(i) ?: continue
+        val to = item.optInt("toFps")
+        if (to <= 0) continue
+        out.add(
+            CapChange(
+                second = item.optInt("second").coerceAtLeast(0),
+                fromFps = if (item.isNull("fromFps")) null else item.optInt("fromFps").takeIf { it > 0 },
+                toFps = to,
+                thermalStatus = if (item.isNull("thermalStatus")) null else item.optInt("thermalStatus"),
+                cause = item.optString("cause").takeIf { it == "heat" } ?: "measured"
+            )
+        )
+    }
+    return out
+}
+
 /**
  * Persists recorded sessions and per-interval samples using an internal SQLite database,
  * with JSON backup support for easy export and sharing.
@@ -256,27 +277,6 @@ class SessionStore(context: Context) {
         for (i in 0 until length()) {
             val value = optDouble(i, 0.0).toFloat()
             if (value.finiteOrNull() != null) out.add(value)
-        }
-        return out
-    }
-
-    /** Reads cap changes, ignoring anything that does not parse. */
-    private fun JSONArray?.toCapChanges(): List<CapChange> {
-        if (this == null) return emptyList()
-        val out = ArrayList<CapChange>()
-        for (i in 0 until length()) {
-            val item = optJSONObject(i) ?: continue
-            val to = item.optInt("toFps")
-            if (to <= 0) continue
-            out.add(
-                CapChange(
-                    second = item.optInt("second").coerceAtLeast(0),
-                    fromFps = if (item.isNull("fromFps")) null else item.optInt("fromFps").takeIf { it > 0 },
-                    toFps = to,
-                    thermalStatus = if (item.isNull("thermalStatus")) null else item.optInt("thermalStatus"),
-                    cause = item.optString("cause").takeIf { it == "heat" } ?: "measured"
-                )
-            )
         }
         return out
     }
@@ -568,7 +568,7 @@ class SessionStore(context: Context) {
                             } else emptyList(),
                             capChanges = if (capChangesIdx >= 0) {
                                 runCatching { JSONArray(c.getString(capChangesIdx)).toCapChanges() }
-                                    .getOrDefault(emptyList())
+                                    .getOrDefault(emptyList<CapChange>())
                             } else emptyList(),
                             thermalCapSeconds = if (thermalCapIdx >= 0) c.getInt(thermalCapIdx) else 0
                         )

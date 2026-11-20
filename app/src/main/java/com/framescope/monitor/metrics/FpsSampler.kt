@@ -1307,7 +1307,7 @@ class FpsSampler(
 
         // The cap is confirmed from several real readings, so a single slow poll
         // cannot turn 120 into a "cap" of 60. Thermal level only labels the change.
-        val cap = capTracker.update(fps, SystemClock.elapsedRealtime(), currentThermalStatus, refreshRateHz())
+        val cap = capTracker.update(fps, SystemClock.elapsedRealtime(), currentThermalStatus)
 
         // The last five readings are also written to a file so they survive
         // the game closing: the user opens FrameScope, runs the raw probe,
@@ -1566,8 +1566,7 @@ private class GameCapTracker {
     fun update(
         fps: Float,
         nowMs: Long,
-        thermalStatus: Int?,
-        ceilingHz: Float?
+        thermalStatus: Int?
     ): CapReading? {
         val reading = fps.finiteOrNull()?.takeIf { it > 0f } ?: return current()
         recent.addLast(nowMs to reading)
@@ -1592,7 +1591,7 @@ private class GameCapTracker {
             val enough = if (thermalStatus != null && thermalStatus!! > 0) 2 else 3
             val tailMedian = tail.sorted()[1]
             if (shifted && spread <= tailMedian * 0.12f && recent.size >= enough) {
-                val fast = snap(tailMedian, ceilingHz)
+                val fast = snap(tailMedian)
                 val wentDown = fast < previous
                 if (fast != previous) {
                     cap = fast
@@ -1614,7 +1613,7 @@ private class GameCapTracker {
         val steady = sorted.count { kotlin.math.abs(it - median) <= median * 0.12f }
         if (steady < (sorted.size + 1) / 2) return current()
 
-        val candidate = snap(median, ceilingHz)
+        val candidate = snap(median)
         if (current() == null) {
             // The first reading has nothing to compare against. Even on a warm
             // phone it is only the rate we saw, not proof of a heat downshift.
@@ -1656,13 +1655,11 @@ private class GameCapTracker {
     }
 
     /** Snaps to a real game rate when the reading is close to one; else the median itself. */
-    private fun snap(median: Float, ceilingHz: Float?): Int {
-        val ceiling = ceilingHz?.takeIf { it > 0f }?.let { kotlin.math.round(it).toInt() }
-        val candidates = buildList {
-            addAll(listOf(30, 45, 60, 72, 80, 90, 100, 120, 144, 165))
-            ceiling?.let { add(it) }
-            ceiling?.let { add(it / 2) }
-        }.filter { it > 0 }.distinct().sorted()
+    private fun snap(median: Float): Int {
+        // Only rates a game can actually be set to. The panel's refresh rate is a
+        // ceiling for measurement, never a frame rate we claim the game produced:
+        // a 150 Hz SurfaceFlinger bucket is a 144 Hz screen, not a 150 fps game.
+        val candidates = listOf(30, 45, 60, 72, 80, 90, 100, 120, 144, 165)
         val near = candidates.minByOrNull { kotlin.math.abs(it - median) }
         if (near != null && kotlin.math.abs(near - median) <= maxOf(4f, median * 0.06f)) return near
         return kotlin.math.round(median).toInt().coerceAtLeast(1)

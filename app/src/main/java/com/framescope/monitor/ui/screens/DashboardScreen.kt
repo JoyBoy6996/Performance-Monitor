@@ -206,7 +206,7 @@ fun DashboardScreen(
                 threshold = threshold,
                 onToggleRecording = {
                     if (recording) {
-                        container.engine.stopRecording()
+                        container.engine.stopRecordingManually()
                         val stopIntent = android.content.Intent(context, com.framescope.monitor.recorder.ScreenRecorderService::class.java).apply {
                             action = com.framescope.monitor.recorder.ScreenRecorderService.ACTION_STOP
                         }

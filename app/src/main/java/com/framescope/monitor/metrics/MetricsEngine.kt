@@ -110,6 +110,8 @@ class MetricsEngine(
 
     private var lastAutoApp: String? = null
     private var autoAppSince = 0L
+    /** A manual Stop is honoured until a different app comes to the foreground. */
+    private var manualStoppedApp: String? = null
 
     fun start() {
         if (fpsJob?.isActive == true) return
@@ -334,12 +336,24 @@ class MetricsEngine(
     /** Why the current target was chosen, or why there is none. */
     fun measuredLayerReason(): String = fpsSampler.targetReason
 
-    fun startRecording() {        if (_recording.value) return
+    fun startRecording() {
+        if (_recording.value) return
+        manualStoppedApp = null
         val current = _foregroundApp.value.orEmpty()
         val label = appLabel(current)
         sessionLogger.start(current, label, _system.value.batteryLevel)
         _recording.value = true
         _live.value = LiveStats()
+    }
+
+    /**
+     * Stop pressed by the user. Auto-record must not switch it straight back on
+     * while the same app is still in front - that made the button look broken.
+     * The choice stays until a different app comes to the foreground.
+     */
+    fun stopRecordingManually(): SessionRecord? {
+        manualStoppedApp = _foregroundApp.value?.takeIf { it.isNotBlank() }
+        return stopRecording()
     }
 
     fun stopRecording(): SessionRecord? {
@@ -354,6 +368,7 @@ class MetricsEngine(
         if (!settings.autoRecord.value) {
             if (_recording.value) stopRecording()
             lastAutoApp = null
+            manualStoppedApp = null
             return
         }
         if (currentApp.isNullOrBlank()) return
@@ -361,8 +376,12 @@ class MetricsEngine(
             if (_recording.value) stopRecording()
             lastAutoApp = currentApp
             autoAppSince = System.currentTimeMillis()
+            manualStoppedApp = null
             return
         }
+        // A manual Stop in this app stays stopped. Auto-record may take over
+        // again only after another app has been in the foreground.
+        if (currentApp == manualStoppedApp) return
         if (_recording.value) return
         if (System.currentTimeMillis() - autoAppSince < MIN_AUTO_RECORD_MS) return
         startRecording()

@@ -53,12 +53,14 @@ class SystemSampler(private val hub: ShellHub) {
         // Some devices expose placeholder sensors at 0 or impossible hotspots.
         // Neither is the temperature of the phone the user is holding.
         val maxThermal = thermals.values.filter { it in 0f..100f }.maxOrNull()
+        val thermalStatus = Parsers.parseThermalStatus(part(3))
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
         record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
         record(availability, sources, SystemMetric.GPU_NAME, gpuName != null, "GPU_NAME", "privileged SurfaceFlinger")
         record(availability, sources, SystemMetric.GPU_FREQ_MHZ, gpuFreq != null, "GPU_FREQ_MHZ", "privileged GPU frequency node")
         record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "privileged thermalservice")
+        record(availability, sources, SystemMetric.THERMAL_STATUS, thermalStatus != null, "THERMAL_STATUS", "thermalservice status")
 
         return SystemMetrics(
             cpuPercent = cpu,
@@ -66,6 +68,7 @@ class SystemSampler(private val hub: ShellHub) {
             gpuName = gpuName,
             gpuFreqMHz = gpuFreq?.let { it / 1000 },
             thermalMaxC = maxThermal,
+            thermalStatus = thermalStatus,
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,

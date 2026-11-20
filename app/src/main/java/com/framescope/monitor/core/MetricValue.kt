@@ -123,5 +123,6 @@ enum class SystemMetric {
     RAM_TOTAL_GB,
     RAM_PERCENT,
     THERMAL_MAX_C,
+    THERMAL_STATUS,
     REFRESH_HZ
 }

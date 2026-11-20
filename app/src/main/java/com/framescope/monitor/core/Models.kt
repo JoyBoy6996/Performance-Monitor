@@ -59,6 +59,8 @@ data class SystemMetrics(
     val ramTotalGb: Float? = null,
     val ramPercent: Int? = null,
     val thermalMaxC: Float? = null,
+    /** Android's thermal mitigation level: 0 = none, 1 = light, 2 = moderate, 3 = severe. */
+    val thermalStatus: Int? = null,
     val refreshHz: Float? = null,
     val updatedAt: Long = 0L,
     /** Why each metric is or is not available. A metric missing here is unavailable. */
@@ -96,6 +98,7 @@ data class SystemMetrics(
         SystemMetric.RAM_TOTAL_GB -> ramTotalGb != null
         SystemMetric.RAM_PERCENT -> ramPercent != null
         SystemMetric.THERMAL_MAX_C -> thermalMaxC != null
+        SystemMetric.THERMAL_STATUS -> thermalStatus != null
         SystemMetric.REFRESH_HZ -> refreshHz != null
     }
 }
@@ -110,6 +113,18 @@ data class SystemMetrics(
 fun SystemMetrics.deviceTemperatureC(): Float? =
     batteryTempC?.takeIf { it in 0f..100f }
         ?: thermalMaxC?.takeIf { it in 0f..100f }
+
+/** Plain name of Android's thermal mitigation level, or "--" when the device reports none. */
+fun thermalStatusLabel(status: Int?): String = when (status) {
+    null -> "--"
+    0 -> "None"
+    1 -> "Light"
+    2 -> "Moderate"
+    3 -> "Severe"
+    4 -> "Critical"
+    5 -> "Emergency"
+    else -> "Shutdown"
+}
 
 /** A recorded gameplay / app session. */
 data class SessionRecord(
@@ -150,7 +165,13 @@ data class SessionRecord(
      */
     val segments: List<SessionSegment> = emptyList(),
     /** Seconds of the run that had no reading at all. */
-    val gapSeconds: Int = 0
+    val gapSeconds: Int = 0,
+    /** Highest thermal mitigation level seen in the run (0 = none). */
+    val peakThermalStatus: Int? = null,
+    /** Seconds in which the device reported thermal mitigation. */
+    val throttledSeconds: Int = 0,
+    /** Thermal mitigation level per second, for the chart. */
+    val thermalStatusSeries: List<Float> = emptyList()
 )
 
 /**
@@ -183,7 +204,9 @@ data class LiveStats(
     val maxFrameTimeMs: Float = 0f,
     val durationMs: Long = 0L,
     val maxTempC: Float? = null,
-    val avgCpu: Float? = null
+    val avgCpu: Float? = null,
+    val peakThermalStatus: Int? = null,
+    val throttledSeconds: Int = 0
 )
 
 

@@ -172,7 +172,10 @@ object ShellCommands {
 
     fun cpuStat(): String = "cat /proc/stat 2>/dev/null | head -8"
 
-    fun thermal(): String = "dumpsys thermalservice 2>/dev/null | grep -m 12 -E 'Temperature\\{'"
+    // The status line says whether the system is throttling; the rest are the sensors.
+    fun thermal(): String =
+        "dumpsys thermalservice 2>/dev/null | " +
+            "grep -m 16 -E 'Thermal Status:|ThermalStatus:|Temperature\\{'"
 
     fun gpuInfo(): String =
         "dumpsys SurfaceFlinger 2>/dev/null | grep -m1 -E 'GLES:' ; " +
@@ -200,6 +203,7 @@ object Parsers {
     private val PACKAGE_RE = Regex("([a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)+)")
     private val THERMAL_NAME = Regex("mName=([^,}]+)")
     private val THERMAL_VALUE = Regex("mValue=([0-9.]+)")
+    private val THERMAL_STATUS = Regex("Thermal\\s*Status\\s*:\\s*([0-6])", RegexOption.IGNORE_CASE)
     private val WHITESPACE = Regex("\\s+")
 
     fun foregroundPackage(dump: String): String? {
@@ -301,6 +305,13 @@ object Parsers {
             }
         return map
     }
+
+    /**
+     * Android's thermal mitigation level: 0 none, 1 light, 2 moderate, 3 severe.
+     * Null when the device does not print a status line - never guess a level.
+     */
+    fun parseThermalStatus(dump: String): Int? =
+        THERMAL_STATUS.find(dump)?.groupValues?.get(1)?.toIntOrNull()?.takeIf { it in 0..6 }
 
     fun parseGpuName(dump: String): String? {
         val line = dump.lineSequence().firstOrNull { it.contains("GLES:") } ?: return null

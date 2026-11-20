@@ -54,6 +54,7 @@ import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.BarMeter
@@ -204,6 +205,8 @@ fun DashboardScreen(
                 durationMs = live.durationMs,
                 maxTempC = live.maxTempC,
                 avgCpu = live.avgCpu,
+                peakThermalStatus = live.peakThermalStatus,
+                throttledSeconds = live.throttledSeconds,
                 threshold = threshold,
                 onToggleRecording = {
                     if (recording) {
@@ -809,6 +812,17 @@ private fun SystemPanel(system: SystemMetrics) {
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
+        system.thermalStatus?.let { status ->
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = Space.md),
+                color = MaterialTheme.colorScheme.outlineVariant
+            )
+            MetricLine(
+                label = "Thermal state",
+                value = thermalStatusLabel(status),
+                accent = if (status > 0) MaterialTheme.status.warn else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -889,6 +903,8 @@ private fun SessionPanel(
     durationMs: Long,
     maxTempC: Float?,
     avgCpu: Float?,
+    peakThermalStatus: Int?,
+    throttledSeconds: Int,
     threshold: Int,
     onToggleRecording: () -> Unit
 ) {
@@ -1011,6 +1027,22 @@ private fun SessionPanel(
             MetricLine(
                 label = "Peak temperature",
                 value = "${maxTempC.roundToInt()}°C",
+                accent = MaterialTheme.status.warn
+            )
+        }
+        if (peakThermalStatus != null) {
+            MetricLine(
+                label = "Thermal state",
+                value = thermalStatusLabel(peakThermalStatus),
+                accent = if (peakThermalStatus > 0) {
+                    MaterialTheme.status.warn
+                } else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (throttledSeconds > 0) {
+            MetricLine(
+                label = "Throttled time",
+                value = String.format("%d:%02d", throttledSeconds / 60, throttledSeconds % 60),
                 accent = MaterialTheme.status.warn
             )
         }

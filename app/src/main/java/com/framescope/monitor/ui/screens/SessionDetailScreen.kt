@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.steadyWindow
+import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.Panel
@@ -159,6 +160,22 @@ fun SessionDetailScreen(
                         accent = MaterialTheme.status.warn
                     )
                 }
+                session.peakThermalStatus?.let { status ->
+                    MetricLine(
+                        label = "Thermal state",
+                        value = thermalStatusLabel(status),
+                        accent = if (status > 0) {
+                            MaterialTheme.status.warn
+                        } else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (session.throttledSeconds > 0) {
+                    MetricLine(
+                        label = "Throttled time",
+                        value = formatDuration(session.throttledSeconds * 1000L),
+                        accent = MaterialTheme.status.warn
+                    )
+                }
                 session.avgCpu?.let {
                     MetricLine(
                         label = "Average CPU",
@@ -230,6 +247,18 @@ fun SessionDetailScreen(
                 unit = "°C",
                 color = MaterialTheme.status.critical
             )
+        }
+
+        if (session.thermalStatusSeries.isNotEmpty()) {
+            item {
+                SeriesPanel(
+                    title = "Thermal state",
+                    values = session.thermalStatusSeries,
+                    unit = "level",
+                    color = MaterialTheme.status.warn,
+                    targetLabel = "0 = none · 1 = light · 2 = moderate · 3+ = severe"
+                )
+            }
         }
 
         if (session.batterySeries.isNotEmpty()) {

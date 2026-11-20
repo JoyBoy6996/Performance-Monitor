@@ -156,6 +156,9 @@ class SessionStore(context: Context) {
                 put("averageFps", segment.averageFps.toDouble())
             }
         }))
+        put("peakThermalStatus", record.peakThermalStatus ?: JSONObject.NULL)
+        put("throttledSeconds", record.throttledSeconds)
+        put("thermalStatusSeries", JSONArray(record.thermalStatusSeries.map { it.toDouble() }))
     }.toString()
 
     fun recordFromJson(text: String): SessionRecord = fromJson(text)
@@ -188,13 +191,16 @@ class SessionStore(context: Context) {
             longestFrameMs = o.optDouble("longestFrameMs", 0.0).toFloat(),
             dropSeconds = o.optInt("dropSeconds"),
             gapSeconds = o.optInt("gapSeconds"),
-            segments = o.optJSONArray("segments").toSegments()
+            segments = o.optJSONArray("segments").toSegments(),
+            peakThermalStatus = if (o.isNull("peakThermalStatus")) null else o.optInt("peakThermalStatus"),
+            throttledSeconds = o.optInt("throttledSeconds"),
+            thermalStatusSeries = o.optJSONArray("thermalStatusSeries").toFloatList()
         )
     }
 
     fun toCsv(record: SessionRecord): String {
         val sb = StringBuilder()
-        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent\n")
+        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status\n")
         val size = maxOf(
             record.fpsSeries.size,
             record.cpuSeries.size,
@@ -209,6 +215,8 @@ class SessionStore(context: Context) {
             sb.append(record.cpuSeries.getOrElse(i) { "" }).append(',')
             sb.append(record.tempSeries.getOrElse(i) { "" }).append(',')
             sb.append(record.batterySeries.getOrElse(i) { "" })
+            sb.append(',')
+            sb.append(record.thermalStatusSeries.getOrElse(i) { "" })
             sb.append('\n')
         }
         return sb.toString()
@@ -273,7 +281,10 @@ class SessionStore(context: Context) {
                     cpu_series TEXT,
                     temp_series TEXT,
                     frame_time_series TEXT,
-                    battery_series TEXT
+                    battery_series TEXT,
+                    peak_thermal_status INTEGER,
+                    throttled_seconds INTEGER DEFAULT 0,
+                    thermal_status_series TEXT
                 )
                 """.trimIndent()
             )
@@ -290,7 +301,8 @@ class SessionStore(context: Context) {
                     gpu_freq_mhz INTEGER,
                     thermal_max_c REAL,
                     battery_level INTEGER,
-                    ram_percent INTEGER
+                    ram_percent INTEGER,
+                    thermal_status INTEGER
                 )
                 """.trimIndent()
             )
@@ -298,6 +310,31 @@ class SessionStore(context: Context) {
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             // Keep existing data on upgrade; do not drop tables.
+            if (oldVersion < 2) {
+                addColumnIfMissing(db, TABLE_RECORDS, "peak_thermal_status", "INTEGER")
+                addColumnIfMissing(db, TABLE_RECORDS, "throttled_seconds", "INTEGER DEFAULT 0")
+                addColumnIfMissing(db, TABLE_RECORDS, "thermal_status_series", "TEXT")
+                addColumnIfMissing(db, TABLE_SAMPLES, "thermal_status", "INTEGER")
+            }
+        }
+
+        private fun addColumnIfMissing(
+            db: SQLiteDatabase,
+            table: String,
+            column: String,
+            type: String
+        ) {
+            val cursor = db.rawQuery("PRAGMA table_info($table)", null)
+            val exists = cursor.use { c ->
+                val nameIndex = c.getColumnIndex("name")
+                if (nameIndex < 0) false else {
+                    (0 until c.count).any {
+                        c.moveToPosition(it)
+                        c.getString(nameIndex) == column
+                    }
+                }
+            }
+            if (!exists) db.execSQL("ALTER TABLE $table ADD COLUMN $column $type")
         }
 
         fun insertSamples(samples: List<SessionSample>) {
@@ -316,6 +353,7 @@ class SessionStore(context: Context) {
                         put("thermal_max_c", sample.thermalMaxC)
                         put("battery_level", sample.batteryLevel)
                         put("ram_percent", sample.ramPercent)
+                        put("thermal_status", sample.thermalStatus)
                     }
                     db.insert(TABLE_SAMPLES, null, cv)
                 }
@@ -351,6 +389,9 @@ class SessionStore(context: Context) {
                 put("temp_series", JSONArray(record.tempSeries.map { it.toDouble() }).toString())
                 put("frame_time_series", JSONArray(record.frameTimeSeries.map { it.toDouble() }).toString())
                 put("battery_series", JSONArray(record.batterySeries.map { it.toDouble() }).toString())
+                put("peak_thermal_status", record.peakThermalStatus)
+                put("throttled_seconds", record.throttledSeconds)
+                put("thermal_status_series", JSONArray(record.thermalStatusSeries.map { it.toDouble() }).toString())
             }
             writableDatabase.insertWithOnConflict(
                 TABLE_RECORDS,
@@ -371,6 +412,7 @@ class SessionStore(context: Context) {
                 put("thermal_max_c", sample.thermalMaxC)
                 put("battery_level", sample.batteryLevel)
                 put("ram_percent", sample.ramPercent)
+                put("thermal_status", sample.thermalStatus)
             }
             writableDatabase.insert(TABLE_SAMPLES, null, cv)
         }
@@ -390,6 +432,10 @@ class SessionStore(context: Context) {
                 while (c.moveToNext()) {
                     val maxTempIdx = c.getColumnIndex("max_temp_c")
                     val avgCpuIdx = c.getColumnIndex("avg_cpu")
+                    val peakStatusIdx = c.getColumnIndex("peak_thermal_status")
+                    val throttledIdx = c.getColumnIndex("throttled_seconds")
+                    val statusSeriesIdx = c.getColumnIndex("thermal_status_series")
+                    val gapIdx = c.getColumnIndex("gap_seconds")
                     list.add(
                         SessionRecord(
                             id = c.getString(c.getColumnIndexOrThrow("id")),
@@ -415,7 +461,15 @@ class SessionStore(context: Context) {
                             frameTimeSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("frame_time_series"))),
                             batterySeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("battery_series"))),
                             longestFrameMs = c.getFloat(c.getColumnIndexOrThrow("longest_frame_ms")),
-                            dropSeconds = c.getInt(c.getColumnIndexOrThrow("drop_seconds"))
+                            dropSeconds = c.getInt(c.getColumnIndexOrThrow("drop_seconds")),
+                            gapSeconds = if (gapIdx >= 0) c.getInt(gapIdx) else 0,
+                            peakThermalStatus = if (peakStatusIdx >= 0 && !c.isNull(peakStatusIdx)) {
+                                c.getInt(peakStatusIdx)
+                            } else null,
+                            throttledSeconds = if (throttledIdx >= 0) c.getInt(throttledIdx) else 0,
+                            thermalStatusSeries = if (statusSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(statusSeriesIdx))
+                            } else emptyList()
                         )
                     )
                 }
@@ -445,7 +499,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 1
+            private const val DB_VERSION = 2
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

@@ -21,7 +21,8 @@ data class SessionSample(
     val gpuFreqMHz: Int,
     val thermalMaxC: Float,
     val batteryLevel: Int,
-    val ramPercent: Int
+    val ramPercent: Int,
+    val thermalStatus: Int? = null
 )
 
 /** Aligned per-second telemetry data bucket. */
@@ -30,7 +31,8 @@ data class SecondBucket(
     val frameTimeMs: Float,
     val cpuPercent: Float,
     val tempC: Float,
-    val batteryLevel: Float
+    val batteryLevel: Float,
+    val thermalStatus: Int? = null
 )
 
 /**
@@ -71,8 +73,12 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketTemp = ArrayList<Float>()
     private val bucketFrameTime = ArrayList<Float>()
     private val bucketBattery = ArrayList<Float>()
+    private val bucketThermalStatus = ArrayList<Int>()
 
     private var lastBucketSec = -1L
+    // The privileged poll is slower than the one-second buckets, so a level stays
+    // in force until the next reading instead of leaving a fake zero gap.
+    private var lastThermalStatus: Int? = null
 
     private var lastTotalFrames = -1
     private var lastJankFrames = -1
@@ -114,8 +120,10 @@ class SessionLogger(private val store: SessionStore) {
         bucketTemp.clear()
         bucketFrameTime.clear()
         bucketBattery.clear()
+        bucketThermalStatus.clear()
 
         lastBucketSec = startedAt / 1000
+        lastThermalStatus = null
         lastTotalFrames = -1
         lastJankFrames = -1
         accumulatedFrames = 0
@@ -154,6 +162,9 @@ class SessionLogger(private val store: SessionStore) {
         val temp = metrics.deviceTemperatureC() ?: 0f
         val battery = metrics.batteryLevel ?: 0
         val ram = metrics.ramPercent ?: 0
+        val thermalStatus = metrics.thermalStatus?.takeIf { it in 0..6 }
+        if (thermalStatus != null) lastThermalStatus = thermalStatus
+        val bucketStatus = thermalStatus ?: lastThermalStatus
 
         samples.add(
             SessionSample(
@@ -165,7 +176,8 @@ class SessionLogger(private val store: SessionStore) {
                 gpuFreqMHz = gpuFreq,
                 thermalMaxC = temp,
                 batteryLevel = battery,
-                ramPercent = ram
+                ramPercent = ram,
+                thermalStatus = thermalStatus
             )
         )
         observedSamples++
@@ -214,6 +226,7 @@ class SessionLogger(private val store: SessionStore) {
         if (metrics.cpuPercent != null) bucketCpu.add(cpu)
         if (temp > 0f) bucketTemp.add(temp)
         if (battery > 0) bucketBattery.add(battery.toFloat())
+        if (bucketStatus != null) bucketThermalStatus.add(bucketStatus)
 
         if (nowSec > lastBucketSec) {
             flushBucket()
@@ -271,14 +284,27 @@ class SessionLogger(private val store: SessionStore) {
         val cpu = if (bucketCpu.isNotEmpty()) bucketCpu.average().toFloat() else 0f
         val temp = if (bucketTemp.isNotEmpty()) bucketTemp.average().toFloat() else 0f
         val battery = if (bucketBattery.isNotEmpty()) bucketBattery.last() else (startBattery?.toFloat() ?: 0f)
+        // One level per second: the worst state in that second, so a brief spike
+        // is not averaged away into "none".
+        val thermalStatus = bucketThermalStatus.maxOrNull()
 
-        secondBuckets.add(SecondBucket(fps, frameTime, cpu, temp, battery))
+        secondBuckets.add(
+            SecondBucket(
+                fps = fps,
+                frameTimeMs = frameTime,
+                cpuPercent = cpu,
+                tempC = temp,
+                batteryLevel = battery,
+                thermalStatus = thermalStatus
+            )
+        )
 
         bucketFps.clear()
         bucketFrameTime.clear()
         bucketCpu.clear()
         bucketTemp.clear()
         bucketBattery.clear()
+        bucketThermalStatus.clear()
     }
 
     @Synchronized
@@ -298,6 +324,8 @@ class SessionLogger(private val store: SessionStore) {
         val avgFt = samples.map { it.frameTimeMs }.average().toFloat()
         val maxTemp = samples.map { it.thermalMaxC }.filter { it > 0f }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
+        val peakThermalStatus = samples.mapNotNull { it.thermalStatus }.maxOrNull()
+        val throttledSeconds = secondBuckets.count { (it.thermalStatus ?: 0) > 0 }
 
         return LiveStats(
             avgFps = avgFps,
@@ -312,7 +340,9 @@ class SessionLogger(private val store: SessionStore) {
             maxFrameTimeMs = maxFrameTimeSeen,
             durationMs = measuredMs,
             maxTempC = maxTemp,
-            avgCpu = avgCpu
+            avgCpu = avgCpu,
+            peakThermalStatus = peakThermalStatus,
+            throttledSeconds = throttledSeconds
         )
     }
 
@@ -362,6 +392,12 @@ class SessionLogger(private val store: SessionStore) {
 
         val maxTemp = samples.map { it.thermalMaxC }.filter { it > 0f }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
+        val peakThermalStatus = samples.mapNotNull { it.thermalStatus }.maxOrNull()
+        val throttledSeconds = secondBuckets.count { (it.thermalStatus ?: 0) > 0 }
+        // A device that never reports a level gets no chart, not a flat line of zeros.
+        val thermalStatusSeries = if (samples.any { it.thermalStatus != null }) {
+            secondBuckets.map { (it.thermalStatus ?: 0).toFloat() }
+        } else emptyList()
 
         val record = SessionRecord(
             id = currentSessionId,
@@ -389,7 +425,10 @@ class SessionLogger(private val store: SessionStore) {
             longestFrameMs = maxFrameTimeSeen,
             dropSeconds = evaluationFps.count { it < targetFps },
             segments = segments.toList(),
-            gapSeconds = (gapMs / 1000L).toInt()
+            gapSeconds = (gapMs / 1000L).toInt(),
+            peakThermalStatus = peakThermalStatus,
+            throttledSeconds = throttledSeconds,
+            thermalStatusSeries = thermalStatusSeries
         )
 
         store.add(record)

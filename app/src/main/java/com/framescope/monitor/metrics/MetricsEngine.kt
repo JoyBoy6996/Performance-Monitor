@@ -404,7 +404,8 @@ class MetricsEngine(
             SystemMetric.CPU_FREQ_MHZ,
             SystemMetric.GPU_NAME,
             SystemMetric.GPU_FREQ_MHZ,
-            SystemMetric.THERMAL_MAX_C
+            SystemMetric.THERMAL_MAX_C,
+            SystemMetric.THERMAL_STATUS
         )
     }
 }

@@ -3,6 +3,7 @@ package com.framescope.monitor.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.SystemClock
 
 /**
  * The evidence needed to explain a wrong frame rate reading.
@@ -51,6 +52,10 @@ object Diagnostics {
         val app = if (pkg.isBlank()) "" else pkg
         val layer = (measuredLayer ?: "").replace("'", "")
         return listOf(
+            // The package and uptime of the capture itself. The button and the
+            // counters below can look right while the app underneath changed,
+            // so this line says exactly which app the raw probe belongs to.
+            "echo 'captured_from=$app at=${SystemClock.uptimeMillis()}'",
             // The last five polled readings. Each line: `<uptime-ms> <FPS>`.
             // The newest is last. These are what the overlay showed, including
             // polls that said 0 or read as the panel's refresh rate, so the

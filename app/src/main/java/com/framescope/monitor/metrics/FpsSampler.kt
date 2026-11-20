@@ -296,11 +296,12 @@ class FpsSampler(
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
-        // 2. The layer that is on the screen right now. A game names its surface
-        // after its engine and not after its package, so the layer of the game
-        // cannot always be found by name - but it is the layer that is active.
-        val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
-        if (fromActive != null) return fromActive
+        // The unnamed `dumpsys SurfaceFlinger --latency` answer is deliberately
+        // NOT used here. On the device this build has to support it answers with
+        // the status bar's frames, not the game's, and publishing those as the
+        // game's FPS is exactly the wrong number this fix is here to stop.
+        // Only a layer whose name can be attributed to the foreground app, or
+        // SurfaceFlinger's own per-layer counters, are allowed to publish.
 
         // 3. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
@@ -456,6 +457,32 @@ class FpsSampler(
     }
 
     /**
+     * How old a presentation timestamp is, on whichever clock the device used.
+     *
+     * SurfaceFlinger can stamp frames with `CLOCK_MONOTONIC` (uptime) or with
+     * `CLOCK_ELAPSED` (elapsed realtime). The two clocks differ by all the time
+     * the phone spent asleep - on this device that difference was 134117 ms.
+     * Comparing an elapsed-realtime timestamp with uptime is what printed that
+     * age even for a frame that had just been drawn.
+     *
+     * Both clocks are offered because the source is not named in the dump. Only
+     * an age that is small on one of them can describe a live frame; the smaller
+     * of the plausible answers is the age shown in the overlay.
+     */
+    private fun presentationAgeNs(
+        newestNs: Long,
+        nowUptimeNs: Long,
+        nowElapsedNs: Long,
+        maxAgeNs: Long = FRAME_MAX_AGE_NS
+    ): Long? {
+        if (newestNs <= 0L) return null
+        val uptimeAge = nowUptimeNs - newestNs
+        val elapsedAge = nowElapsedNs - newestNs
+        val plausible = listOf(uptimeAge, elapsedAge).filter { it in 0L..maxAgeNs }
+        return plausible.minOrNull()
+    }
+
+    /**
      * The exact presentation times of one layer.
      *
      * `dumpsys SurfaceFlinger --latency <layer>` answers with the timestamps
@@ -494,9 +521,7 @@ class FpsSampler(
         val uptime = SystemClock.uptimeNanos()
         val elapsed = SystemClock.elapsedRealtimeNanos()
         val newest = sample.presents.last()
-        val fresh = (uptime - newest) in 0L..EXACT_MAX_AGE_NS ||
-            (elapsed - newest) in 0L..EXACT_MAX_AGE_NS
-        if (!fresh) return null
+        val ageNs = presentationAgeNs(newest, uptime, elapsed) ?: return null
 
         // Use SceneFpsCalculator for the FPS value: deduplication prevents
         // ring-buffer overlaps from inflating the count, and the stale timeout
@@ -520,7 +545,7 @@ class FpsSampler(
             layer = layer,
             totalFrames = sample.presents.size.toLong(),
             jankFrames = sceneResult.jankFrames.toLong(),
-            sampleAgeMs = 0L,
+            sampleAgeMs = ageNs / 1_000_000L,
             windowMs = (sceneResult.avgFrameTimeMs * sceneResult.fps).toLong().coerceAtLeast(0L),
             low1PercentFps = null,
             low5PercentFps = null,
@@ -545,57 +570,6 @@ class FpsSampler(
         val collectors = NativeCollectors(ctx.applicationContext)
         val rate = collectors.refreshRate()
         return rate.value
-    }
-
-    /**
-     * The layer that is on the screen right now.
-     *
-     * SurfaceFlinger answers with the active layer when it is asked without a
-     * name, which is the app the user is looking at - the game, when a game is
-     * in front. This is the only probe that finds a game whose surface carries
-     * no package name at all.
-     */
-    private suspend fun sampleFromActiveLayer(
-        pkg: String,
-        targetFps: Int,
-        nowUptime: Long
-    ): FpsState? {
-        val dump = hub.execOrNull(ShellCommands.surfaceLatencyDefault(), 3_000)?.out.orEmpty()
-        if (dump.isBlank()) return null
-
-        val (_, presents) = Parsers.parseLatency(dump)
-        if (presents.size < 4) return null
-
-        // The same arithmetic every other source uses: the mean interval
-        // between the frames is the frame time, and the jank is every interval
-        // that misses the budget.
-        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-        val stats = computeFrameStats(deltas) ?: return null
-        val fps = stats.fps
-        if (!isPlausibleFps(fps)) return null
-
-        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
-        measuredLayer = "the layer that is on the screen"
-
-        latencyCounter.frameBudgetNs = frameBudgetNs(targetFps)
-        val result = latencyCounter.onSample("active", presents, nowUptime)
-
-        publish(
-            fps = fps,
-            frameTimeMs = stats.frameTimeMs,
-            source = "SurfaceFlinger (the layer on the screen)",
-            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
-            layer = "active",
-            totalFrames = latencyCounter.totalUniqueFrames,
-            jankFrames = latencyCounter.totalJankFrames,
-            sampleAgeMs = latencyCounter.frameAgeMs(nowUptime),
-            windowMs = result.windowMs,
-            low1PercentFps = latencyCounter.low1PercentFps(),
-            low5PercentFps = latencyCounter.low5PercentFps(),
-            appPackage = pkg,
-            nowUptime = nowUptime
-        )
-        return _state.value
     }
 
     /**
@@ -665,15 +639,42 @@ class FpsSampler(
             }
         }
 
+        // A layer keeps its last frames in the ring buffer long after the app
+        // stopped drawing. Those frames are history, not a measurement. Refuse
+        // them before selection so a stale surface of another app can never be
+        // called the foreground app's FPS. The age is worked out on whichever
+        // clock the device stamped the frames with, so deep sleep cannot turn a
+        // live frame into a "134117 ms old" reading.
+        val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
+        val fresh = samples.mapNotNull { sample ->
+            val newest = sample.presents.lastOrNull() ?: return@mapNotNull null
+            val ageNs = presentationAgeNs(newest, nowUptime, nowElapsedNs) ?: return@mapNotNull null
+            sample to ageNs
+        }
+        val freshSamples = fresh.map { it.first }
+        val staleCount = samples.size - freshSamples.size
+        if (freshSamples.isEmpty()) {
+            pendingWarmUpReason = "No layer of $pkg presented a frame recently"
+            val staleNote = if (staleCount > 0) "\n$staleCount layer(s) had only old frames" else ""
+            _reports.value = retainReport(
+                _reports.value,
+                pkg,
+                buildProbeReport(pkg, dump) + staleNote
+            )
+            return null
+        }
+
         val report = buildProbeReport(pkg, dump) +
             if (fallbackDump.isBlank()) "" else {
                 "\nfallback (newest layers):\n" + buildProbeReport(pkg, fallbackDump)
-            }
+            } +
+            if (staleCount > 0) "\nignored $staleCount layer(s) with old frames" else ""
         _reports.value = retainReport(_reports.value, pkg, report)
-        val selection = selectVerifiedTarget(samples, pkg, allowUnattributed = true)
+        val selection = selectVerifiedTarget(freshSamples, pkg, allowUnattributed = true)
         targetReason = selection.reason
 
         val target = selection.target ?: return null
+        val sampleAgeNs = fresh.first { it.first === target }.second
 
         // Switching provider starts a new baseline: the counters of one provider say
         // nothing about the frames of another.
@@ -705,7 +706,7 @@ class FpsSampler(
             layer = target.name,
             totalFrames = latencyCounter.totalUniqueFrames,
             jankFrames = latencyCounter.totalJankFrames,
-            sampleAgeMs = latencyCounter.frameAgeMs(nowUptime),
+            sampleAgeMs = sampleAgeNs / 1_000_000L,
             windowMs = result.windowMs,
             low1PercentFps = latencyCounter.low1PercentFps(),
             low5PercentFps = latencyCounter.low5PercentFps(),
@@ -734,6 +735,12 @@ class FpsSampler(
         val out = hub.execOrNull(ShellCommands.gfxInfo(pkg), 2_000)?.out.orEmpty()
         val timestamps = Parsers.parseGfxFrameStats(out)
         if (timestamps.size < 4) {
+            gfxNextAttemptAt = now + backoffNanos(++gfxFailures)
+            return null
+        }
+        // gfxinfo also keeps a short history. A frame that is no longer recent
+        // is a paused app, not a live frame rate, and must not publish an old age.
+        val ageNs = presentationAgeNs(timestamps.last(), nowUptime, now) ?: run {
             gfxNextAttemptAt = now + backoffNanos(++gfxFailures)
             return null
         }
@@ -772,7 +779,7 @@ class FpsSampler(
             layer = pkg,
             totalFrames = gfxCounter.totalUniqueFrames,
             jankFrames = gfxCounter.totalJankFrames,
-            sampleAgeMs = gfxCounter.frameAgeMs(nowUptime),
+            sampleAgeMs = ageNs / 1_000_000L,
             windowMs = result.windowMs,
             low1PercentFps = gfxCounter.low1PercentFps(),
             low5PercentFps = gfxCounter.low5PercentFps(),
@@ -983,10 +990,11 @@ class FpsSampler(
         /**
          * How old the newest frame of a layer may be to still be its meter.
          *
-         * A layer that stopped drawing half a second ago is not the surface
-         * the user is looking at, and its last few frames are not a live rate.
+         * This matches the overlay's own stale window. A layer that stopped
+         * drawing before that is history, not the surface the user is looking
+         * at; its last frames are refused instead of being shown with an age.
          */
-        private const val EXACT_MAX_AGE_NS = 500_000_000L
+        private const val FRAME_MAX_AGE_NS = 2_000_000_000L
 
         /**
          * How long the latency dump of a package's layers may take.

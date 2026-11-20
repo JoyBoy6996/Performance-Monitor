@@ -70,6 +70,14 @@ import kotlinx.coroutines.launch
 private val DIAGNOSTIC_COMMAND = com.framescope.monitor.ui.Diagnostics.command
 
 /**
+ * Marketing names for the model codes Android reports in Build.MODEL.
+ * An unknown code falls back to manufacturer + model, so no phone is misnamed.
+ */
+private val DEVICE_NAMES = mapOf(
+    "I2405" to "iQOO Neo 10"
+)
+
+/**
  * Chipset IDs Android exposes through ro.soc.model, translated to the names people
  * know. An ID that is not listed is shown as-is; nothing is guessed from a GPU name.
  */
@@ -492,7 +500,23 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         }
 
         Text("Identity", style = MaterialTheme.typography.titleSmall, color = onSurface)
-        MetricLine("Device", "${Build.MANUFACTURER} ${Build.MODEL}", onSurface)
+        val modelCode = Build.MODEL.trim().ifBlank { "--" }
+        val friendlyName = DEVICE_NAMES[modelCode.uppercase(java.util.Locale.US)]
+            ?: listOf(Build.BRAND, Build.MODEL)
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString(" ")
+                .ifBlank { modelCode }
+        val modelLine = if (modelCode == "--") {
+            "--"
+        } else if (modelCode.startsWith(Build.MANUFACTURER, ignoreCase = true)) {
+            modelCode
+        } else {
+            "${Build.MANUFACTURER} $modelCode"
+        }
+        MetricLine("Device", friendlyName, onSurface)
+        MetricLine("Model", modelLine, onSurface)
         MetricLine("Brand", Build.BRAND, onSurface)
         MetricLine("Codename", Build.DEVICE, onSurface)
         MetricLine("Product", Build.PRODUCT, onSurface)

@@ -744,14 +744,24 @@ class FpsSampler(
             return null
         }
 
-        val selection = selectVerifiedTarget(candidates, pkg, allowUnattributed = true)
-        targetReason = selection.reason
-
-        val target = selection.target ?: return null
+        // A game owns several surfaces. The one named after its activity is often
+        // only a UI layer that presents at a fraction of the engine's rate; the
+        // engine's own surface presents the frames the player sees. Of all the
+        // layers that proved they are drawing, the fastest one is the game.
+        val measured = candidates.mapNotNull { sample ->
+            val deltas = sample.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+            val stats = computeFrameStats(deltas) ?: return@mapNotNull null
+            Triple(sample, stats, packageEvidenceOf(sample.name, pkg))
+        }.maxByOrNull { it.second.fps } ?: run {
+            pendingWarmUpReason = "Waiting for ${pkg} to present frames"
+            return null
+        }
+        val target = measured.first
+        val ownStats = measured.second
+        val attributed = measured.third != PackageEvidence.NONE
         val sampleAgeNs = fresh.first { it.first === target }.second
-        val attributed = packageEvidenceOf(target.name, pkg) != PackageEvidence.NONE
-        val ownDeltas = target.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-        val ownStats = computeFrameStats(ownDeltas)
+        targetReason = "fastest continuously drawing layer ${target.name} " +
+            "(${if (attributed) "exact package match" else "attributed by continuous drawing"})"
 
         // Switching provider starts a new baseline: the counters of one provider say
         // nothing about the frames of another.
@@ -766,26 +776,18 @@ class FpsSampler(
 
         val result = latencyCounter.onSample(target.name, target.presents, nowUptime)
 
-        val fps = if (attributed) {
-            result.recentFps ?: ownStats?.fps
-        } else {
-            ownStats?.fps ?: result.recentFps
-        }
-        if (fps == null || !isPlausibleFps(fps)) {
-            // The layer is verified but has not drawn two frames yet. A game can have
-            // a surface that never gets a timestamp row, so the next provider gets
-            // its turn before this is called a problem.
+        // The timestamps themselves are the frames, so they are the reading. A
+        // rolling counter that only sees a few new frames per dump underreports
+        // a game running at 90-120 as 24, which is what the overlay showed.
+        val fps = ownStats.fps
+        if (!isPlausibleFps(fps)) {
             pendingWarmUpReason = "Waiting for ${target.name} to present frames"
             return null
         }
 
         publish(
             fps = fps,
-            frameTimeMs = if (!attributed && ownStats != null) {
-                ownStats.frameTimeMs
-            } else {
-                result.frameTimeMs ?: (1000f / fps)
-            },
+            frameTimeMs = ownStats.frameTimeMs,
             source = "SurfaceFlinger latency",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = target.name,

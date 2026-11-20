@@ -603,7 +603,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                     scope.launch {
                         val pkg = lastMeasured
                         val result = container.hub.execOrNull(
-                            Diagnostics.probeCommand(pkg, layer),
+                            Diagnostics.probeCommand(pkg, layer, container.engine.debugFrameLogText()),
                             20_000
                         )
                         probeOutput = if (result == null) {
@@ -670,7 +670,7 @@ private fun DiagnosticsRow(container: AppContainer) {
         LaunchedEffect(Unit) {
             val pkg = lastMeasured
             val result = container.hub.execOrNull(
-                Diagnostics.probeCommand(pkg, layer),
+                Diagnostics.probeCommand(pkg, layer, container.engine.debugFrameLogText()),
                 20_000
             )
             probeOutput = if (result == null) {

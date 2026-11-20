@@ -42,11 +42,27 @@ object Diagnostics {
      * the latency dump of the app's own layers shows whether the frames are
      * there at all.
      */
-    fun probeCommand(packageName: String?, measuredLayer: String? = null): String {
+    fun probeCommand(
+        packageName: String?,
+        measuredLayer: String? = null,
+        debugText: String = ""
+    ): String {
         val pkg = (packageName ?: "").replace("'", "").replace("\"", "")
         val app = if (pkg.isBlank()) "" else pkg
         val layer = (measuredLayer ?: "").replace("'", "")
         return listOf(
+            // The last five polled readings. Each line: `<uptime-ms> <FPS>`.
+            // The newest is last. These are what the overlay showed, including
+            // polls that said 0 or read as the panel's refresh rate, so the
+            // real rate and the misleading ones can be compared by hand after
+            // the game closes.
+            if (debugText.isNotBlank()) {
+                // Lines are `<uptime-ms> <FPS>`; newest is last.
+                "echo '--- last 5 polled FPS readings (engine.debugFrameLog, newest last) ---'; " +
+                    "echo \"$debugText\""
+            } else {
+                ""
+            }.trim(),
             // The layer the app is measuring right now comes first. `--latency`
             // answers to the exact layer name and to nothing else, so the row
             // count of this block is the whole question: about 127 rows when the

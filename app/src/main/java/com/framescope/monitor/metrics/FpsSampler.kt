@@ -150,6 +150,28 @@ class FpsSampler(
 
     private val history = ArrayDeque<Float>()
 
+    /**
+     * The last five published readings, oldest last.
+     *
+     * Each entry is (uptime ms, FPS). The user of the overlay and the raw
+     * probe can read this after the game closes, so the poll that named BGMI
+     * real FPS and the poll that named it 144 or 0 can be compared by hand.
+     */
+    private val debugFrameLog = ArrayDeque<Pair<Long, Float>>(5)
+
+    /** Reads the last five published readings; oldest last. */
+    fun debugFrameLog(): List<Pair<Long, Float>> = debugFrameLog.toList()
+
+    /**
+     * The same readings as a text block, for the raw probe.
+     *
+     * Each line is `<uptime-ms> <FPS>`; the newest is last. The user reads
+     * this after the game closes to see what the overlay showed for the last
+     * polls, including polls that said 0 or read as the panel's 144.
+     */
+    fun debugFrameLogText(): String =
+        debugFrameLog.joinToString("\n") { (at, fps) -> "$at $fps" }
+
     // --- gfxinfo provider state ----------------------------------------------------
 
     private var gfxNextAttemptAt = 0L
@@ -825,6 +847,17 @@ class FpsSampler(
     ) {
         history.addLast(fps)
         while (history.size > HISTORY_SIZE) history.removeFirst()
+        debugFrameLog.addLast(SystemClock.uptimeMillis() to fps)
+        while (debugFrameLog.size > 5) debugFrameLog.removeFirst()
+
+        // The last five readings are also written to a file so they survive
+        // the game closing: the user opens FrameScope, runs the raw probe,
+        // and reads the file or the probe text to compare the poll that said
+        // 0 or 144 with the polls that said real FPS.
+        runCatching {
+            val text = debugFrameLogText()
+            if (text.isNotBlank()) context?.filesDir?.resolve("fps_debug.txt")?.writeText(text)
+        }
 
         _state.value = FpsState(
             fps = fps,

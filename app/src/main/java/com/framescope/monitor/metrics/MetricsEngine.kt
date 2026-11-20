@@ -52,6 +52,9 @@ class MetricsEngine(
 
     /** The text the foreground query answered with the last time it ran. */
     fun lastForegroundOutput(): String = fpsSampler.lastForegroundOutput
+
+    /** The last five polled readings as text, for the raw probe. */
+    fun debugFrameLogText(): String = fpsSampler.debugFrameLogText()
     private val systemSampler = SystemSampler(hub)
     private val sessionLogger = SessionLogger(store)
 

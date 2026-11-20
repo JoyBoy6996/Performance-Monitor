@@ -635,19 +635,36 @@ private fun DiagnosticsRow(container: AppContainer) {
                     running = true
                     message = null
                     scope.launch {
+                        // One button means one clipboard: the report and the raw
+                        // probe for the last measured game are copied together.
+                        val pkg = lastMeasured
+                        val probe = container.hub.execOrNull(
+                            Diagnostics.probeCommand(
+                                pkg,
+                                layer,
+                                container.engine.debugFrameLogText()
+                            ),
+                            20_000
+                        )
+                        val probeText = probe?.let { (it.out + "\n" + it.err).trim() }
+                            ?.takeIf { it.isNotEmpty() }
+                            ?: "The raw probe could not run."
+                        probeOutput = probeText
                         val result = container.hub.execOrNull(Diagnostics.command, 20_000)
                         val shell = result?.let { (it.out + "\n" + it.err).trim() }
                             ?.takeIf { it.isNotEmpty() }
                             ?: "Shizuku is unavailable. Start it and complete setup first."
-                        val text = com.framescope.monitor.metrics.DiagnosticsReport.build(
+                        val report = com.framescope.monitor.metrics.DiagnosticsReport.build(
                             context = context,
                             hub = container.hub,
                             engine = container.engine,
                             settings = container.settings,
                             shellOutput = shell
                         )
+                        val text = report + "\n\n--- raw probe for " +
+                            (pkg ?: "the last app") + " ---\n" + probeText
                         Diagnostics.copy(context, shellSafeText(text))
-                        message = "Copied to the clipboard - paste it in the chat."
+                        message = "Copied report + raw probe - paste it in the chat."
                         running = false
                     }
                 }
@@ -657,7 +674,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                     contentDescription = null,
                     modifier = Modifier.size(16.dp)
                 )
-                Text("Copy diagnostics", modifier = Modifier.padding(start = 6.dp))
+                Text("Copy all", modifier = Modifier.padding(start = 6.dp))
             }
         }
         if (message != null) {

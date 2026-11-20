@@ -870,21 +870,33 @@ class FpsSampler(
         availability: MetricAvailability
     ): FpsState {
         val last = _state.value
-        val hasReading = last.valid && last.fps > 0f
+        val ageNs = SystemClock.elapsedRealtimeNanos() - last.measuredAtElapsedNanos
+        // A recent reading is the real frame rate the game was presenting. A
+        // reading older than a few seconds is history, not a live number; showing
+        // it after a real disconnect would be as wrong as showing 0.
+        val hasReading = last.valid && last.fps > 0f && ageNs in 0L..STALE_READING_NS
         return FpsState(
             fps = if (hasReading) last.fps else 0f,
             frameTimeMs = if (hasReading) last.frameTimeMs else 0f,
             history = if (hasReading) last.history else history.toList(),
             totalFrames = if (hasReading) last.totalFrames else latencyCounter.totalUniqueFrames.toInt(),
             jankFrames = if (hasReading) last.jankFrames else latencyCounter.totalJankFrames.toInt(),
-            source = source,
+            source = if (hasReading) last.source else source,
             surface = if (hasReading) last.surface else null,
-            valid = false,
+            // Keep the reading marked valid, exactly as the old sampler did
+            // when a layer had no new frames. The overlay only shows "--" for
+            // an invalid state, so flipping this on a single slow poll was the
+            // flicker between a real frame rate and "--fps".
+            valid = hasReading,
             reason = reason,
-            availability = availability,
-            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
-            sampleAgeMs = 0L,
-            measurementWindowMs = 0L,
+            availability = if (hasReading) MetricAvailability.AVAILABLE else availability,
+            measuredAtElapsedNanos = if (hasReading) last.measuredAtElapsedNanos
+                else SystemClock.elapsedRealtimeNanos(),
+            sampleAgeMs = if (hasReading) {
+                ((SystemClock.elapsedRealtimeNanos() - last.measuredAtElapsedNanos) / 1_000_000L)
+                    .coerceAtLeast(0L)
+            } else 0L,
+            measurementWindowMs = if (hasReading) last.measurementWindowMs else 0L,
             sourceKind = kind,
             low1PercentFps = if (hasReading) last.low1PercentFps else null,
             low5PercentFps = if (hasReading) last.low5PercentFps else null,
@@ -930,6 +942,14 @@ class FpsSampler(
     companion object {
         private const val HISTORY_SIZE = 60
         private const val BASE_BACKOFF_NS = 2_000_000_000L
+
+        /**
+         * How long a real reading stays on screen when a poll brings nothing new.
+         *
+         * Polls are 400 ms apart, so a handful of missed dumps must not blank the
+         * overlay; but a number older than this is history, not a live frame rate.
+         */
+        private const val STALE_READING_NS = 5_000_000_000L
         private const val DEFAULT_FRAME_BUDGET_NS = 16_666_666L
 
         /**

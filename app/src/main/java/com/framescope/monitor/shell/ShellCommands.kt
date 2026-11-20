@@ -49,7 +49,7 @@ object ShellCommands {
      * The latency of every layer of one app, in a single round trip.
      *
      * Asking the shell once per layer is slow, and a game can own a dozen
-     * layers. One command that walks the list keeps the sample inside a
+     * layers. One command that asks for all of them keeps the sample inside a
      * second even when the app has many surfaces.
      *
      * Every layer keeps only its newest frames. The latency dump is a rolling
@@ -58,30 +58,30 @@ object ShellCommands {
      * the frame rate of the game is lost. The frames that matter are the newest
      * ones, so the old ones are dropped in the shell, where they cost nothing.
      */
-    fun surfaceLatencyOfLayers(packageName: String, fallback: Boolean = false): String {
-        val pkg = packageName.replace("'", "")
-        val layers = if (fallback) {
-            // No layer carries the package name: the newest layers are checked
-            // instead, because a game often renders into a surface of its own.
-            "dumpsys SurfaceFlinger --list 2>/dev/null | tail -12"
-        } else {
-            // Every layer of the app is asked. A game owns a dozen of them and
-            // the one that draws is not always the newest one, so nothing is
-            // left out here.
-            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$pkg'"
+    fun surfaceLatencyOfNames(layers: List<String>): String {
+        val usable = layers.map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        // Nothing to ask. An empty command would still cost a round trip and
+        // look like a layer that has no frames.
+        if (usable.isEmpty()) return "true"
+
+        // `--latency` compares its argument with the layer name character for
+        // character. The name is therefore passed in single quotes, as it is,
+        // and nothing is added to it: the list entry for a layer is a
+        // "RequestedLayerState{name parentId=..}" descriptor, not the name, and
+        // asking with the descriptor answered with the refresh period only.
+        return usable.joinToString("\n") { raw ->
+            // Inside single quotes every other character is literal, so only the
+            // quote itself has to go. Removing anything else would change the
+            // name, and the name has to match.
+            val name = raw.replace("'", "")
+            // The rows are oldest first, so the newest frames are at the END of the
+            // dump. A sweep of many layers keeps them to stay inside what a shell
+            // call can carry; one layer is asked for its whole dump.
+            "echo '@@@$name'\n" +
+                "dumpsys SurfaceFlinger --latency '$name' 2>/dev/null | tail -n 60"
         }
-        // The list has to be walked line by line. A `for` loop over `$(...)` splits
-        // every line at its spaces, and a SurfaceFlinger layer name contains spaces:
-        // "RequestedLayerState{ActivityRecord{219735033 u0 t4356 d0} 11-13#0}".
-        // Every piece of it is a layer that does not exist, so the dump comes back
-        // empty and the frame rate of that layer is never measured.
-        return "{ $layers | while IFS= read -r L; do " +
-            "[ -z \"\$L\" ] && continue; " +
-            "echo \"@@@\$L\"; " +
-            "${latencyOf("\$L")}" +
-            "B=\${L%%#*}; if [ \"\$B\" != \"\$L\" ]; then echo \"@@@\$B\"; " +
-            "${latencyOf("\$B")}" +
-            "fi; done; }"
     }
 
 
@@ -100,21 +100,6 @@ object ShellCommands {
         val l = layer.replace("'", "")
         return "dumpsys SurfaceFlinger --latency '$l' 2>/dev/null; "
     }
-
-    /**
-     * The latency of one layer, when it is a variable of the walk above.
-     *
-     * The rows are oldest first, so the newest frames are at the END of the
-     * dump. Keeping the first rows - which this used to do - kept the oldest
-     * frames of the layer, the ones that are no longer being presented, and
-     * the rate was read from a stale window. A sweep of many layers keeps the
-     * newest rows to stay inside what a shell call can carry.
-     *
-     * Nothing but the tools that are on every phone is used here. A phone has
-     * no awk, and a command that is not there takes the whole answer with it.
-     */
-    private fun latencyOf(layer: String): String =
-        "dumpsys SurfaceFlinger --latency \"$layer\" 2>/dev/null | tail -n 60; "
 
     /**
      * The frame counters SurfaceFlinger keeps per layer.

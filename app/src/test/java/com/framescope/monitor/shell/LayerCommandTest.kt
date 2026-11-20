@@ -1,58 +1,73 @@
 package com.framescope.monitor.shell
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The SurfaceFlinger layer list has to be walked line by line.
+ * `dumpsys SurfaceFlinger --latency` answers to the exact layer name and to
+ * nothing else.
  *
- * A layer name contains spaces - "RequestedLayerState{ActivityRecord{219735033 u0 t4356
- * d0} 11-13#0}" - and a `for` loop over `$(...)` splits it into pieces. Every piece is a
- * layer that does not exist, so the latency dump comes back empty and the frame rate of
- * that layer is never measured.
+ * SurfaceFlinger compares the argument with `layer->getName()` character for
+ * character:
+ *
+ * ```cpp
+ * StringAppendF(&result, "%" PRId64 "\n", mScheduler->getPacesetterVsyncPeriod().ns());
+ * traverseLegacyLayers([&](Layer* layer) {
+ *     if (layer->getName() == name.c_str()) layer->dumpFrameStats(result);
+ * });
+ * ```
+ *
+ * A name that does not match produces exactly one line - the slower of the
+ * refresh periods in nanoseconds - and no frames at all. On a 144 Hz phone that
+ * line reads `6944444`, which is what every probe of every layer answered with.
  */
 class LayerCommandTest {
 
+    /**
+     * A name is a name, not a quoted shell word.
+     *
+     * The argument replaced `'` and nothing else, so a name that contains a
+     * space survived - but the whole descriptor around the name did not, and
+     * the descriptor is never the name.
+     */
     @Test
-    fun `the layer list is walked line by line`() {
-        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
-        assertTrue(command.contains("while IFS= read -r L"))
-        assertFalse(command.contains("for L in \$("))
-    }
-
-    @Test
-    fun `the fallback list is walked line by line as well`() {
-        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile", fallback = true)
-        assertTrue(command.contains("while IFS= read -r L"))
-        assertFalse(command.contains("for L in \$("))
-        assertTrue(command.contains("tail -12"))
-    }
-
-    @Test
-    fun `the layer name is quoted so a space cannot split it`() {
-        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
-        assertTrue(command.contains("--latency \"\$L\""))
+    fun `the layer name is quoted exactly and the rest is not added`() {
+        val name = "bae4750 SurfaceView[com.pubg.imobile/com.epicgames.ue4.GameActivity](BLAST) " +
+            "11-19 19:36:02.082#750494"
+        val command = ShellCommands.surfaceLatencyOfNames(listOf(name))
+        assertTrue(command.contains("--latency '$name'"))
+        assertTrue(command.contains("echo '@@@$name'"))
     }
 
     /**
-     * The shell carries a limited amount of text.
+     * The rows are oldest first, so the newest frames are the LAST ones.
      *
-     * The latency dump is a rolling window of about 128 rows per layer, and a game
-     * owns a dozen layers. Ten of those windows do not fit into a shell call: the
-     * dump arrives cut in half, and the layers that are missing are the ones at the
-     * end - the ones that are actually drawing. The game then shows no frame rate
-     * while every other app works.
-     *
-     * The rows are oldest first, so "the newest rows" are the LAST ones. Keeping
-     * the first rows kept the oldest frames of each layer, the ones that are no
-     * longer being presented.
+     * The latency dump is a rolling window of about 128 rows, and a game owns a
+     * dozen layers. Ten of those windows do not fit into a shell call: the dump
+     * arrives cut in half and the layers at the end - the ones that are drawing
+     * - are the ones that are missing.
      */
     @Test
     fun `every layer keeps only the newest rows of its dump`() {
-        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
+        val command = ShellCommands.surfaceLatencyOfNames(listOf("SurfaceView[pkg](BLAST)#0"))
         assertTrue(command.contains("tail -n 60"))
         assertFalse(command.contains("head -40"))
+    }
+
+    @Test
+    fun `no layer is asked twice`() {
+        val command = ShellCommands.surfaceLatencyOfNames(
+            listOf("SurfaceView[pkg](BLAST)#0", "SurfaceView[pkg](BLAST)#0")
+        )
+        assertEquals(1, command.split("--latency").size - 1)
+    }
+
+    @Test
+    fun `an empty list costs no round trip`() {
+        assertEquals("true", ShellCommands.surfaceLatencyOfNames(emptyList()))
+        assertEquals("true", ShellCommands.surfaceLatencyOfNames(listOf("", "  ")))
     }
 
     /**
@@ -65,8 +80,7 @@ class LayerCommandTest {
     @Test
     fun `no tool is used that a phone does not have`() {
         val commands = listOf(
-            ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile"),
-            ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile", fallback = true),
+            ShellCommands.surfaceLatencyOfNames(listOf("SurfaceView[com.pubg.krmobile/Main]#0")),
             ShellCommands.surfaceLatencyOfLayer("SurfaceView[com.pubg.krmobile/Main]#0"),
             ShellCommands.surfaceLatencyDefault(),
             ShellCommands.surfaceTimeStatsWindow(),
@@ -79,13 +93,6 @@ class LayerCommandTest {
             assertFalse(command.contains("python"))
             assertFalse(command.contains("bc "))
         }
-    }
-
-    @Test
-    fun `every layer of the app is asked, not only the newest ones`() {
-        val command = ShellCommands.surfaceLatencyOfLayers("com.pubg.krmobile")
-        assertTrue(command.contains("grep -F 'com.pubg.krmobile'"))
-        assertFalse(command.contains("tail -8"))
     }
 
     @Test

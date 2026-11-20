@@ -56,6 +56,7 @@ object Diagnostics {
             "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | head -24",
             "echo '--- who is running this ---'",
             "id 2>/dev/null",
+            "dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1",
             "echo '--- how many layers ---'",
             "dumpsys SurfaceFlinger --list 2>/dev/null | wc -l",
             "echo '--- first 20 layers ---'",
@@ -64,17 +65,19 @@ object Diagnostics {
             "dumpsys SurfaceFlinger --list 2>/dev/null | tail -10",
             "echo '--- layers of $app ---'",
             "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$app' | head -8",
-            "echo '--- latency of the first of them ---'",
-            "L=\$(dumpsys SurfaceFlinger --list 2>/dev/null | grep -m1 -F '$app'); " +
-                "echo \"layer=\$L rows=\$(dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null | wc -l)\"; " +
-                "if [ -n \"\$L\" ]; then dumpsys SurfaceFlinger --latency \"\$L\" 2>&1 | tail -6; fi",
+            "echo '--- latency asked the way the app asks it ---'",
+            "L=\$(dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 '^layerName = ' | sed 's/^layerName = //'); " +
+                "echo \"layer=[\$L] rows=\$(dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null | wc -l)\"; " +
+                "if [ -n \"\$L\" ]; then dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null | tail -4; fi",
+            "echo '--- latency asked with the list entry (this is what never worked) ---'",
+            "D=\$(dumpsys SurfaceFlinger --list 2>/dev/null | grep -m1 -F '$app'); " +
+                "echo \"descriptor rows=\$(dumpsys SurfaceFlinger --latency \"\$D\" 2>/dev/null | wc -l)\"; " +
+                "if [ -n \"\$D\" ]; then dumpsys SurfaceFlinger --latency \"\$D\" 2>/dev/null | tail -2; fi",
             "echo '--- latency of the newest layer ---'",
-            "N=\$(dumpsys SurfaceFlinger --list 2>/dev/null | tail -1); " +
-                "echo \"layer=\$N rows=\$(dumpsys SurfaceFlinger --latency \"\$N\" 2>/dev/null | wc -l)\"; " +
-                "if [ -n \"\$N\" ]; then dumpsys SurfaceFlinger --latency \"\$N\" 2>&1 | tail -6; fi",
+            "N=\$(dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep '^layerName = ' | tail -1 | sed 's/^layerName = //'); " +
+                "echo \"layer=[\$N] rows=\$(dumpsys SurfaceFlinger --latency \"\$N\" 2>/dev/null | wc -l)\"",
             "echo '--- timestats: the layer blocks ---'",
-            "dumpsys SurfaceFlinger --timestats -enable >/dev/null 2>&1; " +
-                "dumpsys SurfaceFlinger --timestats -dump 2>&1 | grep -A14 -m4 'layerName = '",
+            "dumpsys SurfaceFlinger --timestats -dump 2>&1 | grep -A14 -m4 'layerName = '",
             "echo '--- counters now ---'",
             "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
                 "grep -E 'displayRefreshRate = |renderRate = |uid = |layerName = |totalFrames = ' | head -60",

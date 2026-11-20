@@ -139,6 +139,15 @@ class FpsSampler(
     /** When the layer sweep may run again. */
     private var sweepNextAttemptAt = 0L
 
+    /**
+     * When a screen with no frames may be re-checked against the app's layers.
+     *
+     * A counter that stands still is not proof that nothing is drawing: a game
+     * owns several surfaces and SurfaceFlinger counts them one by one, so the
+     * surface the counters named can be a still one while another one draws.
+     */
+    private var idleSweepNextAt = 0L
+
     private val history = ArrayDeque<Float>()
 
     // --- gfxinfo provider state ----------------------------------------------------
@@ -156,6 +165,8 @@ class FpsSampler(
         history.clear()
         activeSource = FpsSourceKind.NONE
         measuredLayer = null
+        sweepNextAttemptAt = 0L
+        idleSweepNextAt = 0L
         _state.value = FpsState()
     }
 
@@ -319,12 +330,9 @@ class FpsSampler(
      * the app in front.
      */
     private suspend fun sampleLayersOneByOne(pkg: String): List<LayerSample> {
-        val list = hub.execOrNull(ShellCommands.surfaceList(), 3_000)?.out.orEmpty()
-        val names = list.lines().map { it.trim() }.filter { it.isNotEmpty() }
-        if (names.isEmpty()) return emptyList()
-
-        val own = names.filter { it.contains(pkg, ignoreCase = true) }
-        val candidates = if (own.isNotEmpty()) own.takeLast(6) else names.takeLast(10)
+        val list = hub.execOrNull(ShellCommands.surfaceList(), LIST_TIMEOUT_MS)?.out.orEmpty()
+        val candidates = layerNamesFor(list, pkg, ownLimit = 6, newestLimit = 6)
+        if (candidates.isEmpty()) return emptyList()
 
         // The whole sweep has a budget. A layer that hangs the shell must not
         // hold the measurement hostage, so the sweep stops when it is used up.
@@ -335,19 +343,6 @@ class FpsSampler(
 
             val dump = hub.execOrNull(ShellCommands.surfaceLatencyOfLayer(name), 900)?.out.orEmpty()
             if (dump.isNotBlank()) samples += parseLayerLatencies("@@@$name\n$dump")
-
-            // Some builds only answer to the layer name without its instance
-            // number, so that one is asked as well.
-            val base = name.substringBefore('#')
-            if (base != name && base.isNotBlank() &&
-                SystemClock.elapsedRealtime() <= deadline
-            ) {
-                val baseDump =
-                    hub.execOrNull(ShellCommands.surfaceLatencyOfLayer(base), 900)?.out.orEmpty()
-                if (baseDump.isNotBlank()) {
-                    samples += parseLayerLatencies("@@@$base\n$baseDump")
-                }
-            }
         }
         return samples
     }
@@ -405,9 +400,28 @@ class FpsSampler(
         // The exact frame times of the layer the counters picked. They are the
         // frames themselves, so they are preferred over the count as soon as
         // two dumps of them exist.
-        if (!idle) {
-            val exact = sampleExactLatency(pkg, tick.layer, targetFps)
-            if (exact != null) return exact
+        //
+        // This is asked even when the counters say nothing is drawing: a game
+        // can keep its own frame counter still - the counter of a layer that
+        // renders into a buffer queue is not always advanced - while its frames
+        // are presented. The timestamps are then the truth, and they already
+        // carry their own freshness check, so an idle screen still falls
+        // through to the display rate below.
+        val exact = sampleExactLatency(pkg, tick.layer, targetFps)
+        if (exact != null) return exact
+
+        // The counter can name a surface that is not the one drawing - a game
+        // keeps several - so a window with no frames is not proof that nothing
+        // is drawing. Before the display rate is shown, the app's own layers are
+        // asked once more, at a slow cadence so an idle screen stays quiet.
+        //
+        // This is the case that used to read "144 FPS" inside a game running at
+        // 90: its counters were still, so the display rate was published while
+        // the game was drawing all along.
+        if (idle && SystemClock.elapsedRealtime() >= idleSweepNextAt) {
+            idleSweepNextAt = SystemClock.elapsedRealtime() + IDLE_SWEEP_COOLDOWN_MS
+            val fromLayers = sampleFromLatency(pkg, targetFps, nowUptime)
+            if (fromLayers != null) return fromLayers
         }
 
         activeSource = FpsSourceKind.TIMESTATS
@@ -468,13 +482,19 @@ class FpsSampler(
         layer: String,
         targetFps: Int
     ): FpsState? {
+        // The counters print the layer name, which is exactly what `--latency`
+        // compares against. A list entry wrapped in `RequestedLayerState{...}`
+        // is not a name, so the wrapper is removed before the layer is asked.
+        val name = surfaceLayerName(layer)
+        if (name.isBlank()) return null
+
         val dump = hub.execOrNull(
-            ShellCommands.surfaceLatencyOfLayer(layer),
+            ShellCommands.surfaceLatencyOfLayer(name),
             EXACT_LATENCY_TIMEOUT_MS
         )?.out.orEmpty()
         if (dump.isBlank()) return null
 
-        val sample = parseLayerLatencies("@@@$layer\n$dump").firstOrNull() ?: return null
+        val sample = parseLayerLatencies("@@@$name\n$dump").firstOrNull() ?: return null
         if (sample.presents.size < MIN_EXACT_FRAMES) return null
 
         // The presentation times are on CLOCK_MONOTONIC. The app asks about
@@ -599,10 +619,15 @@ class FpsSampler(
         targetFps: Int,
         nowUptime: Long
     ): FpsState? {
-        // A game owns many surfaces and every one of them is asked for its latency.
-        // The command needs room, or the whole dump is lost and the app looks dead.
-        var dump = hub.execOrNull(
-            ShellCommands.surfaceLatencyOfLayers(pkg),
+        // The names are taken from the layer list here, not in the shell: a list
+        // entry is a "RequestedLayerState{name parentId=..}" descriptor and
+        // SurfaceFlinger compares the name it is asked for character for
+        // character. Handing over the descriptor asked for a layer that does not
+        // exist, and the answer was the refresh period alone.
+        val list = hub.execOrNull(ShellCommands.surfaceList(), LIST_TIMEOUT_MS)?.out.orEmpty()
+        val own = layerNamesFor(list, pkg)
+        var dump = if (own.isEmpty()) "" else hub.execOrNull(
+            ShellCommands.surfaceLatencyOfNames(own),
             LATENCY_TIMEOUT_MS
         )?.out.orEmpty()
         var samples = parseLayerLatencies(dump)
@@ -612,12 +637,15 @@ class FpsSampler(
         // the one that drew last wins.
         var fallbackDump = ""
         if (samples.isEmpty()) {
-            fallbackDump = hub.execOrNull(
-                ShellCommands.surfaceLatencyOfLayers(pkg, fallback = true),
-                LATENCY_TIMEOUT_MS
-            )?.out.orEmpty()
-            if (fallbackDump.isNotBlank()) {
-                samples = parseLayerLatencies(fallbackDump)
+            val newest = layerNamesFor(list, "", ownLimit = 0, newestLimit = 12)
+            if (newest.isNotEmpty()) {
+                fallbackDump = hub.execOrNull(
+                    ShellCommands.surfaceLatencyOfNames(newest),
+                    LATENCY_TIMEOUT_MS
+                )?.out.orEmpty()
+                if (fallbackDump.isNotBlank()) {
+                    samples = parseLayerLatencies(fallbackDump)
+                }
             }
         }
 
@@ -773,6 +801,8 @@ class FpsSampler(
         activeSource = FpsSourceKind.NONE
         measuredLayer = null
         history.clear()
+        sweepNextAttemptAt = 0L
+        idleSweepNextAt = 0L
         if (pkg != null) {
             _state.value = FpsState(
                 availability = MetricAvailability.WARMING_UP,
@@ -889,6 +919,14 @@ class FpsSampler(
         private const val SWEEP_BUDGET_MS = 3_000L
 
         /**
+         * How long the layer list may take.
+         *
+         * The list is what the names come from: `--latency` only answers to the
+         * exact layer name, and a list entry is a descriptor around it.
+         */
+        private const val LIST_TIMEOUT_MS = 3_000L
+
+        /**
          * How long the exact timestamps of one known layer may take.
          *
          * That is one small dump, not a sweep, so it has to be quick: it runs
@@ -919,5 +957,14 @@ class FpsSampler(
 
         /** How long the app waits before it sweeps the layers again. */
         private const val SWEEP_COOLDOWN_MS = 4_000L
+
+        /**
+         * How often a screen with no frames is re-checked layer by layer.
+         *
+         * The check asks every layer of the app in one round trip, so it is not
+         * free; two or three times a second would be wasted on a screen that is
+         * genuinely standing still.
+         */
+        private const val IDLE_SWEEP_COOLDOWN_MS = 3_000L
     }
 }

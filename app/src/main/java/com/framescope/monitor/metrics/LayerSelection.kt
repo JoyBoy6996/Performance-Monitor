@@ -180,6 +180,98 @@ private fun splitBlocks(dump: String): List<RawBlock> {
     return listOf(RawBlock(name = "", body = lines))
 }
 
+/**
+ * The layer name SurfaceFlinger itself answers to.
+ *
+ * `dumpsys SurfaceFlinger --list` does not print layer names. It prints
+ * `RequestedLayerState{<name> parentId=52 !handle z=6}`:
+ *
+ * ```cpp
+ * // RequestedLayerState::getDebugString()
+ * debug << "RequestedLayerState{" << name;
+ * if (parentId != UNASSIGNED_LAYER_ID) debug << " parentId=" << parentId;
+ * ...
+ * ```
+ *
+ * `--latency <layer>` compares the argument with `layer->getName()` *exactly*:
+ *
+ * ```cpp
+ * // SurfaceFlinger::dumpStats()
+ * StringAppendF(&result, "%" PRId64 "\n", mScheduler->getPacesetterVsyncPeriod().ns());
+ * traverseLegacyLayers([&](Layer* layer) {
+ *     if (layer->getName() == name.c_str()) layer->dumpFrameStats(result);
+ * });
+ * ```
+ *
+ * A name that does not match prints nothing but that first line - the refresh
+ * period - which looks like a layer with no frames. Every probe of every layer
+ * answered with a single `6944444` (1/144 s) for exactly this reason: the
+ * wrapper and the attributes were handed over as part of the name.
+ *
+ * The creation stamp inside the name (`... 11-19 19:36:02.082#750494`) is part
+ * of it and is kept. Only what SurfaceFlinger appends *after* the name is
+ * removed, because that is all `getDebugString()` adds.
+ */
+fun surfaceLayerName(listing: String): String {
+    var name = listing.trim()
+    if (name.startsWith(REQUESTED_LAYER_STATE)) {
+        name = name.removePrefix(REQUESTED_LAYER_STATE)
+        if (name.endsWith("}")) name = name.dropLast(1)
+    }
+    // getDebugString() appends these after the name, never before it.
+    while (true) {
+        val token = name.substringAfterLast(' ')
+        if (token == "!handle") {
+            name = name.substringBeforeLast(' ', "")
+            continue
+        }
+        if (token.contains('=') && token.substringBefore('=').lowercase() in LISTING_ATTRIBUTES) {
+            name = name.substringBeforeLast(' ', "")
+            continue
+        }
+        break
+    }
+    return name.trim()
+}
+
+/**
+ * The layer names worth asking for one app, in one round trip.
+ *
+ * The app's own layers come first. A game can draw into a surface that does not
+ * carry its package name, so the newest layers of the list are kept behind them
+ * as a fallback. `ActivityRecord{...}` entries are states of the window manager,
+ * not buffers, and SurfaceFlinger has no frame times for them.
+ */
+fun layerNamesFor(
+    layerList: String,
+    foregroundPackage: String,
+    ownLimit: Int = 8,
+    newestLimit: Int = 4
+): List<String> {
+    val names = layerList.lines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .map { surfaceLayerName(it) }
+        .filter { it.isNotBlank() }
+        .filterNot { it.startsWith("ActivityRecord") }
+        .distinct()
+    if (names.isEmpty()) return emptyList()
+
+    val pkg = foregroundPackage.trim()
+    val own = if (pkg.isEmpty()) {
+        emptyList()
+    } else {
+        names.filter { it.contains(pkg, ignoreCase = true) }
+    }
+    return (own.take(ownLimit) + names.takeLast(newestLimit)).distinct()
+}
+
+private const val REQUESTED_LAYER_STATE = "RequestedLayerState{"
+
+/** The fields `getDebugString()` appends after the layer name. */
+private val LISTING_ATTRIBUTES =
+    setOf("parentid", "relativeparentid", "mirrorid", "z", "layerstack", "id", "hsr")
+
 /** Orders layers by how recently they drew, keeping the rest as fallbacks. */
 fun pickMostRecent(samples: List<LayerSample>): List<LayerSample> {
     if (samples.isEmpty()) return emptyList()

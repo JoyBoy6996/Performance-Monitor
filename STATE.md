@@ -107,6 +107,49 @@ frame rate stayed empty while every other app was measured.
     it prints the *last* rows of `--latency` with their row count instead of
     the first ones. That is the evidence needed to tell whether this phone
     keeps the frame timestamps at all.
+17. **Every `--latency` call asked for a layer that does not exist.** This was
+    the bug behind "every layer answers with one row", and it is proven in
+    AOSP `android16-release`, not guessed:
+
+    ```cpp
+    // SurfaceFlinger::dumpStats()
+    StringAppendF(&result, "%" PRId64 "\n", mScheduler->getPacesetterVsyncPeriod().ns());
+    if (args.size() < 2) return;
+
+    const auto name = String8(args[1]);
+    traverseLegacyLayers([&](Layer* layer) {
+        if (layer->getName() == name.c_str()) {   // exact, character for character
+            layer->dumpFrameStats(result);
+        }
+    });
+    ```
+
+    A name that does not match prints nothing but that first line - the
+    pacesetter vsync period - and no frames. On a 144 Hz phone that line is
+    `6944444`, which is exactly what every probe of every layer answered with,
+    including layers that were visibly animating. The name was wrong because
+    `--list` does not print names:
+
+    ```cpp
+    // RequestedLayerState::getDebugString()
+    debug << "RequestedLayerState{" << name;
+    if (parentId != UNASSIGNED_LAYER_ID) debug << " parentId=" << parentId;
+    if (!handleAlive) debug << " !handle";
+    if (z != 0) debug << " z=" << z;
+    ...
+    debug << "}";
+    ```
+
+    The descriptor was handed over whole, so the wrapper and the attributes
+    became part of the name. They are now removed (`surfaceLayerName`, tested
+    against the exact lines the phone printed) and the creation stamp inside
+    the name is kept, because it is part of it.
+18. A window in which the counters stand still is no longer published as the
+    display rate straight away. A game owns several surfaces, so the counters
+    can name a still one while another draws; the app's own layers are asked
+    for their timestamps first (every three seconds, so an idle screen stays
+    quiet), and only then is the display rate shown. This is the case that
+    used to read 144 inside a game running at 90.
 
 ## Known limitation
 `jankyFrames` per layer is counted from the frame timeline, and a game does not
@@ -121,7 +164,10 @@ answer two things:
 - The Monitor tab, "Frame source" panel, after a game was in front.
 - The Monitor tab, "Raw probe" button, which prints what SurfaceFlinger answers.
   It now asks for `--timestats -enable` and prints the first three `layerName`
-  blocks, which is the text the parser reads.
+  blocks, which is the text the parser reads. It also prints the row count of
+  `--latency` for the counters' layer name (about 127 rows when the name is
+  right, 1 row when it is not) next to the row count for the `--list`
+  descriptor, so the wrong way and the right way sit side by side in one text.
 
 ## Rules of this repo
 - `git pull --rebase origin fix/fps-overlay` before a commit and before a push.

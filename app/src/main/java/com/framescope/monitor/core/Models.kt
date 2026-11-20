@@ -190,7 +190,13 @@ data class SessionRecord(
     /** Seconds in which the device reported thermal mitigation. */
     val throttledSeconds: Int = 0,
     /** Thermal mitigation level per second, for the chart. */
-    val thermalStatusSeries: List<Float> = emptyList()
+    val thermalStatusSeries: List<Float> = emptyList(),
+    /** Mean change between consecutive frame times, in milliseconds. */
+    val jitterMs: Float? = null,
+    /** Spread of the per-second frame rate, in fps². */
+    val fpsVariance: Float? = null,
+    /** Mean battery power draw during the run, in watts. */
+    val avgPowerW: Float? = null
 )
 
 /**

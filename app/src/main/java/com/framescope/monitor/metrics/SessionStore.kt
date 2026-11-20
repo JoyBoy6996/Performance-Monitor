@@ -159,6 +159,9 @@ class SessionStore(context: Context) {
         put("peakThermalStatus", record.peakThermalStatus ?: JSONObject.NULL)
         put("throttledSeconds", record.throttledSeconds)
         put("thermalStatusSeries", JSONArray(record.thermalStatusSeries.map { it.toDouble() }))
+        put("jitterMs", record.jitterMs?.toDouble() ?: JSONObject.NULL)
+        put("fpsVariance", record.fpsVariance?.toDouble() ?: JSONObject.NULL)
+        put("avgPowerW", record.avgPowerW?.toDouble() ?: JSONObject.NULL)
     }.toString()
 
     fun recordFromJson(text: String): SessionRecord = fromJson(text)
@@ -194,7 +197,10 @@ class SessionStore(context: Context) {
             segments = o.optJSONArray("segments").toSegments(),
             peakThermalStatus = if (o.isNull("peakThermalStatus")) null else o.optInt("peakThermalStatus"),
             throttledSeconds = o.optInt("throttledSeconds"),
-            thermalStatusSeries = o.optJSONArray("thermalStatusSeries").toFloatList()
+            thermalStatusSeries = o.optJSONArray("thermalStatusSeries").toFloatList(),
+            jitterMs = if (o.isNull("jitterMs")) null else o.optDouble("jitterMs").toFloat(),
+            fpsVariance = if (o.isNull("fpsVariance")) null else o.optDouble("fpsVariance").toFloat(),
+            avgPowerW = if (o.isNull("avgPowerW")) null else o.optDouble("avgPowerW").toFloat()
         )
     }
 
@@ -284,7 +290,10 @@ class SessionStore(context: Context) {
                     battery_series TEXT,
                     peak_thermal_status INTEGER,
                     throttled_seconds INTEGER DEFAULT 0,
-                    thermal_status_series TEXT
+                    thermal_status_series TEXT,
+                    jitter_ms REAL,
+                    fps_variance REAL,
+                    avg_power_w REAL
                 )
                 """.trimIndent()
             )
@@ -302,7 +311,8 @@ class SessionStore(context: Context) {
                     thermal_max_c REAL,
                     battery_level INTEGER,
                     ram_percent INTEGER,
-                    thermal_status INTEGER
+                    thermal_status INTEGER,
+                    power_watts REAL
                 )
                 """.trimIndent()
             )
@@ -315,6 +325,12 @@ class SessionStore(context: Context) {
                 addColumnIfMissing(db, TABLE_RECORDS, "throttled_seconds", "INTEGER DEFAULT 0")
                 addColumnIfMissing(db, TABLE_RECORDS, "thermal_status_series", "TEXT")
                 addColumnIfMissing(db, TABLE_SAMPLES, "thermal_status", "INTEGER")
+            }
+            if (oldVersion < 3) {
+                addColumnIfMissing(db, TABLE_RECORDS, "jitter_ms", "REAL")
+                addColumnIfMissing(db, TABLE_RECORDS, "fps_variance", "REAL")
+                addColumnIfMissing(db, TABLE_RECORDS, "avg_power_w", "REAL")
+                addColumnIfMissing(db, TABLE_SAMPLES, "power_watts", "REAL")
             }
         }
 
@@ -354,6 +370,7 @@ class SessionStore(context: Context) {
                         put("battery_level", sample.batteryLevel)
                         put("ram_percent", sample.ramPercent)
                         put("thermal_status", sample.thermalStatus)
+                        put("power_watts", sample.powerWatts)
                     }
                     db.insert(TABLE_SAMPLES, null, cv)
                 }
@@ -392,6 +409,9 @@ class SessionStore(context: Context) {
                 put("peak_thermal_status", record.peakThermalStatus)
                 put("throttled_seconds", record.throttledSeconds)
                 put("thermal_status_series", JSONArray(record.thermalStatusSeries.map { it.toDouble() }).toString())
+                put("jitter_ms", record.jitterMs)
+                put("fps_variance", record.fpsVariance)
+                put("avg_power_w", record.avgPowerW)
             }
             writableDatabase.insertWithOnConflict(
                 TABLE_RECORDS,
@@ -413,6 +433,7 @@ class SessionStore(context: Context) {
                 put("battery_level", sample.batteryLevel)
                 put("ram_percent", sample.ramPercent)
                 put("thermal_status", sample.thermalStatus)
+                put("power_watts", sample.powerWatts)
             }
             writableDatabase.insert(TABLE_SAMPLES, null, cv)
         }
@@ -436,6 +457,9 @@ class SessionStore(context: Context) {
                     val throttledIdx = c.getColumnIndex("throttled_seconds")
                     val statusSeriesIdx = c.getColumnIndex("thermal_status_series")
                     val gapIdx = c.getColumnIndex("gap_seconds")
+                    val jitterIdx = c.getColumnIndex("jitter_ms")
+                    val varianceIdx = c.getColumnIndex("fps_variance")
+                    val powerIdx = c.getColumnIndex("avg_power_w")
                     list.add(
                         SessionRecord(
                             id = c.getString(c.getColumnIndexOrThrow("id")),
@@ -469,7 +493,10 @@ class SessionStore(context: Context) {
                             throttledSeconds = if (throttledIdx >= 0) c.getInt(throttledIdx) else 0,
                             thermalStatusSeries = if (statusSeriesIdx >= 0) {
                                 jsonToFloatList(c.getString(statusSeriesIdx))
-                            } else emptyList()
+                            } else emptyList(),
+                            jitterMs = if (jitterIdx >= 0 && !c.isNull(jitterIdx)) c.getFloat(jitterIdx) else null,
+                            fpsVariance = if (varianceIdx >= 0 && !c.isNull(varianceIdx)) c.getFloat(varianceIdx) else null,
+                            avgPowerW = if (powerIdx >= 0 && !c.isNull(powerIdx)) c.getFloat(powerIdx) else null
                         )
                     )
                 }
@@ -499,7 +526,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 2
+            private const val DB_VERSION = 3
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

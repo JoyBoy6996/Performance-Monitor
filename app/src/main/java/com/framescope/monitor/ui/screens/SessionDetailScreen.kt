@@ -155,6 +155,35 @@ fun SessionDetailScreen(
                         MaterialTheme.colorScheme.onSurface
                     }
                 )
+                MetricLine(
+                    label = "FPS range",
+                    value = "${String.format("%.0f", session.minFps)}–${String.format("%.0f", session.maxFps)} fps",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val jitter = session.jitterMs ?: frameTimeJitterMs(session.frameTimeSeries)
+                jitter?.let {
+                    MetricLine(
+                        label = "Jitter",
+                        value = "${String.format("%.2f", it)} ms",
+                        accent = if (it > 3f) MaterialTheme.status.warn
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                val variance = session.fpsVariance ?: fpsVariance(session.fpsSeries)
+                variance?.let {
+                    MetricLine(
+                        label = "FPS variance",
+                        value = String.format("%.2f", it),
+                        accent = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                session.avgPowerW?.let {
+                    MetricLine(
+                        label = "Average power",
+                        value = "${String.format("%.2f", it)} W",
+                        accent = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 val peakTemp = session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)
                 peakTemp?.let {
                     MetricLine(
@@ -312,6 +341,30 @@ private fun List<Float>.sanitizeTemps(): List<Float> {
             value
         } else lastReal
     }
+}
+
+/** Mean change between consecutive frame times, in milliseconds. */
+private fun frameTimeJitterMs(series: List<Float>): Float? {
+    val valid = series.filter { it > 0f }
+    if (valid.size < 2) return null
+    var total = 0.0
+    for (i in 1 until valid.size) {
+        total += kotlin.math.abs(valid[i] - valid[i - 1]).toDouble()
+    }
+    return (total / (valid.size - 1)).toFloat()
+}
+
+/** Spread of the per-second frame rate, in fps². Older sessions compute it here. */
+private fun fpsVariance(series: List<Float>): Float? {
+    val valid = series.filter { it > 0f }
+    if (valid.size < 2) return null
+    val mean = valid.average()
+    var total = 0.0
+    for (value in valid) {
+        val delta = value - mean
+        total += delta * delta
+    }
+    return (total / valid.size).toFloat()
 }
 
 /**

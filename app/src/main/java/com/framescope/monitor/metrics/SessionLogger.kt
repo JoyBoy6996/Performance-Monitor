@@ -24,7 +24,9 @@ data class SessionSample(
     val thermalMaxC: Float,
     val batteryLevel: Int,
     val ramPercent: Int,
-    val thermalStatus: Int? = null
+    val thermalStatus: Int? = null,
+    /** Battery power draw at this poll, in watts, when the device reports it. */
+    val powerWatts: Float? = null
 )
 
 /** Aligned per-second telemetry data bucket. */
@@ -34,7 +36,8 @@ data class SecondBucket(
     val cpuPercent: Float,
     val tempC: Float,
     val batteryLevel: Float,
-    val thermalStatus: Int? = null
+    val thermalStatus: Int? = null,
+    val powerWatts: Float? = null
 )
 
 /**
@@ -76,6 +79,7 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketFrameTime = ArrayList<Float>()
     private val bucketBattery = ArrayList<Float>()
     private val bucketThermalStatus = ArrayList<Int>()
+    private val bucketPower = ArrayList<Float>()
 
     private var lastBucketSec = -1L
     // The privileged poll is slower than the one-second buckets, so a level stays
@@ -123,6 +127,7 @@ class SessionLogger(private val store: SessionStore) {
         bucketFrameTime.clear()
         bucketBattery.clear()
         bucketThermalStatus.clear()
+        bucketPower.clear()
 
         lastBucketSec = startedAt / 1000
         lastThermalStatus = null
@@ -164,6 +169,7 @@ class SessionLogger(private val store: SessionStore) {
         val temp = metrics.deviceTemperatureC() ?: 0f
         val battery = metrics.batteryLevel ?: 0
         val ram = metrics.ramPercent ?: 0
+        val powerWatts = metrics.powerWatts?.takeIf { it >= 0f }
         val thermalStatus = metrics.thermalStatus?.takeIf { it in 0..6 }
         if (thermalStatus != null) lastThermalStatus = thermalStatus
         val bucketStatus = thermalStatus ?: lastThermalStatus
@@ -179,7 +185,8 @@ class SessionLogger(private val store: SessionStore) {
                 thermalMaxC = temp,
                 batteryLevel = battery,
                 ramPercent = ram,
-                thermalStatus = thermalStatus
+                thermalStatus = thermalStatus,
+                powerWatts = powerWatts
             )
         )
         observedSamples++
@@ -229,6 +236,7 @@ class SessionLogger(private val store: SessionStore) {
         if (temp > 0f) bucketTemp.add(temp)
         if (battery > 0) bucketBattery.add(battery.toFloat())
         if (bucketStatus != null) bucketThermalStatus.add(bucketStatus)
+        if (powerWatts != null) bucketPower.add(powerWatts)
 
         if (nowSec > lastBucketSec) {
             flushBucket()
@@ -289,6 +297,7 @@ class SessionLogger(private val store: SessionStore) {
         // One level per second: the worst state in that second, so a brief spike
         // is not averaged away into "none".
         val thermalStatus = bucketThermalStatus.maxOrNull()
+        val power = if (bucketPower.isNotEmpty()) bucketPower.average().toFloat() else null
 
         secondBuckets.add(
             SecondBucket(
@@ -297,7 +306,8 @@ class SessionLogger(private val store: SessionStore) {
                 cpuPercent = cpu,
                 tempC = temp,
                 batteryLevel = battery,
-                thermalStatus = thermalStatus
+                thermalStatus = thermalStatus,
+                powerWatts = power
             )
         )
 
@@ -307,6 +317,7 @@ class SessionLogger(private val store: SessionStore) {
         bucketTemp.clear()
         bucketBattery.clear()
         bucketThermalStatus.clear()
+        bucketPower.clear()
     }
 
     @Synchronized
@@ -401,6 +412,23 @@ class SessionLogger(private val store: SessionStore) {
             secondBuckets.map { (it.thermalStatus ?: 0).toFloat() }
         } else emptyList()
 
+        // Jitter is the mean change between consecutive frame times. A steady 60 fps
+        // and a stuttering 60 fps have the same average but very different jitter.
+        val frameTimes = samples.map { it.frameTimeMs }.filter { it > 0f }
+        val jitter = if (frameTimes.size >= 2) {
+            (1 until frameTimes.size)
+                .map { kotlin.math.abs(frameTimes[it] - frameTimes[it - 1]) }
+                .average().toFloat()
+        } else null
+        // Variance describes how far the per-second rate wandered from its mean.
+        val steadyFps = secondBuckets.map { it.fps }.filter { it > 0f }
+        val variance = if (steadyFps.size >= 2) {
+            val mean = steadyFps.average()
+            steadyFps.map { (it - mean) * (it - mean) }.average().toFloat()
+        } else null
+        val avgPower = secondBuckets.mapNotNull { it.powerWatts }
+            .takeIf { it.isNotEmpty() }?.average()?.toFloat()
+
         val record = SessionRecord(
             id = currentSessionId,
             appPackage = currentPackage,
@@ -430,7 +458,10 @@ class SessionLogger(private val store: SessionStore) {
             gapSeconds = (gapMs / 1000L).toInt(),
             peakThermalStatus = peakThermalStatus,
             throttledSeconds = throttledSeconds,
-            thermalStatusSeries = thermalStatusSeries
+            thermalStatusSeries = thermalStatusSeries,
+            jitterMs = jitter,
+            fpsVariance = variance,
+            avgPowerW = avgPower
         )
 
         store.add(record)

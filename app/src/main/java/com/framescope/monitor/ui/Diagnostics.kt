@@ -51,11 +51,12 @@ object Diagnostics {
         val pkg = (packageName ?: "").replace("'", "").replace("\"", "")
         val app = if (pkg.isBlank()) "" else pkg
         val layer = (measuredLayer ?: "").replace("'", "")
+        val atMs = SystemClock.uptimeMillis()
         return listOf(
             // The package and uptime of the capture itself. The button and the
             // counters below can look right while the app underneath changed,
             // so this line says exactly which app the raw probe belongs to.
-            "echo 'captured_from=$app at=${SystemClock.uptimeMillis()}'",
+            "echo 'captured_from=$app at=$atMs'",
             // The last five polled readings. Each line: `<uptime-ms> <FPS>`.
             // The newest is last. These are what the overlay showed, including
             // polls that said 0 or read as the panel's refresh rate, so the
@@ -122,7 +123,10 @@ object Diagnostics {
             "echo '--- gfxinfo of $app ---'",
             "if [ -n '$app' ]; then dumpsys gfxinfo '$app' framestats 2>&1 | head -6; fi",
             "echo '--- the window in front ---'",
-            "dumpsys window 2>/dev/null | grep -m2 -E 'mCurrentFocus|mFocusedApp'"
+            "dumpsys window 2>/dev/null | grep -m2 -E 'mCurrentFocus|mFocusedApp'",
+            // Repeat the marker at the end. The on-screen block keeps only its
+            // first lines, so this copy is the one that is always visible.
+            "echo 'captured_from=$app at=$atMs'"
         ).joinToString("; ")
     }
 

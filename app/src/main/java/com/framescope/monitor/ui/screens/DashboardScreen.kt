@@ -690,6 +690,16 @@ private fun DiagnosticsRow(container: AppContainer) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(Space.sm))
+            // The same marker is printed by the probe, but it is easy to miss in
+            // a long terminal block. Showing it here means the capture is always
+            // identifiable by eye, even before the text is copied anywhere.
+            Text(
+                text = "captured_from=${lastMeasured ?: "none"} at=" +
+                    (container.engine.debugFrameLog().lastOrNull()?.first?.toString() ?: "0"),
+                style = MonoInline.copy(fontSize = 10.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(Space.xs))
             TerminalBlock(text = probeOutput, maxLines = 40)
         }
     }

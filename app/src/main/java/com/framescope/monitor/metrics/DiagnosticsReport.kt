@@ -2,6 +2,7 @@ package com.framescope.monitor.metrics
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import com.framescope.monitor.core.AppSettings
 import com.framescope.monitor.core.FpsSourceKind
 import com.framescope.monitor.core.SystemMetric
@@ -30,6 +31,9 @@ object DiagnosticsReport {
 
         sb.appendLine("=== FrameScope diagnostics ===")
         sb.appendLine("generated: ${java.util.Date()}")
+        sb.appendLine(
+            "captured_from=${engine.lastMeasuredPackage.value ?: "(none)"} at=${SystemClock.uptimeMillis()}"
+        )
 
         // --- The device -----------------------------------------------------------
         sb.appendLine()

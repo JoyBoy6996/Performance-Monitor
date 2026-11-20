@@ -32,7 +32,17 @@ data class FpsState(
     /** The frame rate that five percent of the frames were slower than. */
     val low5PercentFps: Float? = null,
     /** The app the reading belongs to. */
-    val appPackage: String? = null
+    val appPackage: String? = null,
+    /**
+     * The rate the game is actually presenting at, confirmed over several polls.
+     *
+     * This is observed from the frames themselves. It is not the display rate and
+     * not the user's target: a phone that heats up and drops 120 to 90 is reported
+     * as 90, and a later in-game change back to 120 is picked up again.
+     */
+    val detectedCapFps: Int? = null,
+    /** Why the cap changed: "heat" when thermal mitigation was active, else "measured". */
+    val capCause: String? = null
 )
 
 /** The provider a frame rate reading came from. */
@@ -204,7 +214,25 @@ data class SessionRecord(
     /** Spread of the per-second frame rate, in fps². */
     val fpsVariance: Float? = null,
     /** Mean battery power draw during the run, in watts. */
-    val avgPowerW: Float? = null
+    val avgPowerW: Float? = null,
+    /** The observed frame-rate cap per second; zero means no confirmed cap yet. */
+    val capSeries: List<Float> = emptyList(),
+    /** Every confirmed change of the game's frame-rate cap. */
+    val capChanges: List<CapChange> = emptyList(),
+    /** Seconds in which the cap was lowered while thermal mitigation was active. */
+    val thermalCapSeconds: Int = 0
+)
+
+/** A confirmed change of the rate the game was presenting at. */
+data class CapChange(
+    /** Seconds from the start of the run. */
+    val second: Int,
+    val fromFps: Int?,
+    val toFps: Int,
+    /** Android's thermal level at that moment, when the device reported one. */
+    val thermalStatus: Int? = null,
+    /** "heat" when mitigation was active and the rate went down, else "measured". */
+    val cause: String = "measured"
 )
 
 /**

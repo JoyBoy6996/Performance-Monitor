@@ -149,7 +149,10 @@ class MetricsEngine(
                     // and a sample cancelled halfway through never reaches the
                     // source that would have answered.
                     kotlinx.coroutines.withTimeoutOrNull(SAMPLE_TIMEOUT_MS) {
-                        fpsSampler.sample(settings.fpsThreshold.value)
+                        fpsSampler.sample(
+                            targetFps = settings.fpsThreshold.value,
+                            thermalStatus = _system.value.thermalStatus
+                        )
                     } ?: run {
                         _diagnostic.value = "Frame sampler timed out"
                         null

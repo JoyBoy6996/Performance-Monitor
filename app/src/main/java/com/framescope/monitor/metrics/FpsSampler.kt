@@ -5,6 +5,7 @@ import android.os.SystemClock
 import com.framescope.monitor.core.FpsSourceKind
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.MetricAvailability
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
@@ -85,6 +86,13 @@ class FpsSampler(
     @Volatile
     var targetReason: String = ""
         private set
+
+    /** The thermal level of the latest poll, used only to label a cap as heat-related. */
+    @Volatile
+    private var currentThermalStatus: Int? = null
+
+    /** Tracks the rate the game actually presents at, independent of the user's target. */
+    private val capTracker = GameCapTracker()
 
     private val _reports = MutableStateFlow<Map<String, String>>(emptyMap())
     val reports: StateFlow<Map<String, String>> = _reports.asStateFlow()
@@ -229,6 +237,8 @@ class FpsSampler(
         globalHistory.clear()
         globalWindowPending = false
         globalCounterUnavailable = false
+        currentThermalStatus = null
+        capTracker.reset()
         _state.value = FpsState()
     }
 
@@ -259,7 +269,8 @@ class FpsSampler(
      *
      * @param targetFps the refresh rate the frame budget is derived from
      */
-    suspend fun sample(targetFps: Int = 60): FpsState {
+    suspend fun sample(targetFps: Int = 60, thermalStatus: Int? = null): FpsState {
+        currentThermalStatus = thermalStatus?.takeIf { it in 0..6 }
         val nowUptime = SystemClock.uptimeNanos()
         detector.context = context
         val nowMs = SystemClock.elapsedRealtime()
@@ -755,10 +766,13 @@ class FpsSampler(
      */
     private fun settleToGameCap(fps: Float, displayHz: Float?): Float {
         val ceiling = displayHz?.takeIf { it > 0f } ?: return fps
-        val caps = floatArrayOf(
-            30f, 45f, 60f, 90f, 120f, 144f, 165f,
-            ceiling, ceiling / 2f, ceiling * 0.6f, ceiling * 0.8f
-        )
+        // Only real game rates belong here. Fractional panel multipliers such as
+        // 0.8 × 144 = 115.2 used to pull a genuine 120 down to 115.2 and a 90 down
+        // to 86.4 on a 144 Hz screen, which was a measurement error, not a cap.
+        val caps = buildList {
+            addAll(listOf(30f, 45f, 60f, 72f, 90f, 120f, 144f, 165f))
+            add(ceiling)
+        }
             .filter { it <= ceiling * 1.02f }
             .distinct()
             .sortedDescending()
@@ -1238,6 +1252,9 @@ class FpsSampler(
         latencyCounter.reset()
         gfxCounter.reset()
         resetSceneCounters()
+        // A cap belongs to the app that was measured. A different app must not
+        // inherit the old one's 90 or 120 reading.
+        capTracker.reset()
         // The counters are cumulative per layer, so a new app starts a new
         // baseline instead of being credited with the previous app's frames.
         counters.reset()
@@ -1288,6 +1305,10 @@ class FpsSampler(
         debugFrameLog.addLast(SystemClock.uptimeMillis() to fps)
         while (debugFrameLog.size > 5) debugFrameLog.removeFirst()
 
+        // The cap is confirmed from several real readings, so a single slow poll
+        // cannot turn 120 into a "cap" of 60. Thermal level only labels the change.
+        val cap = capTracker.update(fps, SystemClock.elapsedRealtime(), currentThermalStatus, refreshRateHz())
+
         // The last five readings are also written to a file so they survive
         // the game closing: the user opens FrameScope, runs the raw probe,
         // and reads the file or the probe text to compare the poll that said
@@ -1314,7 +1335,9 @@ class FpsSampler(
             sourceKind = kind,
             low1PercentFps = low1PercentFps,
             low5PercentFps = low5PercentFps,
-            appPackage = appPackage
+            appPackage = appPackage,
+            detectedCapFps = cap?.fps,
+            capCause = cap?.cause
         )
     }
 
@@ -1360,7 +1383,9 @@ class FpsSampler(
             sourceKind = kind,
             low1PercentFps = if (keep) last.low1PercentFps else null,
             low5PercentFps = if (keep) last.low5PercentFps else null,
-            appPackage = if (keep) last.appPackage else null
+            appPackage = if (keep) last.appPackage else null,
+            detectedCapFps = if (keep) last.detectedCapFps else null,
+            capCause = if (keep) last.capCause else null
         )
     }
 
@@ -1507,4 +1532,141 @@ class FpsSampler(
          */
         private const val IDLE_SWEEP_COOLDOWN_MS = 3_000L
     }
+}
+
+/** One confirmed rate the game is presenting at, and why it is labelled that way. */
+private data class CapReading(val fps: Int, val cause: String)
+
+/**
+ * Finds the rate the game is really capped at from the frames it presents.
+ *
+ * The user's target and the panel's refresh rate are only ceilings; a hot phone can
+ * present 90 on a 120 Hz screen, and the player can change the in-game setting from
+ * 90 back to 120. Only a stretch of similar readings becomes a cap, so one slow poll
+ * is never mistaken for a change. A new, different stretch is confirmed within a few
+ * polls, which is what lets an upward change be caught instead of staying on 90.
+ */
+private class GameCapTracker {
+    private val recent = ArrayDeque<Pair<Long, Float>>()
+    private var cap: Int? = null
+    private var cause: String? = null
+    private var pending: Int? = null
+    private var pendingCount = 0
+    private var highest: Int? = null
+
+    fun reset() {
+        recent.clear()
+        cap = null
+        cause = null
+        pending = null
+        pendingCount = 0
+        highest = null
+    }
+
+    fun update(
+        fps: Float,
+        nowMs: Long,
+        thermalStatus: Int?,
+        ceilingHz: Float?
+    ): CapReading? {
+        val reading = fps.finiteOrNull()?.takeIf { it > 0f } ?: return current()
+        recent.addLast(nowMs to reading)
+        while (recent.size > 14 || (recent.size > 1 && nowMs - recent.first().first > 5_000L)) {
+            recent.removeFirst()
+        }
+
+        // A long window is right for a noisy average, but it makes a genuine
+        // change wait for the median to turn. A tight run of new readings is a
+        // stronger signal: three polls lock a new higher rate, two lock a drop
+        // while the phone is in thermal mitigation. This is what catches the
+        // player changing 90 back to 120 in-game instead of staying on 90.
+        val previous = cap
+        if (previous != null && recent.size >= 3) {
+            val tail = recent.map { it.second }.takeLast(3)
+            val spread = tail.max() - tail.min()
+            val shifted = if (thermalStatus != null && thermalStatus!! > 0) {
+                tail.all { it < previous * 0.88f }
+            } else {
+                tail.all { it > previous * 1.12f }
+            }
+            val enough = if (thermalStatus != null && thermalStatus!! > 0) 2 else 3
+            val tailMedian = tail.sorted()[1]
+            if (shifted && spread <= tailMedian * 0.12f && recent.size >= enough) {
+                val fast = snap(tailMedian, ceilingHz)
+                val wentDown = fast < previous
+                if (fast != previous) {
+                    cap = fast
+                    cause = if (wentDown && (thermalStatus ?: 0) > 0) "heat" else "measured"
+                    if (highest == null || fast > highest!!) highest = fast
+                    pending = null
+                    pendingCount = 0
+                    return current()
+                }
+            }
+        }
+
+        if (recent.size < 4) return current()
+
+        val sorted = recent.map { it.second }.sorted()
+        val median = sorted[sorted.size / 2]
+        // A cap is a plateau. Wildly different rates in the same window are a
+        // scene change or stutter, not proof of a new cap.
+        val steady = sorted.count { kotlin.math.abs(it - median) <= median * 0.12f }
+        if (steady < (sorted.size + 1) / 2) return current()
+
+        val candidate = snap(median, ceilingHz)
+        if (current() == null) {
+            // The first reading has nothing to compare against. Even on a warm
+            // phone it is only the rate we saw, not proof of a heat downshift.
+            cap = candidate
+            cause = "measured"
+            highest = candidate
+            return current()
+        }
+        if (candidate == cap) {
+            // A heat label is only true while mitigation is active. Once it clears,
+            // the same plateau is just the rate the game is presenting at now.
+            if (cause == "heat" && (thermalStatus ?: 0) == 0) cause = "measured"
+            pending = null
+            pendingCount = 0
+            return current()
+        }
+
+        if (pending != candidate) {
+            pending = candidate
+            pendingCount = 1
+        } else {
+            pendingCount++
+        }
+        val currentCap = previous ?: return current()
+        val droppingInHeat = candidate < currentCap && (thermalStatus ?: 0) > 0
+        val needed = if (droppingInHeat) 2 else 3
+        if (pendingCount < needed) return current()
+
+        cap = candidate
+        cause = if (droppingInHeat || ((thermalStatus ?: 0) > 0 && highest != null && candidate < highest!!)) {
+            "heat"
+        } else {
+            "measured"
+        }
+        if (highest == null || candidate > highest!!) highest = candidate
+        pending = null
+        pendingCount = 0
+        return current()
+    }
+
+    /** Snaps to a real game rate when the reading is close to one; else the median itself. */
+    private fun snap(median: Float, ceilingHz: Float?): Int {
+        val ceiling = ceilingHz?.takeIf { it > 0f }?.let { kotlin.math.round(it).toInt() }
+        val candidates = buildList {
+            addAll(listOf(30, 45, 60, 72, 80, 90, 100, 120, 144, 165))
+            ceiling?.let { add(it) }
+            ceiling?.let { add(it / 2) }
+        }.filter { it > 0 }.distinct().sorted()
+        val near = candidates.minByOrNull { kotlin.math.abs(it - median) }
+        if (near != null && kotlin.math.abs(near - median) <= maxOf(4f, median * 0.06f)) return near
+        return kotlin.math.round(median).toInt().coerceAtLeast(1)
+    }
+
+    private fun current(): CapReading? = cap?.let { CapReading(it, cause ?: "measured") }
 }

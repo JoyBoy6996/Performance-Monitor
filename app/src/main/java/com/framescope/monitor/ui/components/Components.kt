@@ -68,6 +68,7 @@ import com.framescope.monitor.ui.theme.MonoHero
 import com.framescope.monitor.ui.theme.MonoInline
 import com.framescope.monitor.ui.theme.MonoValue
 import com.framescope.monitor.core.MetricAvailability
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.ui.theme.SectionLabel
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
@@ -323,13 +324,18 @@ fun Sparkline(
     target: Float? = null,
     showTarget: Boolean = true,
     trackColor: Color = MaterialTheme.status.track,
-    gridColor: Color = MaterialTheme.status.grid
+    gridColor: Color = MaterialTheme.status.grid,
+    /** A second, step-like line: the cap the game was actually presenting at. */
+    reference: List<Float>? = null,
+    referenceColor: Color = Color(0x99FFC857)
 ) {
     Canvas(modifier = modifier) {
         if (values.size < 2) return@Canvas
+        val refValues = reference?.mapNotNull { it.finiteOrNull()?.takeIf { v -> v > 0f } }.orEmpty()
         val ceiling = maxOf(
             target ?: 0f,
-            (values.maxOrNull() ?: 1f) * 1.15f
+            (values.maxOrNull() ?: 1f) * 1.15f,
+            (refValues.maxOrNull() ?: 1f) * 1.15f
         ).coerceAtLeast(1f)
         val step = size.width / (values.size - 1)
         val points = values.mapIndexed { index, value ->
@@ -349,6 +355,25 @@ fun Sparkline(
                 end = Offset(size.width, ty),
                 strokeWidth = 1.dp.toPx()
             )
+        }
+
+        // The measured cap is a step line, not a smoothed curve: a change from
+        // 90 to 120 is a decision, not a gradual movement of the average.
+        if (refValues.size >= 2) {
+            val refPoints = reference?.mapIndexedNotNull { index, value ->
+                val valid = value.finiteOrNull()?.takeIf { it > 0f } ?: return@mapIndexedNotNull null
+                val x = index * step
+                val y = size.height - (valid / ceiling).coerceIn(0f, 1f) * size.height
+                Offset(x, y)
+            }.orEmpty()
+            for (i in 1 until refPoints.size) {
+                drawLine(
+                    color = referenceColor,
+                    start = refPoints[i - 1],
+                    end = refPoints[i],
+                    strokeWidth = 2.dp.toPx()
+                )
+            }
         }
 
         drawPath(

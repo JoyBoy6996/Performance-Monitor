@@ -55,6 +55,21 @@ private fun fmt(value: Float?, decimals: Int, unit: String = ""): String {
 private fun List<Float>.averageOrNull(): Float? =
     if (isEmpty()) null else average().toFloat().finiteOrNull()
 
+/** Short legend for the cap line, using only changes the sampler actually confirmed. */
+private fun capLegend(session: SessionRecord): String? {
+    val changes = session.capChanges
+    if (changes.isEmpty()) return null
+    val first = changes.first()
+    val last = changes.last()
+    val path = if (changes.size == 1) {
+        fmt(last.toFps.toFloat(), 0)
+    } else {
+        "${fmt(first.toFps.toFloat(), 0)} → ${fmt(last.toFps.toFloat(), 0)}"
+    }
+    return "Gold line: measured cap $path fps" +
+        if (last.cause == "heat") " · heat" else ""
+}
+
 /**
  * The full breakdown of one recorded run: what the frame rate did, where it
  * dropped, how long the frames were, and what the device was doing at the time.
@@ -170,6 +185,24 @@ fun SessionDetailScreen(
                     value = "${fmt(session.minFps, 0)}–${fmt(session.maxFps, 0)} fps",
                     accent = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                val capNow = session.capSeries.lastOrNull()?.takeIf { it > 0f }
+                MetricLine(
+                    label = "Detected FPS cap",
+                    value = if (capNow == null) "--" else {
+                        fmt(capNow, 0, " fps") +
+                            if (session.thermalCapSeconds > 0) " · heat" else ""
+                    },
+                    accent = if (session.thermalCapSeconds > 0) {
+                        MaterialTheme.status.warn
+                    } else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (session.capChanges.isNotEmpty()) {
+                    MetricLine(
+                        label = "Cap changes",
+                        value = session.capChanges.size.toString(),
+                        accent = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 val jitter = session.jitterMs ?: frameTimeJitterMs(session.frameTimeSeries)
                 jitter?.let {
                     MetricLine(
@@ -263,7 +296,9 @@ fun SessionDetailScreen(
                 unit = "fps",
                 color = stateColor,
                 target = threshold.toFloat(),
-                targetLabel = "$threshold fps target"
+                targetLabel = "$threshold fps target",
+                reference = session.capSeries,
+                referenceLabel = capLegend(session)
             )
         }
 
@@ -323,6 +358,12 @@ fun SessionDetailScreen(
             }
         }
 
+        if (session.capChanges.isNotEmpty()) {
+            item { SectionHeader("FPS cap changes") }
+
+            item { CapChangesPanel(session) }
+        }
+
         item { SectionHeader("Linked timeline") }
 
         item { LinkedTimelinePanel(session, threshold) }
@@ -339,7 +380,8 @@ private data class TimelineMoment(
     val fps: Float,
     val tempC: Float,
     val cpu: Float,
-    val level: Int?
+    val level: Int?,
+    val capFps: Float? = null
 )
 
 /** Carries the last real reading across placeholder gaps without shifting the axis. */
@@ -387,6 +429,7 @@ private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
     val temp = session.tempSeries.sanitizeTemps()
     val cpu = session.cpuSeries
     val thermal = session.thermalStatusSeries
+    val cap = session.capSeries
     val count = minOf(fps.size, temp.size, cpu.size)
     val fpsColor = fpsStateColor(session.avgFps, threshold)
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -424,6 +467,9 @@ private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
         }
 
         chart("FPS", fps, fpsColor)
+        if (cap.size >= count && cap.take(count).any { it > 0f }) {
+            chart("FPS cap (measured)", cap, MaterialTheme.status.warn)
+        }
         chart("Temperature (°C)", temp, MaterialTheme.status.critical)
         chart("CPU (%)", cpu, MaterialTheme.colorScheme.primary)
         if (thermal.size >= count) {
@@ -438,7 +484,8 @@ private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
                 fps = fps[i],
                 tempC = temp[i],
                 cpu = cpu[i],
-                level = thermal.getOrNull(i)?.toInt()
+                level = thermal.getOrNull(i)?.toInt(),
+                capFps = cap.getOrNull(i)?.takeIf { it > 0f }
             )
         }.sortedBy { it.fps }.take(8).sortedBy { it.second }
 
@@ -467,9 +514,56 @@ private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
                         append(
                             moment.level?.let { thermalStatusLabel(it) } ?: "--"
                         )
+                        if (moment.capFps != null) {
+                            append(" · cap ").append(fmt(moment.capFps, 0))
+                        }
                     },
                     style = MonoInline,
                     color = if (moment.fps < threshold) {
+                        MaterialTheme.status.warn
+                    } else MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
+/** The moments the game's own rate changed, including changes back up after 90 → 120. */
+@Composable
+private fun CapChangesPanel(session: SessionRecord) {
+    Panel {
+        Text(
+            text = "Confirmed from presented frames",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(Space.sm))
+        session.capChanges.forEach { change ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "at ${change.second + 1}s",
+                    style = MonoInline,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = buildString {
+                        append(change.fromFps?.let { fmt(it.toFloat(), 0) } ?: "--")
+                        append(" → ")
+                        append(fmt(change.toFps.toFloat(), 0))
+                        append(" fps")
+                        if (change.cause == "heat") append(" · heat")
+                        if (change.thermalStatus != null) {
+                            append(" · ")
+                            append(thermalStatusLabel(change.thermalStatus))
+                        }
+                    },
+                    style = MonoInline,
+                    color = if (change.cause == "heat") {
                         MaterialTheme.status.warn
                     } else MaterialTheme.colorScheme.onSurface
                 )
@@ -491,7 +585,10 @@ private fun SeriesPanel(
     targetLabel: String? = null,
     invert: Boolean = false,
     /** Drops placeholder readings so they cannot ruin the scale or the stats. */
-    filter: (Float) -> Boolean = { true }
+    filter: (Float) -> Boolean = { true },
+    /** The observed cap, drawn as a step line behind the real frame-rate curve. */
+    reference: List<Float>? = null,
+    referenceLabel: String? = null
 ) {
     val shown = values.filter { it.finiteOrNull() != null && filter(it) }
     Panel {
@@ -538,7 +635,8 @@ private fun SeriesPanel(
                 color = color,
                 target = target,
                 trackColor = MaterialTheme.status.track,
-                gridColor = MaterialTheme.status.grid
+                gridColor = MaterialTheme.status.grid,
+                reference = reference
             )
         }
 
@@ -556,6 +654,14 @@ private fun SeriesPanel(
             }
         }
 
+        if (referenceLabel != null) {
+            Text(
+                text = referenceLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.status.warn,
+                modifier = Modifier.padding(top = Space.xs)
+            )
+        }
         if (targetLabel != null) {
             Text(
                 text = targetLabel,

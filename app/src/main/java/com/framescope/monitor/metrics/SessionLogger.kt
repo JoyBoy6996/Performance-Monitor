@@ -1,5 +1,6 @@
 package com.framescope.monitor.metrics
 
+import com.framescope.monitor.core.CapChange
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
@@ -38,7 +39,11 @@ data class SecondBucket(
     val tempC: Float,
     val batteryLevel: Float,
     val thermalStatus: Int? = null,
-    val powerWatts: Float? = null
+    val powerWatts: Float? = null,
+    /** The observed cap at the end of this second; zero means not confirmed yet. */
+    val capFps: Float = 0f,
+    /** "heat" only while thermal mitigation was active and the rate had dropped. */
+    val capCause: String? = null
 )
 
 /**
@@ -81,6 +86,10 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketBattery = ArrayList<Float>()
     private val bucketThermalStatus = ArrayList<Int>()
     private val bucketPower = ArrayList<Float>()
+    private val bucketCap = ArrayList<Int>()
+    private val bucketCapCause = ArrayList<String>()
+    private val capChanges = ArrayList<CapChange>()
+    private var lastCapFps: Int? = null
 
     private var lastBucketSec = -1L
     // The privileged poll is slower than the one-second buckets, so a level stays
@@ -129,6 +138,10 @@ class SessionLogger(private val store: SessionStore) {
         bucketBattery.clear()
         bucketThermalStatus.clear()
         bucketPower.clear()
+        bucketCap.clear()
+        bucketCapCause.clear()
+        capChanges.clear()
+        lastCapFps = null
 
         lastBucketSec = startedAt / 1000
         lastThermalStatus = null
@@ -174,6 +187,24 @@ class SessionLogger(private val store: SessionStore) {
         val thermalStatus = metrics.thermalStatus?.takeIf { it in 0..6 }
         if (thermalStatus != null) lastThermalStatus = thermalStatus
         val bucketStatus = thermalStatus ?: lastThermalStatus
+
+        // The sampler has already confirmed this rate over several polls. A change
+        // here is a real cap change - heat dropping 120 to 90, or the player setting
+        // 120 again - and is stored with its second so the graph can be read back.
+        val capFps = fpsState.detectedCapFps?.takeIf { it > 0 }
+        val capCause = fpsState.capCause?.takeIf { it == "heat" || it == "measured" }
+        if (capFps != null && capFps != lastCapFps) {
+            capChanges.add(
+                CapChange(
+                    second = ((now - startedAt) / 1000L).toInt().coerceAtLeast(0),
+                    fromFps = lastCapFps,
+                    toFps = capFps,
+                    thermalStatus = thermalStatus,
+                    cause = if (capCause == "heat") "heat" else "measured"
+                )
+            )
+            lastCapFps = capFps
+        }
 
         samples.add(
             SessionSample(
@@ -238,6 +269,8 @@ class SessionLogger(private val store: SessionStore) {
         if (battery > 0) bucketBattery.add(battery.toFloat())
         if (bucketStatus != null) bucketThermalStatus.add(bucketStatus)
         if (powerWatts != null) bucketPower.add(powerWatts)
+        if (capFps != null) bucketCap.add(capFps)
+        if (capFps != null && capCause != null) bucketCapCause.add(capCause)
 
         if (nowSec > lastBucketSec) {
             flushBucket()
@@ -299,6 +332,10 @@ class SessionLogger(private val store: SessionStore) {
         // is not averaged away into "none".
         val thermalStatus = bucketThermalStatus.maxOrNull()
         val power = if (bucketPower.isNotEmpty()) bucketPower.average().toFloat() else null
+        // The last known cap is carried forward: a poll that said nothing does not
+        // mean the game stopped being capped. Zero is kept only until one is known.
+        val cap = bucketCap.lastOrNull() ?: lastCapFps ?: 0
+        val capCause = bucketCapCause.lastOrNull()
 
         secondBuckets.add(
             SecondBucket(
@@ -308,7 +345,9 @@ class SessionLogger(private val store: SessionStore) {
                 tempC = temp,
                 batteryLevel = battery,
                 thermalStatus = thermalStatus,
-                powerWatts = power
+                powerWatts = power,
+                capFps = cap.toFloat(),
+                capCause = capCause
             )
         )
 
@@ -319,6 +358,8 @@ class SessionLogger(private val store: SessionStore) {
         bucketBattery.clear()
         bucketThermalStatus.clear()
         bucketPower.clear()
+        bucketCap.clear()
+        bucketCapCause.clear()
     }
 
     @Synchronized
@@ -429,6 +470,8 @@ class SessionLogger(private val store: SessionStore) {
         } else null
         val avgPower = secondBuckets.mapNotNull { it.powerWatts }
             .takeIf { it.isNotEmpty() }?.average()?.toFloat()
+        val capSeries = secondBuckets.map { it.capFps }
+        val thermalCapSeconds = secondBuckets.count { it.capCause == "heat" }
 
         val record = SessionRecord(
             id = currentSessionId,
@@ -462,7 +505,10 @@ class SessionLogger(private val store: SessionStore) {
             thermalStatusSeries = thermalStatusSeries,
             jitterMs = jitter,
             fpsVariance = variance,
-            avgPowerW = avgPower
+            avgPowerW = avgPower,
+            capSeries = capSeries,
+            capChanges = capChanges.toList(),
+            thermalCapSeconds = thermalCapSeconds
         )
 
         store.add(record)

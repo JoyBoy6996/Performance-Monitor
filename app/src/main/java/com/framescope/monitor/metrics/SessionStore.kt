@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.framescope.monitor.core.CapChange
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.finiteOrNull
@@ -167,6 +168,17 @@ class SessionStore(context: Context) {
         put("jitterMs", record.jitterMs.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
         put("fpsVariance", record.fpsVariance.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
         put("avgPowerW", record.avgPowerW.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("capSeries", JSONArray(record.capSeries.finiteDoubles()))
+        put("capChanges", JSONArray(record.capChanges.map { change ->
+            JSONObject().apply {
+                put("second", change.second)
+                put("fromFps", change.fromFps ?: JSONObject.NULL)
+                put("toFps", change.toFps)
+                put("thermalStatus", change.thermalStatus ?: JSONObject.NULL)
+                put("cause", change.cause)
+            }
+        }))
+        put("thermalCapSeconds", record.thermalCapSeconds)
     }.toString()
 
     fun recordFromJson(text: String): SessionRecord = fromJson(text)
@@ -205,13 +217,16 @@ class SessionStore(context: Context) {
             thermalStatusSeries = o.optJSONArray("thermalStatusSeries").toFloatList(),
             jitterMs = if (o.isNull("jitterMs")) null else o.optDouble("jitterMs").toFloat().finiteOrNull(),
             fpsVariance = if (o.isNull("fpsVariance")) null else o.optDouble("fpsVariance").toFloat().finiteOrNull(),
-            avgPowerW = if (o.isNull("avgPowerW")) null else o.optDouble("avgPowerW").toFloat().finiteOrNull()
+            avgPowerW = if (o.isNull("avgPowerW")) null else o.optDouble("avgPowerW").toFloat().finiteOrNull(),
+            capSeries = o.optJSONArray("capSeries").toFloatList(),
+            capChanges = o.optJSONArray("capChanges").toCapChanges(),
+            thermalCapSeconds = o.optInt("thermalCapSeconds")
         )
     }
 
     fun toCsv(record: SessionRecord): String {
         val sb = StringBuilder()
-        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status\n")
+        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status,cap_fps\n")
         val size = maxOf(
             record.fpsSeries.size,
             record.cpuSeries.size,
@@ -228,6 +243,8 @@ class SessionStore(context: Context) {
             sb.append(record.batterySeries.getOrElse(i) { "" })
             sb.append(',')
             sb.append(record.thermalStatusSeries.getOrElse(i) { "" })
+            sb.append(',')
+            sb.append(record.capSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
             sb.append('\n')
         }
         return sb.toString()
@@ -239,6 +256,27 @@ class SessionStore(context: Context) {
         for (i in 0 until length()) {
             val value = optDouble(i, 0.0).toFloat()
             if (value.finiteOrNull() != null) out.add(value)
+        }
+        return out
+    }
+
+    /** Reads cap changes, ignoring anything that does not parse. */
+    private fun JSONArray?.toCapChanges(): List<CapChange> {
+        if (this == null) return emptyList()
+        val out = ArrayList<CapChange>()
+        for (i in 0 until length()) {
+            val item = optJSONObject(i) ?: continue
+            val to = item.optInt("toFps")
+            if (to <= 0) continue
+            out.add(
+                CapChange(
+                    second = item.optInt("second").coerceAtLeast(0),
+                    fromFps = if (item.isNull("fromFps")) null else item.optInt("fromFps").takeIf { it > 0 },
+                    toFps = to,
+                    thermalStatus = if (item.isNull("thermalStatus")) null else item.optInt("thermalStatus"),
+                    cause = item.optString("cause").takeIf { it == "heat" } ?: "measured"
+                )
+            )
         }
         return out
     }
@@ -299,7 +337,10 @@ class SessionStore(context: Context) {
                     thermal_status_series TEXT,
                     jitter_ms REAL,
                     fps_variance REAL,
-                    avg_power_w REAL
+                    avg_power_w REAL,
+                    cap_series TEXT,
+                    cap_changes TEXT,
+                    thermal_cap_seconds INTEGER DEFAULT 0
                 )
                 """.trimIndent()
             )
@@ -337,6 +378,11 @@ class SessionStore(context: Context) {
                 addColumnIfMissing(db, TABLE_RECORDS, "fps_variance", "REAL")
                 addColumnIfMissing(db, TABLE_RECORDS, "avg_power_w", "REAL")
                 addColumnIfMissing(db, TABLE_SAMPLES, "power_watts", "REAL")
+            }
+            if (oldVersion < 4) {
+                addColumnIfMissing(db, TABLE_RECORDS, "cap_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "cap_changes", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "thermal_cap_seconds", "INTEGER DEFAULT 0")
             }
         }
 
@@ -418,6 +464,17 @@ class SessionStore(context: Context) {
                 put("jitter_ms", record.jitterMs)
                 put("fps_variance", record.fpsVariance)
                 put("avg_power_w", record.avgPowerW)
+                put("cap_series", JSONArray(record.capSeries.finiteDoubles()).toString())
+                put("cap_changes", JSONArray(record.capChanges.map { change ->
+                    JSONObject().apply {
+                        put("second", change.second)
+                        put("fromFps", change.fromFps ?: JSONObject.NULL)
+                        put("toFps", change.toFps)
+                        put("thermalStatus", change.thermalStatus ?: JSONObject.NULL)
+                        put("cause", change.cause)
+                    }
+                }).toString())
+                put("thermal_cap_seconds", record.thermalCapSeconds)
             }
             writableDatabase.insertWithOnConflict(
                 TABLE_RECORDS,
@@ -466,6 +523,9 @@ class SessionStore(context: Context) {
                     val jitterIdx = c.getColumnIndex("jitter_ms")
                     val varianceIdx = c.getColumnIndex("fps_variance")
                     val powerIdx = c.getColumnIndex("avg_power_w")
+                    val capSeriesIdx = c.getColumnIndex("cap_series")
+                    val capChangesIdx = c.getColumnIndex("cap_changes")
+                    val thermalCapIdx = c.getColumnIndex("thermal_cap_seconds")
                     list.add(
                         SessionRecord(
                             id = c.getString(c.getColumnIndexOrThrow("id")),
@@ -502,7 +562,15 @@ class SessionStore(context: Context) {
                             } else emptyList(),
                             jitterMs = if (jitterIdx >= 0 && !c.isNull(jitterIdx)) c.getFloat(jitterIdx).finiteOrNull() else null,
                             fpsVariance = if (varianceIdx >= 0 && !c.isNull(varianceIdx)) c.getFloat(varianceIdx).finiteOrNull() else null,
-                            avgPowerW = if (powerIdx >= 0 && !c.isNull(powerIdx)) c.getFloat(powerIdx).finiteOrNull() else null
+                            avgPowerW = if (powerIdx >= 0 && !c.isNull(powerIdx)) c.getFloat(powerIdx).finiteOrNull() else null,
+                            capSeries = if (capSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(capSeriesIdx))
+                            } else emptyList(),
+                            capChanges = if (capChangesIdx >= 0) {
+                                runCatching { JSONArray(c.getString(capChangesIdx)).toCapChanges() }
+                                    .getOrDefault(emptyList())
+                            } else emptyList(),
+                            thermalCapSeconds = if (thermalCapIdx >= 0) c.getInt(thermalCapIdx) else 0
                         )
                     )
                 }
@@ -533,7 +601,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 3
+            private const val DB_VERSION = 4
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

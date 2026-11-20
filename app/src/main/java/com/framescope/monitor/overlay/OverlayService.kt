@@ -32,6 +32,7 @@ import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.OverlayStyle
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -468,6 +469,9 @@ class OverlayService : Service() {
         // A reading that is older than a couple of seconds is not a live reading, and
         // it says so instead of looking like a current number.
         val stale = fpsState.valid && fpsState.sampleAgeMs > STALE_AFTER_MS
+        val capNote = fpsState.detectedCapFps?.let { cap ->
+            " · $cap cap" + if (fpsState.capCause == "heat") " (heat)" else ""
+        }.orEmpty()
 
         fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         fpsText?.setTextColor(
@@ -476,8 +480,8 @@ class OverlayService : Service() {
 
         frameText?.text = when {
             !fpsState.valid -> ""
-            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs)
-            else -> "%.1f ms".format(fpsState.frameTimeMs)
+            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs) + capNote
+            else -> "%.1f ms".format(fpsState.frameTimeMs) + capNote
         }
 
         if (fpsState.history.isNotEmpty()) {
@@ -491,27 +495,32 @@ class OverlayService : Service() {
             "FRAMESCOPE"
         }
 
-        // Support every selectable row, including the live heat/peak/cool-down pair.
+        // Support every selectable row, including the observed cap and heat pair.
         rowViews["FPS"]?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         rowViews["FRAME"]?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else "--"
-        rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
+        rowViews["CAP"]?.text = fpsState.detectedCapFps?.let { cap ->
+            "$cap" + if (fpsState.capCause == "heat") " heat" else ""
+        } ?: "--"
+        rowViews["CPU"]?.text = system.cpuPercent.finiteOrNull()?.let { "${it.roundToInt()}%" } ?: "--"
         rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
         rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")
-        val temperature = system.deviceTemperatureC()
+        val temperature = system.deviceTemperatureC().finiteOrNull()
         rowViews["TEMP"]?.text = temperature?.let { "%.1f°C".format(it) } ?: "--"
         // A warm phone throttles long before it is hot, so the temperature
         // carries its own warning colour.
         temperature?.let { rowViews["TEMP"]?.setTextColor(OverlayViews.temperatureColor(it)) }
-        rowViews["HEAT"]?.text = system.tempPeakC?.let { peak ->
-            val cooled = system.tempCooledC ?: 0f
+        rowViews["HEAT"]?.text = system.tempPeakC.finiteOrNull()?.let { peak ->
+            val cooled = system.tempCooledC.finiteOrNull() ?: 0f
             "↑%.1f°C ↓%.1f°C".format(peak, cooled)
         } ?: "--"
         rowViews["BAT"]?.text = system.batteryLevel?.let { "$it%" } ?: "--"
-        rowViews["POWER"]?.text = system.powerWatts?.let { "%.2f W".format(it) } ?: "--"
-        rowViews["MEM"]?.text = if (system.ramUsedGb != null && system.ramTotalGb != null) {
-            "%.1f/%.0fG".format(system.ramUsedGb, system.ramTotalGb)
+        rowViews["POWER"]?.text = system.powerWatts.finiteOrNull()?.let { "%.2f W".format(it) } ?: "--"
+        val ramUsed = system.ramUsedGb.finiteOrNull()
+        val ramTotal = system.ramTotalGb.finiteOrNull()
+        rowViews["MEM"]?.text = if (ramUsed != null && ramTotal != null) {
+            "%.1f/%.0fG".format(ramUsed, ramTotal)
         } else system.ramPercent?.let { "$it%" } ?: "--"
-        rowViews["REFRESH"]?.text = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--"
+        rowViews["REFRESH"]?.text = system.refreshHz.finiteOrNull()?.let { "${it.roundToInt()} Hz" } ?: "--"
         rowViews["APP"]?.text = if (appName.isNotBlank()) appName.substringAfterLast('.') else "--"
         // Which provider the reading came from, so a number that is not the game's own
         // frame rate is not mistaken for one.

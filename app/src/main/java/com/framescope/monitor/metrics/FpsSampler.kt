@@ -118,13 +118,14 @@ class FpsSampler(
     private var lastMeasuredAtMs = 0L
 
     /**
-     * The device-wide frame counter of the previous poll.
+     * The device-wide frame counter over the last couple of seconds.
      *
      * A game's own timestats entry can stay frozen while it presents hundreds
-     * of frames; the total at the top of the dump is the counter that moves.
+     * of frames; the total at the top of the dump is the counter that moves. A
+     * two-second baseline is used instead of the previous poll because a
+     * half-second window makes the same 120 fps game read as 104 or 129.
      */
-    private var lastGlobalFrames = -1L
-    private var lastGlobalAtMs = 0L
+    private val globalHistory = ArrayDeque<Pair<Long, Long>>()
 
     /**
      * The frame counters of SurfaceFlinger.
@@ -201,8 +202,7 @@ class FpsSampler(
         measuredLayer = null
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
-        lastGlobalFrames = -1L
-        lastGlobalAtMs = 0L
+        globalHistory.clear()
         _state.value = FpsState()
     }
 
@@ -440,15 +440,24 @@ class FpsSampler(
             ?: return null
 
         val nowMs = SystemClock.elapsedRealtime()
-        val previous = lastGlobalFrames
-        val previousAt = lastGlobalAtMs
-        lastGlobalFrames = frames
-        lastGlobalAtMs = nowMs
-        if (previous < 0L || frames < previous) return null
+        val newest = globalHistory.lastOrNull()
+        if (newest != null && frames < newest.second) {
+            // The counter restarted. Its previous samples no longer describe
+            // the same timeline, so this poll starts a fresh window.
+            globalHistory.clear()
+            globalHistory.addLast(nowMs to frames)
+            return null
+        }
+        globalHistory.addLast(nowMs to frames)
+        while (
+            globalHistory.size > 1 &&
+            nowMs - globalHistory.first().first > GLOBAL_COUNTER_WINDOW_MS
+        ) globalHistory.removeFirst()
 
-        val elapsedMs = nowMs - previousAt
+        val baseline = globalHistory.first()
+        val elapsedMs = nowMs - baseline.first
         if (elapsedMs < MIN_COUNTER_WINDOW_MS) return null
-        val fps = (frames - previous) * 1_000f / elapsedMs
+        val fps = (frames - baseline.second) * 1_000f / elapsedMs
         if (!isPlausibleFps(fps)) return null
 
         activeSource = FpsSourceKind.TIMESTATS
@@ -1021,8 +1030,7 @@ class FpsSampler(
         history.clear()
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
-        lastGlobalFrames = -1L
-        lastGlobalAtMs = 0L
+        globalHistory.clear()
         if (pkg != null) {
             // Reset the baselines for the new app, but keep the number that was
             // already on screen. The old sampler never blanked its reading when
@@ -1220,8 +1228,11 @@ class FpsSampler(
         /** How long the device-wide counter may take to answer. */
         private const val GLOBAL_COUNTER_TIMEOUT_MS = 3_000L
 
+        /** The counter difference is taken over about two seconds, not one poll. */
+        private const val GLOBAL_COUNTER_WINDOW_MS = 2_000L
+
         /** A window shorter than this makes a counter difference meaningless. */
-        private const val MIN_COUNTER_WINDOW_MS = 300L
+        private const val MIN_COUNTER_WINDOW_MS = 800L
 
         /** Fewer frames than this on the active layer say nothing about FPS. */
         private const val MIN_ACTIVE_FRAMES = 4

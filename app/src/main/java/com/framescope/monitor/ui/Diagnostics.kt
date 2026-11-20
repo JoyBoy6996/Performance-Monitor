@@ -42,10 +42,23 @@ object Diagnostics {
      * the latency dump of the app's own layers shows whether the frames are
      * there at all.
      */
-    fun probeCommand(packageName: String?): String {
+    fun probeCommand(packageName: String?, measuredLayer: String? = null): String {
         val pkg = (packageName ?: "").replace("'", "").replace("\"", "")
         val app = if (pkg.isBlank()) "" else pkg
+        val layer = (measuredLayer ?: "").replace("'", "")
         return listOf(
+            // The layer the app is measuring right now comes first. `--latency`
+            // answers to the exact layer name and to nothing else, so the row
+            // count of this block is the whole question: about 127 rows when the
+            // name is right, one line - the refresh period - when it is not.
+            if (layer.isBlank()) {
+                "echo '--- the layer that was measured: none yet ---'"
+            } else {
+                "echo '--- the layer that was measured ---'; " +
+                    "echo 'layer=[$layer]'; " +
+                    "echo \"rows=\$(dumpsys SurfaceFlinger --latency '$layer' 2>/dev/null | wc -l)\"; " +
+                    "dumpsys SurfaceFlinger --latency '$layer' 2>/dev/null | tail -4"
+            },
             // The counters come first: they are the text that decides the
             // frame rate of a game, and they are the part a screenshot has to
             // show.

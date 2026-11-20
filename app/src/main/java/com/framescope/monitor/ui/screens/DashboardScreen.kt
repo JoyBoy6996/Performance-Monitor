@@ -576,6 +576,7 @@ private fun DiagnosticsRow(container: AppContainer) {
     val scope = rememberCoroutineScope()
     val status by container.hub.status.collectAsState()
     val lastMeasured by container.engine.lastMeasuredPackage.collectAsState()
+    val layer by container.engine.measuredLayer.collectAsState()
     var message by remember { mutableStateOf<String?>(null) }
     var running by remember { mutableStateOf(false) }
     var probeOutput by remember { mutableStateOf("") }
@@ -602,7 +603,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                     scope.launch {
                         val pkg = lastMeasured
                         val result = container.hub.execOrNull(
-                            Diagnostics.probeCommand(pkg),
+                            Diagnostics.probeCommand(pkg, layer),
                             20_000
                         )
                         probeOutput = if (result == null) {
@@ -669,7 +670,7 @@ private fun DiagnosticsRow(container: AppContainer) {
         LaunchedEffect(Unit) {
             val pkg = lastMeasured
             val result = container.hub.execOrNull(
-                Diagnostics.probeCommand(pkg),
+                Diagnostics.probeCommand(pkg, layer),
                 20_000
             )
             probeOutput = if (result == null) {

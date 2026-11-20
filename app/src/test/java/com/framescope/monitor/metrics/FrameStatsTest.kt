@@ -1,6 +1,7 @@
 package com.framescope.monitor.metrics
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -66,6 +67,29 @@ class FrameStatsTest {
     fun refusesAnEmptySeries() {
         assertNull(computeFrameStats(emptyList()))
         assertNull(computeFrameStats(listOf(16_666_667L)))
+    }
+
+    @Test
+    fun anIdleGapDoesNotTurnAFastGameIntoASlowReading() {
+        // A 120 Hz stream with three two-second stalls. 1/mean(delta) reports
+        // about 17 fps here; the median is still 8.33 ms, so the reading has to
+        // stay at 120. This is the difference between the working version and
+        // the 7 / 12 / 24 fps readings seen during gameplay.
+        val deltas = List(60) { 8_333_333L } +
+            listOf(2_000_000_000L, 2_000_000_000L, 2_000_000_000L) +
+            List(60) { 8_333_333L }
+        val stats = computeFrameStats(deltas)
+        assertNotNull(stats)
+        assertEquals(120f, stats!!.fps, 1f)
+        assertEquals(8.33f, stats.frameTimeMs, 0.2f)
+    }
+
+    @Test
+    fun anIdleLayerIsRejectedBeforeItCanBecomeAReading() {
+        val idle = (0..12).map { it * 2_000_000_000L }
+        assertFalse(isPlausibleSeries(idle))
+        val steady = (0..40).map { it * 8_333_333L }
+        assertTrue(isPlausibleSeries(steady))
     }
 
     @Test

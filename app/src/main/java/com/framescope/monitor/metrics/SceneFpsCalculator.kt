@@ -108,8 +108,13 @@ class SceneFpsCalculator(
             return SceneFpsResult(fps = 0, isSceneActive = false)
         }
 
-        val intervals = activeFrameTimesNs.size - 1
-        val rawFps = (intervals * 1_000_000_000.0) / spanNs.toDouble()
+        // The headline number is 1/median(delta), exactly as in the version
+        // that measured games correctly. intervals/span is 1/mean(delta): one
+        // idle gap inside the window turned a 120 fps game into a 12 fps
+        // reading. The median is the interval the screen hit most often.
+        val medianNs = medianIntervalNs(activeFrameTimesNs.toList())
+            ?: return SceneFpsResult(fps = 0, isSceneActive = false)
+        val rawFps = 1_000_000_000.0 / medianNs.toDouble()
 
         // Scene-style clamping: prevents jitter above panel refresh rate,
         // while keeping small tolerance (+1) for timestamp rounding
@@ -118,7 +123,6 @@ class SceneFpsCalculator(
         val expectedFrameMs = 1000f / safeRefresh
         val jankThresholdMs = expectedFrameMs * 1.5f + 2f
 
-        var totalMs = 0.0
         var minMs = Float.MAX_VALUE
         var maxMs = 0f
         var janks = 0
@@ -126,7 +130,6 @@ class SceneFpsCalculator(
         val frames = activeFrameTimesNs.toList()
         for (i in 1 until frames.size) {
             val dtMs = (frames[i] - frames[i - 1]) / 1_000_000.0
-            totalMs += dtMs
             val dtFloat = dtMs.toFloat()
             if (dtFloat < minMs) minMs = dtFloat
             if (dtFloat > maxMs) maxMs = dtFloat
@@ -135,7 +138,8 @@ class SceneFpsCalculator(
 
         return SceneFpsResult(
             fps = fps,
-            avgFrameTimeMs = (totalMs / intervals).toFloat(),
+            // Derived from the same median as the FPS so the two always agree.
+            avgFrameTimeMs = (medianNs.toDouble() / 1_000_000.0).toFloat(),
             minFrameTimeMs = if (minMs == Float.MAX_VALUE) 0f else minMs,
             maxFrameTimeMs = maxMs,
             jankFrames = janks,

@@ -564,11 +564,10 @@ class FpsSampler(
         if (dump.isBlank()) return null
 
         val (_, presents) = Parsers.parseLatency(dump)
-        if (presents.size < 4) return null
+        if (!isPlausibleSeries(presents)) return null
 
-        // The same arithmetic every other source uses: the mean interval
-        // between the frames is the frame time, and the jank is every interval
-        // that misses the budget.
+        // The same arithmetic every other source uses: the median interval is
+        // the frame time, and the jank is every interval that misses the budget.
         val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
         val stats = computeFrameStats(deltas) ?: return null
         val fps = stats.fps
@@ -664,6 +663,13 @@ class FpsSampler(
                 dump = "one layer at a time:\n" + oneByOne.joinToString("\n") { it.name }
             }
         }
+
+        // The old sampler rejected a layer before it ever computed a number from
+        // it: a series with long idle gaps is a screen that was standing still,
+        // not a game running at a low frame rate. Filtering here keeps those stray
+        // timestamps from becoming the 7 / 12 / 24 fps readings that replaced a
+        // real game rate.
+        samples = samples.filter { isPlausibleSeries(it.presents, it.refreshPeriodNs) }
 
         val report = buildProbeReport(pkg, dump) +
             if (fallbackDump.isBlank()) "" else {

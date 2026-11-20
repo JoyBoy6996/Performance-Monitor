@@ -264,25 +264,23 @@ class FrameCounter(
         )
     }
 
-    /** The frame rate over the rolling window. */
+    /**
+     * The frame rate over the rolling window.
+     *
+     * This is derived from the MEDIAN interval, as it was in the version that
+     * measured games correctly. (count-1)/span is 1/mean(delta) in disguise:
+     * one idle gap inside the window dragged a real 120 fps reading down to
+     * 12 fps. The median is the interval the screen actually hit most often.
+     */
     fun recentFps(): Float? {
-        if (recentTimestamps.size < 2) return null
-        val first = recentTimestamps.first()
-        val last = recentTimestamps.last()
-        val durationNs = last - first
-        if (durationNs <= 0L) return null
-        val intervals = recentTimestamps.size - 1
-        return (intervals.toDouble() * 1_000_000_000.0 / durationNs).toFloat()
+        val median = medianIntervalNs(recentTimestamps.toList()) ?: return null
+        return (1_000_000_000.0 / median.toDouble()).toFloat()
     }
 
-    /** The mean frame time of the rolling window, in milliseconds. */
+    /** The frame time of the rolling window, in milliseconds, matching [recentFps]. */
     fun meanFrameTimeMs(): Float? {
-        if (recentTimestamps.size < 2) return null
-        val first = recentTimestamps.first()
-        val last = recentTimestamps.last()
-        val durationNs = last - first
-        if (durationNs <= 0L) return null
-        return (durationNs.toDouble() / (recentTimestamps.size - 1) / 1_000_000.0).toFloat()
+        val median = medianIntervalNs(recentTimestamps.toList()) ?: return null
+        return (median.toDouble() / 1_000_000.0).toFloat()
     }
 
     /** The span of the rolling window, in milliseconds. */

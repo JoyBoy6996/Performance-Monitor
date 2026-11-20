@@ -86,7 +86,6 @@ fun SettingsScreen(
     val measuring by settings.measurementEnabled.flow.collectAsState()
     val threshold by settings.fpsThreshold.flow.collectAsState()
     val interval by settings.sampleIntervalMs.flow.collectAsState()
-    val autoRecord by settings.autoRecord.flow.collectAsState()
     val extraProtected by settings.protectedApps.flow.collectAsState()
 
     var installed by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
@@ -438,17 +437,6 @@ fun SettingsScreen(
                         steps = 19
                     )
                 }
-                PanelDivider()
-                SettingRow(
-                    title = "Auto record",
-                    supporting = "Start a recording as soon as a new app comes to the foreground.",
-                    trailing = {
-                        Switch(
-                            checked = autoRecord,
-                            onCheckedChange = { settings.autoRecord.value = it }
-                        )
-                    }
-                )
             }
         }
 

@@ -108,11 +108,6 @@ class MetricsEngine(
     private var nativeJob: Job? = null
     private var privilegedJob: Job? = null
 
-    private var lastAutoApp: String? = null
-    private var autoAppSince = 0L
-    /** A manual Stop is honoured until a different app comes to the foreground. */
-    private var manualStoppedApp: String? = null
-
     fun start() {
         if (fpsJob?.isActive == true) return
         fpsJob = scope.launch { fpsLoop() }
@@ -180,7 +175,6 @@ class MetricsEngine(
             }
 
             updateProtectedFlag()
-            handleAutoRecord(fpsSampler.foregroundApp)
 
             if (fpsState != null && fpsState.valid) {
                 if (sessionLogger.isRecording) {
@@ -338,7 +332,6 @@ class MetricsEngine(
 
     fun startRecording() {
         if (_recording.value) return
-        manualStoppedApp = null
         val current = _foregroundApp.value.orEmpty()
         val label = appLabel(current)
         sessionLogger.start(current, label, _system.value.batteryLevel)
@@ -346,15 +339,8 @@ class MetricsEngine(
         _live.value = LiveStats()
     }
 
-    /**
-     * Stop pressed by the user. Auto-record must not switch it straight back on
-     * while the same app is still in front - that made the button look broken.
-     * The choice stays until a different app comes to the foreground.
-     */
-    fun stopRecordingManually(): SessionRecord? {
-        manualStoppedApp = _foregroundApp.value?.takeIf { it.isNotBlank() }
-        return stopRecording()
-    }
+    /** Stop pressed by the user. Nothing starts a recording except the button. */
+    fun stopRecordingManually(): SessionRecord? = stopRecording()
 
     fun stopRecording(): SessionRecord? {
         if (!_recording.value) return null
@@ -362,29 +348,6 @@ class MetricsEngine(
         val record = sessionLogger.stop(settings.fpsThreshold.value)
         _live.value = LiveStats()
         return record
-    }
-
-    private fun handleAutoRecord(currentApp: String?) {
-        if (!settings.autoRecord.value) {
-            if (_recording.value) stopRecording()
-            lastAutoApp = null
-            manualStoppedApp = null
-            return
-        }
-        if (currentApp.isNullOrBlank()) return
-        if (currentApp != lastAutoApp) {
-            if (_recording.value) stopRecording()
-            lastAutoApp = currentApp
-            autoAppSince = System.currentTimeMillis()
-            manualStoppedApp = null
-            return
-        }
-        // A manual Stop in this app stays stopped. Auto-record may take over
-        // again only after another app has been in the foreground.
-        if (currentApp == manualStoppedApp) return
-        if (_recording.value) return
-        if (System.currentTimeMillis() - autoAppSince < MIN_AUTO_RECORD_MS) return
-        startRecording()
     }
 
     private fun updateProtectedFlag() {
@@ -409,8 +372,6 @@ class MetricsEngine(
     }
 
     companion object {
-        private const val MIN_AUTO_RECORD_MS = 3_000L
-
         /**
          * The longest one frame-rate sample may take.
          *

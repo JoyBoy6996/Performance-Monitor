@@ -96,7 +96,6 @@ class AppSettings(context: Context) {
 
     val fpsThreshold = Pref(sp, "fps_threshold", 45)
     val sampleIntervalMs = Pref(sp, "sample_interval", 400)
-    val autoRecord = Pref(sp, "auto_record", false)
     val monitorWhileBackground = Pref(sp, "monitor_background", true)
 
     val themeMode = Pref(sp, "theme_mode", ThemeMode.SYSTEM.name)
@@ -156,7 +155,7 @@ class AppSettings(context: Context) {
         overlayEnabled, overlayStyle, overlayRows, overlayOpacity, overlayScale,
         overlayX, overlayY, overlayShowGraph, overlayGraphHeight, overlayClickThrough,
         protectBankApps, protectedApps,
-        fpsThreshold, sampleIntervalMs, autoRecord, monitorWhileBackground,
+        fpsThreshold, sampleIntervalMs, monitorWhileBackground,
         measurementEnabled, setupCompleted,
         themeMode, dynamicColor
     )

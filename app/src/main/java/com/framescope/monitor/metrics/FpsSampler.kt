@@ -128,6 +128,17 @@ class FpsSampler(
     private val globalHistory = ArrayDeque<Pair<Long, Long>>()
 
     /**
+     * Why the device-wide counter has no reading this poll.
+     *
+     * A short window is only a delay: the next poll must arrive quickly so the
+     * window can finish. A failed dump is different - then the slow per-layer
+     * fallbacks are the only way to get a reading. Keeping them apart stops the
+     * game from getting stuck on an old number.
+     */
+    private var globalWindowPending = false
+    private var globalCounterUnavailable = false
+
+    /**
      * The frame counters of SurfaceFlinger.
      *
      * This is the source that works for games: a game draws into a buffer
@@ -203,6 +214,8 @@ class FpsSampler(
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
         globalHistory.clear()
+        globalWindowPending = false
+        globalCounterUnavailable = false
         _state.value = FpsState()
     }
 
@@ -318,10 +331,14 @@ class FpsSampler(
         )
         if (fromGlobal != null) return fromGlobal
 
-        // Layer-based sources only describe a real game in front. On the home
-        // screen or inside FrameScope they would name a system surface, which
-        // must never be published as the app's frame rate.
-        if (!detectedGame) {
+        // A short window is only a delay. Return quickly so the next poll can
+        // finish it. The per-layer fallbacks below take seconds; running them
+        // here pushes the next poll past the window, the counter never gets a
+        // reading, and the previous FPS stays on the overlay forever.
+        // Layer sources also only describe a real game - on home or inside
+        // FrameScope they name a system surface, which must never be published
+        // as the app's frame rate.
+        if (!detectedGame || (globalWindowPending && !globalCounterUnavailable)) {
             return publishUnavailable(
                 source = "SurfaceFlinger presented frames",
                 kind = FpsSourceKind.TIMESTATS,
@@ -413,7 +430,13 @@ class FpsSampler(
             GLOBAL_COUNTER_TIMEOUT_MS
         )?.out.orEmpty()
         val frames = GLOBAL_FRAMES_RE.find(dump)?.groupValues?.get(1)?.toLongOrNull()
-            ?: return null
+        if (frames == null) {
+            // The dump did not answer. The slow per-layer sources may still work.
+            globalCounterUnavailable = true
+            globalWindowPending = false
+            return null
+        }
+        globalCounterUnavailable = false
 
         val nowMs = SystemClock.elapsedRealtime()
         val newest = globalHistory.lastOrNull()
@@ -422,20 +445,31 @@ class FpsSampler(
             // the same timeline, so this poll starts a fresh window.
             globalHistory.clear()
             globalHistory.addLast(nowMs to frames)
+            globalWindowPending = true
             return null
         }
         globalHistory.addLast(nowMs to frames)
+        // Keep the window near a second, but never throw away the previous
+        // sample. A game poll can be slow; without this the old sample is pruned
+        // before the next poll and the counter never gets a window at all.
         while (
-            globalHistory.size > 1 &&
+            globalHistory.size > 2 &&
             nowMs - globalHistory.first().first > GLOBAL_COUNTER_WINDOW_MS
         ) globalHistory.removeFirst()
 
         val baseline = globalHistory.first()
         val elapsedMs = nowMs - baseline.first
-        if (elapsedMs < MIN_COUNTER_WINDOW_MS) return null
+        if (elapsedMs < MIN_COUNTER_WINDOW_MS) {
+            globalWindowPending = true
+            return null
+        }
         val fps = (frames - baseline.second) * 1_000f / elapsedMs
         val displayHz = refreshRateHz()
-        if (!isPlausibleFps(fps, displayHz)) return null
+        if (!isPlausibleFps(fps, displayHz)) {
+            globalWindowPending = false
+            return null
+        }
+        globalWindowPending = false
 
         // This counter sees every surface the compositor presents while the game
         // is in front, not only the game's own frames. A few extra status-bar or

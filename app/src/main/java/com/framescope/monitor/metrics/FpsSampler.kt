@@ -717,14 +717,41 @@ class FpsSampler(
             } +
             if (staleCount > 0) "\nignored $staleCount layer(s) with old frames" else ""
         _reports.value = retainReport(_reports.value, pkg, report)
-        // A layer must actually name the app. The newest unnamed layer on this
-        // device turned out to be an unrelated surface; calling it the game gave
-        // a 2.6 fps reading while the game was drawing normally.
-        val selection = selectVerifiedTarget(freshSamples, pkg, allowUnattributed = false)
+        // FrameScope's own overlay and the system bars present frames of their
+        // own. They are never the game, so they are removed before any layer is
+        // chosen - including the unnamed last resort.
+        val usableSamples = freshSamples.filterNot { isNoiseLayer(it.name, ownPackage) }
+        if (usableSamples.isEmpty()) {
+            pendingWarmUpReason = "No layer of $pkg presented a frame recently"
+            return null
+        }
+
+        // A game draws into a surface named after its engine, so the layer that
+        // carries the package name is often missing. An unnamed layer is kept
+        // only when its own timestamps prove it is drawing continuously. That
+        // check is what rejects the idle 2.6 fps surface this device once named
+        // as the game, without rejecting the real game surface.
+        fun unnamedIsGame(sample: LayerSample): Boolean {
+            if (packageEvidenceOf(sample.name, pkg) != PackageEvidence.NONE) return true
+            if (sample.presents.size < MIN_UNATTRIBUTED_FRAMES) return false
+            val deltas = sample.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+            val stats = computeFrameStats(deltas) ?: return false
+            return stats.fps >= MIN_UNATTRIBUTED_FPS
+        }
+        val candidates = usableSamples.filter { unnamedIsGame(it) }
+        if (candidates.isEmpty()) {
+            pendingWarmUpReason = "No continuously drawing layer of $pkg was found"
+            return null
+        }
+
+        val selection = selectVerifiedTarget(candidates, pkg, allowUnattributed = true)
         targetReason = selection.reason
 
         val target = selection.target ?: return null
         val sampleAgeNs = fresh.first { it.first === target }.second
+        val attributed = packageEvidenceOf(target.name, pkg) != PackageEvidence.NONE
+        val ownDeltas = target.presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+        val ownStats = computeFrameStats(ownDeltas)
 
         // Switching provider starts a new baseline: the counters of one provider say
         // nothing about the frames of another.
@@ -739,7 +766,11 @@ class FpsSampler(
 
         val result = latencyCounter.onSample(target.name, target.presents, nowUptime)
 
-        val fps = result.recentFps
+        val fps = if (attributed) {
+            result.recentFps ?: ownStats?.fps
+        } else {
+            ownStats?.fps ?: result.recentFps
+        }
         if (fps == null || !isPlausibleFps(fps)) {
             // The layer is verified but has not drawn two frames yet. A game can have
             // a surface that never gets a timestamp row, so the next provider gets
@@ -750,7 +781,11 @@ class FpsSampler(
 
         publish(
             fps = fps,
-            frameTimeMs = result.frameTimeMs ?: (1000f / fps),
+            frameTimeMs = if (!attributed && ownStats != null) {
+                ownStats.frameTimeMs
+            } else {
+                result.frameTimeMs ?: (1000f / fps)
+            },
             source = "SurfaceFlinger latency",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = target.name,
@@ -771,10 +806,9 @@ class FpsSampler(
      *
      * Asked without a name, `--latency` answers with the active layer. On a game
      * that layer carries the engine's name and no package name, so it is the
-     * only probe that finds the frames of a game like com.pubg.imobile. A dump
-     * that only holds the refresh period, or frames whose newest timestamp is
-     * old on both clocks, is refused: that is a system surface or history, not
-     * the game the user is looking at.
+     * only probe that finds the frames of a game like com.pubg.imobile. It is
+     * asked only while the game is the foreground app, so the answer belongs to
+     * that game. A dump that only holds the refresh period is refused.
      */
     private suspend fun sampleFromActiveLayer(
         pkg: String,
@@ -790,14 +824,17 @@ class FpsSampler(
         val (_, presents) = Parsers.parseLatency(dump)
         if (presents.size < MIN_ACTIVE_FRAMES) return null
 
-        // The dump keeps old frames after the app stopped drawing. A frame that
-        // is old on whichever clock the device stamped it with is not a live
-        // reading, and must never become the game's FPS.
-        val ageNs = presentationAgeNs(
+        // This probe only runs when the game itself is the foreground app, so a
+        // dump that answers here is the game's own surface. The clock its frames
+        // are stamped with cannot always be matched to either clock of the app;
+        // refusing the reading for that reason is what left the overlay on
+        // "--fps". The age is reported for diagnosis, never used to throw away
+        // the only source that measures this game.
+        val sampleAgeMs = presentationAgeNs(
             presents.last(),
             nowUptime,
             SystemClock.elapsedRealtimeNanos()
-        ) ?: return null
+        )?.div(1_000_000L) ?: 0L
 
         val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
         val stats = computeFrameStats(deltas) ?: return null
@@ -818,7 +855,7 @@ class FpsSampler(
             layer = "active",
             totalFrames = latencyCounter.totalUniqueFrames,
             jankFrames = latencyCounter.totalJankFrames,
-            sampleAgeMs = ageNs / 1_000_000L,
+            sampleAgeMs = sampleAgeMs,
             windowMs = result.windowMs,
             low1PercentFps = latencyCounter.low1PercentFps(),
             low5PercentFps = latencyCounter.low5PercentFps(),
@@ -1103,6 +1140,13 @@ class FpsSampler(
 
         /** Fewer frames than this on the active layer say nothing about FPS. */
         private const val MIN_ACTIVE_FRAMES = 4
+
+        /**
+         * An unnamed layer has to prove it is drawing before it can be called
+         * the game. A short burst or an idle surface is not a frame rate.
+         */
+        private const val MIN_UNATTRIBUTED_FRAMES = 8
+        private const val MIN_UNATTRIBUTED_FPS = 24f
 
         /** How long the unnamed active-layer probe may take. */
         private const val ACTIVE_LATENCY_TIMEOUT_MS = 3_000L

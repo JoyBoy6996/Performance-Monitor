@@ -63,6 +63,7 @@ import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.TerminalBlock
 import com.framescope.monitor.ui.theme.MonoBlock
 import com.framescope.monitor.ui.theme.Space
+import com.framescope.monitor.ui.theme.status
 import kotlinx.coroutines.launch
 
 /** Everything needed to see why the frame data looks the way it does. */

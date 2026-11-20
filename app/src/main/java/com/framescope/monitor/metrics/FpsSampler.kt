@@ -250,49 +250,30 @@ class FpsSampler(
 
         val detected = detection.packageName
 
-        // Opening FrameScope straight from a game puts FrameScope's own window in
-        // front and leaves the launcher as the resumed activity behind it. Neither
-        // of them is the app being measured. Keep the game that was in front a
-        // moment ago so the overlay holds its reading and the raw probe still
-        // says `Raw probe (com.pubg.imobile)` instead of losing the name.
+        // The raw probe must keep naming the last real game even while FrameScope
+        // or the launcher is in front, so `_lastMeasuredPackage` is only ever
+        // updated for a game. The live FPS below uses the app actually on screen:
+        // the device-wide presented-frame counter measures the current screen for
+        // any app, not only games.
         val remembered = _lastMeasuredPackage.value
-        val pkg = if (
-            detected.isNullOrBlank() || detected == ownPackage || isNonGame(detected)
-        ) {
-            if (
-                !remembered.isNullOrBlank() && !isNonGame(remembered) &&
-                nowMs - lastMeasuredAtMs < REMEMBERED_TARGET_MS
-            ) remembered else detected
-        } else detected
+        val rememberedFresh = !remembered.isNullOrBlank() && !isNonGame(remembered) &&
+            nowMs - lastMeasuredAtMs < REMEMBERED_TARGET_MS
+        val detectedGame = !detected.isNullOrBlank() && detected != ownPackage &&
+            !isNonGame(detected)
 
-        // The unnamed SurfaceFlinger probe is only allowed while the game itself
-        // is in front. When FrameScope or the launcher is in front that same
-        // probe describes a system surface, and publishing it as the game's FPS
-        // is the wrong number this fix must never produce.
-        val foregroundIsTarget = detected == pkg && !pkg.isNullOrBlank() &&
-            pkg != ownPackage && !isNonGame(pkg)
-
-        // The launcher is not a game. A reading left over from the game would sit
-        // on the overlay as a live 120 fps forever after the game is closed, so
-        // clear the published value as soon as the home screen appears. The
-        // remembered package stays for the raw probe.
-        if (!detected.isNullOrBlank() && isNonGame(detected)) {
-            _state.value = FpsState()
-        }
-        // A gap outside the game makes old counter samples a false baseline when
-        // the game comes back. Start the window again on the next poll.
-        if (!foregroundIsTarget && !detected.isNullOrBlank()) {
-            globalHistory.clear()
-        }
+        // What we publish is the real foreground app. Home and FrameScope are
+        // measured too, so the pill shows their live screen FPS instead of a
+        // stale game number. Only a blank detector moment falls back to the game.
+        val pkg = if (detected.isNullOrBlank() && rememberedFresh) remembered else detected
 
         if (pkg != foregroundApp) {
-            // A different app is in front. Everything measured so far belonged to the
-            // old one, so the counters start again.
+            // A different app is in front. The per-layer counters start again;
+            // the device-wide counter is continuous and needs no reset.
             onTargetChanged(pkg)
         }
         foregroundApp = pkg
-        if (!pkg.isNullOrBlank() && pkg != ownPackage && !isNonGame(pkg)) {
-            _lastMeasuredPackage.value = pkg
+        if (detectedGame) {
+            _lastMeasuredPackage.value = detected
             lastMeasuredAtMs = nowMs
         }
 
@@ -323,63 +304,43 @@ class FpsSampler(
             )
         }
 
-        // FrameScope cannot measure itself: its own layers have no frame timeline
-        // that belongs to a game, and walking them fills the report with noise.
-        // The reading of the app in front of it is what the user wants.
-        if (pkg == ownPackage || isNonGame(pkg)) {
+        pendingWarmUpReason = null
+
+        // The device-wide presented-frame counter is the live screen FPS. It
+        // counts what the display actually presented over the last second for
+        // any app in front - a game, the launcher, FrameScope or anything else.
+        // It names no layer, so it cannot publish another surface's rate as the
+        // app's, and a scroll or a scene change moves it within one window.
+        val fromGlobal = sampleFromGlobalCounter(
+            pkg,
+            nowUptime,
+            appPackage = if (detectedGame) pkg else remembered
+        )
+        if (fromGlobal != null) return fromGlobal
+
+        // Layer-based sources only describe a real game in front. On the home
+        // screen or inside FrameScope they would name a system surface, which
+        // must never be published as the app's frame rate.
+        if (!detectedGame) {
             return publishUnavailable(
-                source = "no source",
-                kind = FpsSourceKind.NONE,
-                reason = if (pkg == ownPackage) {
-                    "FrameScope is in front - open the game to measure it"
-                } else {
-                    "$pkg is in front - open a game to measure its frame rate"
-                },
-                availability = MetricAvailability.UNSUPPORTED,
+                source = "SurfaceFlinger presented frames",
+                kind = FpsSourceKind.TIMESTATS,
+                reason = "Waiting for the next frame window of $pkg",
+                availability = MetricAvailability.WARMING_UP,
                 nowUptime = nowUptime
             )
         }
 
-        pendingWarmUpReason = null
+        // Fallbacks for a game whose own counter entry is frozen.
+        val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
+        if (fromActive != null) return fromActive
 
-        // The presentation timestamps are tried first, as they were in the
-        // version that measured games correctly: they are the frames themselves
-        // and give the median frame time. The counters are a fallback for the
-        // builds where a game keeps no timestamps.
-        //
-        // 1. The layer SurfaceFlinger is presenting right now. This is the probe
-        // that measured the game correctly in the build the user confirmed: a
-        // game names its surface after its engine, so looking for the package
-        // in the layer list finds nothing while the game is drawing. It runs
-        // first, because the named-layer probe below can otherwise pick an
-        // unrelated layer by recency and publish its rate as the game's. It is
-        // used only while the game itself is in front; when FrameScope or the
-        // launcher is in front the same answer describes a system surface and
-        // is refused.
-        if (foregroundIsTarget) {
-            // The device-wide counter cannot pick a wrong layer, and it is the
-            // only one that keeps counting when a game's own entry is frozen.
-            val fromGlobal = sampleFromGlobalCounter(pkg, nowUptime)
-            if (fromGlobal != null) return fromGlobal
-
-            val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
-            if (fromActive != null) return fromActive
-        }
-
-        // 2. The presentation timestamps of a layer that actually carries the
-        // app's name. An unnamed layer is never accepted here: the device showed
-        // one being chosen by recency and reporting 2.6 fps for a game that was
-        // drawing at 90-120.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
-        // 3. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
         if (fromGfx != null) return fromGfx
 
-        // 4. Last resort: the frame counters. They are only used for a window
-        // that actually grew. A standing counter publishes nothing, so a frozen
-        // or idle app can never show a false 0 as if it were a frame rate.
         val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
         if (fromCounters != null) return fromCounters
 
@@ -433,17 +394,19 @@ class FpsSampler(
     }
 
     /**
-     * The frames SurfaceFlinger counted while the game was in front.
+     * The frames SurfaceFlinger counted while the current app was in front.
      *
      * The per-layer counter of a game can stay frozen while the game keeps
      * presenting frames; on this device the total at the top of the timestats
-     * dump grows by the game's real frame count (264 frames in two seconds for
-     * a game running at 120). The growth over the one-second window is the
-     * reading, and it cannot pick a wrong layer because it names no layer.
+     * dump grows by the real frame count (264 frames in two seconds for a game
+     * running at 120). The growth over the one-second window is the reading, and
+     * it cannot pick a wrong layer because it names no layer. That also makes it
+     * the live screen FPS of the home screen or any non-game app.
      */
     private suspend fun sampleFromGlobalCounter(
         pkg: String,
-        nowUptime: Long
+        nowUptime: Long,
+        appPackage: String? = pkg
     ): FpsState? {
         val dump = hub.execOrNull(
             ShellCommands.surfaceTotalFrames(),
@@ -493,7 +456,7 @@ class FpsSampler(
             jankFrames = 0L,
             sampleAgeMs = 0L,
             windowMs = elapsedMs,
-            appPackage = pkg,
+            appPackage = appPackage,
             nowUptime = nowUptime
         )
         return _state.value

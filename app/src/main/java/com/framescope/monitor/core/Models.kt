@@ -118,8 +118,16 @@ data class SystemMetrics(
 const val MAX_BATTERY_TEMP_C = 70f
 const val MAX_HOTSPOT_TEMP_C = 85f
 
+/**
+ * Null, NaN and infinities are not readings. Every value shown to the user goes
+ * through one of these helpers, so a bad number becomes "--" instead of "NaN".
+ */
+fun Float?.finiteOrNull(): Float? = this?.takeIf { !it.isNaN() && !it.isInfinite() }
+fun Float.finiteOrZero(): Float = finiteOrNull() ?: 0f
+
 /** Zero is the "no reading" sentinel, so only values strictly above it count. */
-fun Float?.plausibleTempC(max: Float): Float? = this?.takeIf { it > 0f && it <= max }
+fun Float?.plausibleTempC(max: Float): Float? =
+    this?.takeIf { !it.isNaN() && !it.isInfinite() && it > 0f && it <= max }
 
 /**
  * The phone temperature shown to the user.

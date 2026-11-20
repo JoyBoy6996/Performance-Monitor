@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.EmptyState
@@ -48,6 +49,12 @@ import com.framescope.monitor.ui.theme.status
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/** One formatter for every number here: bad values become "--", never NaN. */
+private fun fmt(value: Float?, decimals: Int): String {
+    val number = value.finiteOrNull() ?: return "--"
+    return String.format(Locale.US, "%.${decimals}f", number)
+}
 
 @Composable
 fun SessionsScreen(
@@ -133,7 +140,7 @@ private fun SummaryPanel(sessions: List<SessionRecord>) {
             )
             StatCell(
                 label = "Best average",
-                value = best?.let { String.format("%.0f", it.avgFps) } ?: "--",
+                value = best?.let { fmt(it.avgFps, 0) } ?: "--",
                 unit = "fps",
                 accent = MaterialTheme.status.good,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
@@ -196,13 +203,14 @@ private fun SessionCard(
         }
 
         Spacer(Modifier.height(Space.sm))
+        val fpsPoints = session.fpsSeries.filter { it.finiteOrNull() != null }
         Box(
             Modifier
                 .fillMaxWidth()
                 .clip(MaterialTheme.shapes.small)
                 .background(MaterialTheme.colorScheme.surfaceContainerLowest)
         ) {
-            if (session.fpsSeries.size < 2) {
+            if (fpsPoints.size < 2) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -218,7 +226,7 @@ private fun SessionCard(
                 }
             } else {
                 Sparkline(
-                    values = session.fpsSeries,
+                    values = fpsPoints,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(84.dp),
@@ -235,20 +243,20 @@ private fun SessionCard(
         Row {
             StatCell(
                 label = "Average",
-                value = String.format("%.1f", session.avgFps),
+                value = fmt(session.avgFps, 1),
                 unit = "fps",
                 accent = stateColor,
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             StatCell(
                 label = "Max / min",
-                value = "${session.maxFps.toInt()} / ${session.minFps.toInt()}",
+                value = "${fmt(session.maxFps, 0)} / ${fmt(session.minFps, 0)}",
                 accent = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             StatCell(
                 label = "Smooth",
-                value = session.smoothness.toInt().toString(),
+                value = fmt(session.smoothness, 0),
                 unit = "%",
                 accent = MaterialTheme.status.good,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
@@ -257,13 +265,13 @@ private fun SessionCard(
         Row(Modifier.padding(top = Space.md)) {
             StatCell(
                 label = "1% low",
-                value = session.low1Percent.toInt().toString(),
+                value = fmt(session.low1Percent, 0),
                 accent = MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             StatCell(
                 label = "5% low",
-                value = session.low5Percent.toInt().toString(),
+                value = fmt(session.low5Percent, 0),
                 accent = MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )

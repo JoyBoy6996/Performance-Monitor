@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.OverlayStyle
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.ChipRow
 import com.framescope.monitor.ui.components.Panel
@@ -177,9 +178,9 @@ fun OverlayScreen(
 
         item {
             HudPreview(
-                fpsText = if (fps.valid) String.format("%.0f", fps.fps) else "--",
-                frameText = if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else "",
-                cpuText = system.cpuPercent?.let { "CPU ${it.toInt()}%" } ?: "",
+                fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
                 history = fps.history,
                 style = style,
                 rows = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }
@@ -458,19 +459,19 @@ private fun overlayRowValue(
     fps: com.framescope.monitor.core.FpsState,
     system: com.framescope.monitor.core.SystemMetrics
 ): String = when (key.uppercase()) {
-    "FPS" -> if (fps.valid) String.format("%.0f", fps.fps) else "--"
-    "FRAME" -> if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else "--"
-    "CPU" -> system.cpuPercent?.let { "${it.toInt()}%" } ?: "--"
+    "FPS" -> fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--"
+    "FRAME" -> fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "--"
+    "CPU" -> system.cpuPercent.finiteOrNull()?.let { "${it.toInt()}%" } ?: "--"
     "CPUF" -> system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
     "GPU" -> system.gpuFreqMHz?.let { "$it MHz" } ?: system.gpuName?.let { it.take(14) } ?: "--"
     "TEMP" -> system.deviceTemperatureC()?.let { "${it.toInt()}°" } ?: "--"
-    "HEAT" -> system.tempPeakC?.let { peak ->
-        "↑${peak.toInt()}° ↓${(system.tempCooledC ?: 0f).toInt()}°"
+    "HEAT" -> system.tempPeakC.finiteOrNull()?.let { peak ->
+        "↑${peak.toInt()}° ↓${(system.tempCooledC.finiteOrNull() ?: 0f).toInt()}°"
     } ?: "--"
     "BAT" -> system.batteryLevel?.let { "$it%" } ?: "--"
-    "POWER" -> system.powerWatts?.let { "${String.format("%.2f", it)} W" } ?: "--"
+    "POWER" -> system.powerWatts.finiteOrNull()?.let { "${String.format("%.2f", it)} W" } ?: "--"
     "MEM" -> system.ramPercent?.let { "$it%" } ?: "--"
-    "REFRESH" -> system.refreshHz?.let { "${it.toInt()} Hz" } ?: "--"
+    "REFRESH" -> system.refreshHz.finiteOrNull()?.let { "${it.toInt()} Hz" } ?: "--"
     "APP" -> fps.surface?.substringAfterLast('/')?.substringBefore('#') ?: "--"
     else -> "--"
 }

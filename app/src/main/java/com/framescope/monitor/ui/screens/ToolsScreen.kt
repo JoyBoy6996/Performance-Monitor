@@ -52,6 +52,7 @@ import android.os.Build
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.metrics.NativeCollectors
 import com.framescope.monitor.shell.ShellHub
@@ -600,16 +601,18 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         facts.platform?.let { MetricLine("Platform", it, muted) }
         facts.cpu?.let { MetricLine("CPU", it.take(48), onSurface) }
         MetricLine("CPU clock (fastest)", system.cpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
-        system.cpuPercent?.let {
-            MetricLine("CPU load", String.format(java.util.Locale.US, "%.0f%%", it), onSurface)
-        }
+        MetricLine(
+            "CPU load",
+            system.cpuPercent.finiteOrNull()?.let { String.format(java.util.Locale.US, "%.0f%%", it) } ?: "--",
+            onSurface
+        )
         MetricLine("GPU", system.gpuName?.take(34) ?: "--", onSurface)
         MetricLine("GPU clock", system.gpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
 
         divider()
         Text("Memory and display", style = MaterialTheme.typography.titleSmall, color = onSurface)
-        val ramMarketing = system.ramTotalGb?.let { Math.ceil(it.toDouble()).toInt() }
-        val storageMarketing = facts.storageTotalGb?.let { Math.round(it.toDouble()).toInt() }
+        val ramMarketing = system.ramTotalGb.finiteOrNull()?.let { Math.ceil(it.toDouble()).toInt() }
+        val storageMarketing = facts.storageTotalGb.finiteOrNull()?.let { Math.round(it.toDouble()).toInt() }
         val variant = when {
             ramMarketing != null && storageMarketing != null ->
                 "$ramMarketing GB + $storageMarketing GB"
@@ -620,14 +623,14 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         MetricLine("Variant", variant, onSurface)
         MetricLine(
             "RAM",
-            system.ramTotalGb?.let { total ->
-                "${String.format("%.1f", system.ramUsedGb ?: 0f)} / ${String.format("%.1f", total)} GB"
+            system.ramTotalGb.finiteOrNull()?.let { total ->
+                "${String.format("%.1f", system.ramUsedGb.finiteOrNull() ?: 0f)} / ${String.format("%.1f", total)} GB"
             } ?: "--",
             onSurface
         )
         MetricLine(
             "Storage",
-            if (facts.storageFreeGb != null && facts.storageTotalGb != null) {
+            if (facts.storageFreeGb.finiteOrNull() != null && facts.storageTotalGb.finiteOrNull() != null) {
                 String.format(
                     java.util.Locale.US,
                     "%.1f / %.0f GB free",
@@ -640,7 +643,7 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         MetricLine("Resolution", facts.display ?: "--", onSurface)
         MetricLine(
             "Refresh rate",
-            system.refreshHz?.let { "${it.toInt()} Hz" } ?: "--",
+            system.refreshHz.finiteOrNull()?.let { "${it.toInt()} Hz" } ?: "--",
             warn
         )
 
@@ -653,13 +656,13 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         MetricLine("Cycles", facts.cycles ?: "--", onSurface)
         MetricLine(
             "Temperature",
-            facts.battery?.temperatureC?.let { String.format("%.1f°C", it) } ?: "--",
+            facts.battery?.temperatureC.finiteOrNull()?.let { String.format("%.1f°C", it) } ?: "--",
             warn
         )
         MetricLine("Voltage", facts.battery?.voltageMilliVolts?.let { "$it mV" } ?: "--", onSurface)
         MetricLine(
             "Power",
-            facts.battery?.watts?.let { String.format("%.2f W", it) } ?: "--",
+            facts.battery?.watts.finiteOrNull()?.let { String.format("%.2f W", it) } ?: "--",
             onSurface
         )
 
@@ -667,18 +670,18 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         Text("Thermal", style = MaterialTheme.typography.titleSmall, color = onSurface)
         MetricLine(
             "Phone temperature",
-            system.deviceTemperatureC()?.let { String.format("%.1f°C", it) } ?: "--",
+            system.deviceTemperatureC().finiteOrNull()?.let { String.format("%.1f°C", it) } ?: "--",
             warn
         )
         MetricLine(
             "Peak temperature",
-            system.tempPeakC?.let { String.format("%.1f°C", it) } ?: "--",
+            system.tempPeakC.finiteOrNull()?.let { String.format("%.1f°C", it) } ?: "--",
             warn
         )
         MetricLine(
             "Cooled from peak",
-            system.tempCooledC?.let { String.format("%.1f°C", it) } ?: "--",
-            if ((system.tempCooledC ?: 0f) >= 0.1f) good else muted
+            system.tempCooledC.finiteOrNull()?.let { String.format("%.1f°C", it) } ?: "--",
+            if ((system.tempCooledC.finiteOrNull() ?: 0f) >= 0.1f) good else muted
         )
         MetricLine(
             "State",
@@ -687,7 +690,7 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         )
         MetricLine(
             "Hottest sensor",
-            system.thermalMaxC?.let { String.format("%.1f°C", it) } ?: "--",
+            system.thermalMaxC.finiteOrNull()?.let { String.format("%.1f°C", it) } ?: "--",
             muted
         )
     }

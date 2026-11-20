@@ -54,6 +54,7 @@ import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
@@ -805,7 +806,7 @@ private fun SystemPanel(system: SystemMetrics) {
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             StatCell(
                 label = "Power",
-                value = system.powerWatts?.let { String.format("%.1f", it) } ?: "--",
+                value = system.powerWatts.finiteOrNull()?.let { String.format("%.1f", it) } ?: "--",
                 unit = "W",
                 accent = warn,
                 availability = system.availabilityOf(SystemMetric.POWER_WATTS),
@@ -855,10 +856,10 @@ private fun SystemPanel(system: SystemMetrics) {
 
 @Composable
 private fun HistoryPanel(fps: FpsState, series: List<Float>, layer: String?, threshold: Int) {
-    val history = series.ifEmpty { fps.history }
+    val history = series.ifEmpty { fps.history }.filter { it.finiteOrNull() != null }
     val stateColor = fpsStateColor(fps.fps, threshold)
     val min = history.minOrNull()
-    val avg = if (history.isEmpty()) null else history.average().toFloat()
+    val avg = if (history.isEmpty()) null else history.average().toFloat().finiteOrNull()
     val max = history.maxOrNull()
 
     Panel {

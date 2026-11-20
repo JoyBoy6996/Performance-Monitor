@@ -7,6 +7,7 @@ import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.core.steadyWindow
 import java.util.UUID
@@ -162,14 +163,14 @@ class SessionLogger(private val store: SessionStore) {
         val now = System.currentTimeMillis()
         val nowSec = now / 1000
 
-        val fps = fpsState.fps
-        val frameTime = fpsState.frameTimeMs
-        val cpu = metrics.cpuPercent ?: 0f
+        val fps = fpsState.fps.finiteOrNull() ?: 0f
+        val frameTime = fpsState.frameTimeMs.finiteOrNull() ?: 0f
+        val cpu = metrics.cpuPercent.finiteOrNull() ?: 0f
         val gpuFreq = metrics.gpuFreqMHz ?: 0
         val temp = metrics.deviceTemperatureC() ?: 0f
         val battery = metrics.batteryLevel ?: 0
         val ram = metrics.ramPercent ?: 0
-        val powerWatts = metrics.powerWatts?.takeIf { it >= 0f }
+        val powerWatts = metrics.powerWatts.finiteOrNull()?.takeIf { it >= 0f }
         val thermalStatus = metrics.thermalStatus?.takeIf { it in 0..6 }
         if (thermalStatus != null) lastThermalStatus = thermalStatus
         val bucketStatus = thermalStatus ?: lastThermalStatus

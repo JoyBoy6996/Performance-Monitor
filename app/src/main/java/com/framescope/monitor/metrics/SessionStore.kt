@@ -6,6 +6,8 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
+import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.finiteOrZero
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,6 +15,9 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+
+/** Never write NaN or infinity into an export; it makes the backup invalid. */
+private fun List<Float>.finiteDoubles(): List<Double> = mapNotNull { it.finiteOrNull()?.toDouble() }
 
 /**
  * Persists recorded sessions and per-interval samples using an internal SQLite database,
@@ -126,24 +131,24 @@ class SessionStore(context: Context) {
         put("appLabel", record.appLabel)
         put("startedAt", record.startedAt)
         put("durationMs", record.durationMs)
-        put("avgFps", record.avgFps.toDouble())
-        put("maxFps", record.maxFps.toDouble())
-        put("minFps", record.minFps.toDouble())
-        put("low1Percent", record.low1Percent.toDouble())
-        put("low5Percent", record.low5Percent.toDouble())
-        put("smoothness", record.smoothness.toDouble())
+        put("avgFps", record.avgFps.finiteOrZero().toDouble())
+        put("maxFps", record.maxFps.finiteOrZero().toDouble())
+        put("minFps", record.minFps.finiteOrZero().toDouble())
+        put("low1Percent", record.low1Percent.finiteOrZero().toDouble())
+        put("low5Percent", record.low5Percent.finiteOrZero().toDouble())
+        put("smoothness", record.smoothness.finiteOrZero().toDouble())
         put("totalFrames", record.totalFrames)
         put("jankFrames", record.jankFrames)
-        put("avgFrameTimeMs", record.avgFrameTimeMs.toDouble())
-        put("maxFrameTimeMs", record.maxFrameTimeMs.toDouble())
-        put("maxTempC", record.maxTempC?.toDouble() ?: JSONObject.NULL)
-        put("avgCpu", record.avgCpu?.toDouble() ?: JSONObject.NULL)
-        put("fpsSeries", JSONArray(record.fpsSeries.map { it.toDouble() }))
-        put("cpuSeries", JSONArray(record.cpuSeries.map { it.toDouble() }))
-        put("tempSeries", JSONArray(record.tempSeries.map { it.toDouble() }))
-        put("frameTimeSeries", JSONArray(record.frameTimeSeries.map { it.toDouble() }))
-        put("batterySeries", JSONArray(record.batterySeries.map { it.toDouble() }))
-        put("longestFrameMs", record.longestFrameMs.toDouble())
+        put("avgFrameTimeMs", record.avgFrameTimeMs.finiteOrZero().toDouble())
+        put("maxFrameTimeMs", record.maxFrameTimeMs.finiteOrZero().toDouble())
+        put("maxTempC", record.maxTempC.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("avgCpu", record.avgCpu.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("fpsSeries", JSONArray(record.fpsSeries.finiteDoubles()))
+        put("cpuSeries", JSONArray(record.cpuSeries.finiteDoubles()))
+        put("tempSeries", JSONArray(record.tempSeries.finiteDoubles()))
+        put("frameTimeSeries", JSONArray(record.frameTimeSeries.finiteDoubles()))
+        put("batterySeries", JSONArray(record.batterySeries.finiteDoubles()))
+        put("longestFrameMs", record.longestFrameMs.finiteOrZero().toDouble())
         put("dropSeconds", record.dropSeconds)
         put("gapSeconds", record.gapSeconds)
         put("segments", JSONArray(record.segments.map { segment ->
@@ -158,10 +163,10 @@ class SessionStore(context: Context) {
         }))
         put("peakThermalStatus", record.peakThermalStatus ?: JSONObject.NULL)
         put("throttledSeconds", record.throttledSeconds)
-        put("thermalStatusSeries", JSONArray(record.thermalStatusSeries.map { it.toDouble() }))
-        put("jitterMs", record.jitterMs?.toDouble() ?: JSONObject.NULL)
-        put("fpsVariance", record.fpsVariance?.toDouble() ?: JSONObject.NULL)
-        put("avgPowerW", record.avgPowerW?.toDouble() ?: JSONObject.NULL)
+        put("thermalStatusSeries", JSONArray(record.thermalStatusSeries.finiteDoubles()))
+        put("jitterMs", record.jitterMs.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("fpsVariance", record.fpsVariance.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("avgPowerW", record.avgPowerW.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
     }.toString()
 
     fun recordFromJson(text: String): SessionRecord = fromJson(text)
@@ -174,33 +179,33 @@ class SessionStore(context: Context) {
             appLabel = o.optString("appLabel"),
             startedAt = o.optLong("startedAt"),
             durationMs = o.optLong("durationMs"),
-            avgFps = o.optDouble("avgFps", 0.0).toFloat(),
-            maxFps = o.optDouble("maxFps", 0.0).toFloat(),
-            minFps = o.optDouble("minFps", 0.0).toFloat(),
-            low1Percent = o.optDouble("low1Percent", 0.0).toFloat(),
-            low5Percent = o.optDouble("low5Percent", 0.0).toFloat(),
-            smoothness = o.optDouble("smoothness", 0.0).toFloat(),
+            avgFps = o.optDouble("avgFps", 0.0).toFloat().finiteOrZero(),
+            maxFps = o.optDouble("maxFps", 0.0).toFloat().finiteOrZero(),
+            minFps = o.optDouble("minFps", 0.0).toFloat().finiteOrZero(),
+            low1Percent = o.optDouble("low1Percent", 0.0).toFloat().finiteOrZero(),
+            low5Percent = o.optDouble("low5Percent", 0.0).toFloat().finiteOrZero(),
+            smoothness = o.optDouble("smoothness", 0.0).toFloat().finiteOrZero(),
             totalFrames = o.optInt("totalFrames"),
             jankFrames = o.optInt("jankFrames"),
-            avgFrameTimeMs = o.optDouble("avgFrameTimeMs", 0.0).toFloat(),
-            maxFrameTimeMs = o.optDouble("maxFrameTimeMs", 0.0).toFloat(),
-            maxTempC = if (o.isNull("maxTempC")) null else o.optDouble("maxTempC").toFloat(),
-            avgCpu = if (o.isNull("avgCpu")) null else o.optDouble("avgCpu").toFloat(),
+            avgFrameTimeMs = o.optDouble("avgFrameTimeMs", 0.0).toFloat().finiteOrZero(),
+            maxFrameTimeMs = o.optDouble("maxFrameTimeMs", 0.0).toFloat().finiteOrZero(),
+            maxTempC = if (o.isNull("maxTempC")) null else o.optDouble("maxTempC").toFloat().finiteOrNull(),
+            avgCpu = if (o.isNull("avgCpu")) null else o.optDouble("avgCpu").toFloat().finiteOrNull(),
             fpsSeries = o.optJSONArray("fpsSeries").toFloatList(),
             cpuSeries = o.optJSONArray("cpuSeries").toFloatList(),
             tempSeries = o.optJSONArray("tempSeries").toFloatList(),
             frameTimeSeries = o.optJSONArray("frameTimeSeries").toFloatList(),
             batterySeries = o.optJSONArray("batterySeries").toFloatList(),
-            longestFrameMs = o.optDouble("longestFrameMs", 0.0).toFloat(),
+            longestFrameMs = o.optDouble("longestFrameMs", 0.0).toFloat().finiteOrZero(),
             dropSeconds = o.optInt("dropSeconds"),
             gapSeconds = o.optInt("gapSeconds"),
             segments = o.optJSONArray("segments").toSegments(),
             peakThermalStatus = if (o.isNull("peakThermalStatus")) null else o.optInt("peakThermalStatus"),
             throttledSeconds = o.optInt("throttledSeconds"),
             thermalStatusSeries = o.optJSONArray("thermalStatusSeries").toFloatList(),
-            jitterMs = if (o.isNull("jitterMs")) null else o.optDouble("jitterMs").toFloat(),
-            fpsVariance = if (o.isNull("fpsVariance")) null else o.optDouble("fpsVariance").toFloat(),
-            avgPowerW = if (o.isNull("avgPowerW")) null else o.optDouble("avgPowerW").toFloat()
+            jitterMs = if (o.isNull("jitterMs")) null else o.optDouble("jitterMs").toFloat().finiteOrNull(),
+            fpsVariance = if (o.isNull("fpsVariance")) null else o.optDouble("fpsVariance").toFloat().finiteOrNull(),
+            avgPowerW = if (o.isNull("avgPowerW")) null else o.optDouble("avgPowerW").toFloat().finiteOrNull()
         )
     }
 
@@ -232,7 +237,8 @@ class SessionStore(context: Context) {
         if (this == null) return emptyList()
         val out = ArrayList<Float>(length())
         for (i in 0 until length()) {
-            out.add(optDouble(i, 0.0).toFloat())
+            val value = optDouble(i, 0.0).toFloat()
+            if (value.finiteOrNull() != null) out.add(value)
         }
         return out
     }
@@ -401,14 +407,14 @@ class SessionStore(context: Context) {
                 put("avg_cpu", record.avgCpu)
                 put("longest_frame_ms", record.longestFrameMs)
                 put("drop_seconds", record.dropSeconds)
-                put("fps_series", JSONArray(record.fpsSeries.map { it.toDouble() }).toString())
-                put("cpu_series", JSONArray(record.cpuSeries.map { it.toDouble() }).toString())
-                put("temp_series", JSONArray(record.tempSeries.map { it.toDouble() }).toString())
-                put("frame_time_series", JSONArray(record.frameTimeSeries.map { it.toDouble() }).toString())
-                put("battery_series", JSONArray(record.batterySeries.map { it.toDouble() }).toString())
+                put("fps_series", JSONArray(record.fpsSeries.finiteDoubles()).toString())
+                put("cpu_series", JSONArray(record.cpuSeries.finiteDoubles()).toString())
+                put("temp_series", JSONArray(record.tempSeries.finiteDoubles()).toString())
+                put("frame_time_series", JSONArray(record.frameTimeSeries.finiteDoubles()).toString())
+                put("battery_series", JSONArray(record.batterySeries.finiteDoubles()).toString())
                 put("peak_thermal_status", record.peakThermalStatus)
                 put("throttled_seconds", record.throttledSeconds)
-                put("thermal_status_series", JSONArray(record.thermalStatusSeries.map { it.toDouble() }).toString())
+                put("thermal_status_series", JSONArray(record.thermalStatusSeries.finiteDoubles()).toString())
                 put("jitter_ms", record.jitterMs)
                 put("fps_variance", record.fpsVariance)
                 put("avg_power_w", record.avgPowerW)
@@ -467,24 +473,24 @@ class SessionStore(context: Context) {
                             appLabel = c.getString(c.getColumnIndexOrThrow("app_label")),
                             startedAt = c.getLong(c.getColumnIndexOrThrow("started_at")),
                             durationMs = c.getLong(c.getColumnIndexOrThrow("duration_ms")),
-                            avgFps = c.getFloat(c.getColumnIndexOrThrow("avg_fps")),
-                            maxFps = c.getFloat(c.getColumnIndexOrThrow("max_fps")),
-                            minFps = c.getFloat(c.getColumnIndexOrThrow("min_fps")),
-                            low1Percent = c.getFloat(c.getColumnIndexOrThrow("low1_percent")),
-                            low5Percent = c.getFloat(c.getColumnIndexOrThrow("low5_percent")),
-                            smoothness = c.getFloat(c.getColumnIndexOrThrow("smoothness")),
+                            avgFps = c.getFloat(c.getColumnIndexOrThrow("avg_fps")).finiteOrZero(),
+                            maxFps = c.getFloat(c.getColumnIndexOrThrow("max_fps")).finiteOrZero(),
+                            minFps = c.getFloat(c.getColumnIndexOrThrow("min_fps")).finiteOrZero(),
+                            low1Percent = c.getFloat(c.getColumnIndexOrThrow("low1_percent")).finiteOrZero(),
+                            low5Percent = c.getFloat(c.getColumnIndexOrThrow("low5_percent")).finiteOrZero(),
+                            smoothness = c.getFloat(c.getColumnIndexOrThrow("smoothness")).finiteOrZero(),
                             totalFrames = c.getInt(c.getColumnIndexOrThrow("total_frames")),
                             jankFrames = c.getInt(c.getColumnIndexOrThrow("jank_frames")),
-                            avgFrameTimeMs = c.getFloat(c.getColumnIndexOrThrow("avg_frame_time_ms")),
-                            maxFrameTimeMs = c.getFloat(c.getColumnIndexOrThrow("max_frame_time_ms")),
-                            maxTempC = if (maxTempIdx >= 0 && !c.isNull(maxTempIdx)) c.getFloat(maxTempIdx) else null,
-                            avgCpu = if (avgCpuIdx >= 0 && !c.isNull(avgCpuIdx)) c.getFloat(avgCpuIdx) else null,
+                            avgFrameTimeMs = c.getFloat(c.getColumnIndexOrThrow("avg_frame_time_ms")).finiteOrZero(),
+                            maxFrameTimeMs = c.getFloat(c.getColumnIndexOrThrow("max_frame_time_ms")).finiteOrZero(),
+                            maxTempC = if (maxTempIdx >= 0 && !c.isNull(maxTempIdx)) c.getFloat(maxTempIdx).finiteOrNull() else null,
+                            avgCpu = if (avgCpuIdx >= 0 && !c.isNull(avgCpuIdx)) c.getFloat(avgCpuIdx).finiteOrNull() else null,
                             fpsSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("fps_series"))),
                             cpuSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("cpu_series"))),
                             tempSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("temp_series"))),
                             frameTimeSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("frame_time_series"))),
                             batterySeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("battery_series"))),
-                            longestFrameMs = c.getFloat(c.getColumnIndexOrThrow("longest_frame_ms")),
+                            longestFrameMs = c.getFloat(c.getColumnIndexOrThrow("longest_frame_ms")).finiteOrZero(),
                             dropSeconds = c.getInt(c.getColumnIndexOrThrow("drop_seconds")),
                             gapSeconds = if (gapIdx >= 0) c.getInt(gapIdx) else 0,
                             peakThermalStatus = if (peakStatusIdx >= 0 && !c.isNull(peakStatusIdx)) {
@@ -494,9 +500,9 @@ class SessionStore(context: Context) {
                             thermalStatusSeries = if (statusSeriesIdx >= 0) {
                                 jsonToFloatList(c.getString(statusSeriesIdx))
                             } else emptyList(),
-                            jitterMs = if (jitterIdx >= 0 && !c.isNull(jitterIdx)) c.getFloat(jitterIdx) else null,
-                            fpsVariance = if (varianceIdx >= 0 && !c.isNull(varianceIdx)) c.getFloat(varianceIdx) else null,
-                            avgPowerW = if (powerIdx >= 0 && !c.isNull(powerIdx)) c.getFloat(powerIdx) else null
+                            jitterMs = if (jitterIdx >= 0 && !c.isNull(jitterIdx)) c.getFloat(jitterIdx).finiteOrNull() else null,
+                            fpsVariance = if (varianceIdx >= 0 && !c.isNull(varianceIdx)) c.getFloat(varianceIdx).finiteOrNull() else null,
+                            avgPowerW = if (powerIdx >= 0 && !c.isNull(powerIdx)) c.getFloat(powerIdx).finiteOrNull() else null
                         )
                     )
                 }
@@ -519,7 +525,8 @@ class SessionStore(context: Context) {
             val arr = runCatching { JSONArray(json) }.getOrNull() ?: return emptyList()
             val list = ArrayList<Float>(arr.length())
             for (i in 0 until arr.length()) {
-                list.add(arr.optDouble(i, 0.0).toFloat())
+                val value = arr.optDouble(i, 0.0).toFloat()
+                if (value.finiteOrNull() != null) list.add(value)
             }
             return list
         }

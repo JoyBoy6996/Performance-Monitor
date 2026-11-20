@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.core.steadyWindow
 import com.framescope.monitor.core.thermalStatusLabel
@@ -44,6 +45,15 @@ import com.framescope.monitor.ui.theme.status
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+/** One formatter for every number on this screen: bad values become "--", never NaN. */
+private fun fmt(value: Float?, decimals: Int, unit: String = ""): String {
+    val number = value.finiteOrNull() ?: return "--"
+    return String.format(Locale.US, "%.${decimals}f", number) + unit
+}
+
+private fun List<Float>.averageOrNull(): Float? =
+    if (isEmpty()) null else average().toFloat().finiteOrNull()
 
 /**
  * The full breakdown of one recorded run: what the frame rate did, where it
@@ -83,21 +93,21 @@ fun SessionDetailScreen(
                 Row {
                     StatCell(
                         label = "Average",
-                        value = String.format("%.1f", session.avgFps),
+                        value = fmt(session.avgFps, 1),
                         unit = "fps",
                         accent = stateColor,
                         modifier = Modifier.weight(1f).padding(end = Space.sm)
                     )
                     StatCell(
                         label = "Peak",
-                        value = String.format("%.0f", session.maxFps),
+                        value = fmt(session.maxFps, 0),
                         unit = "fps",
                         accent = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
                     )
                     StatCell(
                         label = "Lowest",
-                        value = String.format("%.0f", session.minFps),
+                        value = fmt(session.minFps, 0),
                         unit = "fps",
                         accent = MaterialTheme.status.critical,
                         modifier = Modifier.weight(1f).padding(start = Space.sm)
@@ -106,21 +116,21 @@ fun SessionDetailScreen(
                 Row(Modifier.padding(top = Space.md)) {
                     StatCell(
                         label = "1% low",
-                        value = String.format("%.1f", session.low1Percent),
+                        value = fmt(session.low1Percent, 1),
                         unit = "fps",
                         accent = MaterialTheme.status.warn,
                         modifier = Modifier.weight(1f).padding(end = Space.sm)
                     )
                     StatCell(
                         label = "5% low",
-                        value = String.format("%.1f", session.low5Percent),
+                        value = fmt(session.low5Percent, 1),
                         unit = "fps",
                         accent = MaterialTheme.status.warn,
                         modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
                     )
                     StatCell(
                         label = "Smooth",
-                        value = String.format("%.0f", session.smoothness),
+                        value = fmt(session.smoothness, 0),
                         unit = "%",
                         accent = MaterialTheme.status.good,
                         modifier = Modifier.weight(1f).padding(start = Space.sm)
@@ -143,12 +153,12 @@ fun SessionDetailScreen(
                 )
                 MetricLine(
                     label = "Average frame time",
-                    value = "${String.format("%.2f", session.avgFrameTimeMs)} ms",
+                    value = fmt(session.avgFrameTimeMs, 2, " ms"),
                     accent = MaterialTheme.colorScheme.onSurface
                 )
                 MetricLine(
                     label = "Longest frame",
-                    value = "${String.format("%.1f", session.longestFrameMs)} ms",
+                    value = fmt(session.longestFrameMs, 1, " ms"),
                     accent = if (session.longestFrameMs > 33f) {
                         MaterialTheme.status.critical
                     } else {
@@ -157,14 +167,14 @@ fun SessionDetailScreen(
                 )
                 MetricLine(
                     label = "FPS range",
-                    value = "${String.format("%.0f", session.minFps)}–${String.format("%.0f", session.maxFps)} fps",
+                    value = "${fmt(session.minFps, 0)}–${fmt(session.maxFps, 0)} fps",
                     accent = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 val jitter = session.jitterMs ?: frameTimeJitterMs(session.frameTimeSeries)
                 jitter?.let {
                     MetricLine(
                         label = "Jitter",
-                        value = "${String.format("%.2f", it)} ms",
+                        value = fmt(it, 2, " ms"),
                         accent = if (it > 3f) MaterialTheme.status.warn
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -173,14 +183,14 @@ fun SessionDetailScreen(
                 variance?.let {
                     MetricLine(
                         label = "FPS variance",
-                        value = String.format("%.2f", it),
+                        value = fmt(it, 2),
                         accent = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 session.avgPowerW?.let {
                     MetricLine(
                         label = "Average power",
-                        value = "${String.format("%.2f", it)} W",
+                        value = fmt(it, 2, " W"),
                         accent = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -188,7 +198,7 @@ fun SessionDetailScreen(
                 peakTemp?.let {
                     MetricLine(
                         label = "Peak temperature",
-                        value = "${String.format("%.1f", it)}°C",
+                        value = fmt(it, 1, "°C"),
                         accent = MaterialTheme.status.warn
                     )
                 }
@@ -196,7 +206,7 @@ fun SessionDetailScreen(
                 if (peakTemp != null && finalTemp != null && peakTemp - finalTemp >= 0.1f) {
                     MetricLine(
                         label = "Cooled from peak",
-                        value = "${String.format("%.1f", peakTemp - finalTemp)}°C",
+                        value = fmt(peakTemp - finalTemp, 1, "°C"),
                         accent = MaterialTheme.status.good
                     )
                 }
@@ -219,7 +229,7 @@ fun SessionDetailScreen(
                 session.avgCpu?.let {
                     MetricLine(
                         label = "Average CPU",
-                        value = "${String.format("%.1f", it)}%",
+                        value = fmt(it, 1, "%"),
                         accent = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -227,8 +237,8 @@ fun SessionDetailScreen(
                 if (battery.isNotEmpty()) {
                     MetricLine(
                         label = "Battery",
-                        value = "${String.format("%.0f", battery.first())}% → " +
-                            "${String.format("%.0f", battery.last())}%",
+                        value = "${fmt(battery.first(), 0, "%")} → " +
+                            fmt(battery.last(), 0, "%"),
                         accent = MaterialTheme.status.good
                     )
                 }
@@ -345,7 +355,7 @@ private fun List<Float>.sanitizeTemps(): List<Float> {
 
 /** Mean change between consecutive frame times, in milliseconds. */
 private fun frameTimeJitterMs(series: List<Float>): Float? {
-    val valid = series.filter { it > 0f }
+    val valid = series.filter { it.finiteOrNull() != null && it > 0f }
     if (valid.size < 2) return null
     var total = 0.0
     for (i in 1 until valid.size) {
@@ -356,7 +366,7 @@ private fun frameTimeJitterMs(series: List<Float>): Float? {
 
 /** Spread of the per-second frame rate, in fps². Older sessions compute it here. */
 private fun fpsVariance(series: List<Float>): Float? {
-    val valid = series.filter { it > 0f }
+    val valid = series.filter { it.finiteOrNull() != null && it > 0f }
     if (valid.size < 2) return null
     val mean = valid.average()
     var total = 0.0
@@ -451,9 +461,9 @@ private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
                 )
                 Text(
                     text = buildString {
-                        append(String.format("%.0f", moment.fps)).append(" fps · ")
-                        append(String.format("%.1f", moment.tempC)).append("°C · ")
-                        append(String.format("%.0f", moment.cpu)).append("% CPU · ")
+                        append(fmt(moment.fps, 0)).append(" fps · ")
+                        append(fmt(moment.tempC, 1)).append("°C · ")
+                        append(fmt(moment.cpu, 0)).append("% CPU · ")
                         append(
                             moment.level?.let { thermalStatusLabel(it) } ?: "--"
                         )
@@ -483,7 +493,7 @@ private fun SeriesPanel(
     /** Drops placeholder readings so they cannot ruin the scale or the stats. */
     filter: (Float) -> Boolean = { true }
 ) {
-    val shown = values.filter(filter)
+    val shown = values.filter { it.finiteOrNull() != null && filter(it) }
     Panel {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -496,9 +506,7 @@ private fun SeriesPanel(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = shown.lastOrNull()?.let {
-                    "${String.format("%.1f", it)} $unit"
-                } ?: "--",
+                text = shown.lastOrNull()?.let { fmt(it, 1, " $unit") } ?: "--",
                 style = MonoInline,
                 color = color
             )
@@ -540,9 +548,9 @@ private fun SeriesPanel(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            SeriesStat("Min", shown.min(), unit)
-            SeriesStat("Average", shown.average().toFloat(), unit)
-            SeriesStat("Max", shown.max(), unit)
+            SeriesStat("Min", shown.minOrNull(), unit)
+            SeriesStat("Average", shown.averageOrNull(), unit)
+            SeriesStat("Max", shown.maxOrNull(), unit)
             if (target != null) {
                 SeriesStat("Target", target, "fps")
             }
@@ -568,7 +576,7 @@ private fun SeriesPanel(
 }
 
 @Composable
-private fun SeriesStat(label: String, value: Float, unit: String) {
+private fun SeriesStat(label: String, value: Float?, unit: String) {
     Column(horizontalAlignment = Alignment.Start) {
         Text(
             text = label,
@@ -576,7 +584,7 @@ private fun SeriesStat(label: String, value: Float, unit: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            text = "${String.format("%.1f", value)} $unit",
+            text = fmt(value, 1, " $unit"),
             style = MonoInline,
             color = MaterialTheme.colorScheme.onSurface
         )
@@ -629,11 +637,11 @@ private fun DropsPanel(session: SessionRecord, threshold: Int) {
                 )
                 Text(
                     text = buildString {
-                        append(String.format("%.0f", fps))
+                        append(fmt(fps, 0))
                         append(" fps")
-                        if (frameTime != null) {
+                        if (frameTime.finiteOrNull() != null) {
                             append(" · ")
-                            append(String.format("%.1f", frameTime))
+                            append(fmt(frameTime, 1))
                             append(" ms")
                         }
                     },

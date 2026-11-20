@@ -458,13 +458,21 @@ class FpsSampler(
         val elapsedMs = nowMs - baseline.first
         if (elapsedMs < MIN_COUNTER_WINDOW_MS) return null
         val fps = (frames - baseline.second) * 1_000f / elapsedMs
-        if (!isPlausibleFps(fps)) return null
+        val displayHz = refreshRateHz()
+        if (!isPlausibleFps(fps, displayHz)) return null
+
+        // This counter sees every surface the compositor presents while the game
+        // is in front, not only the game's own frames. A few extra status-bar or
+        // overlay frames can therefore push a 90 fps lobby to 92 or a 120 fps
+        // match to 129. Hold the number at the cap it just crossed; never push a
+        // reading upward, and leave every other source untouched.
+        val settledFps = settleToGameCap(fps, displayHz)
 
         activeSource = FpsSourceKind.TIMESTATS
         measuredLayer = "the frames presented while $pkg was in front"
         publish(
-            fps = fps,
-            frameTimeMs = 1_000f / fps,
+            fps = settledFps,
+            frameTimeMs = 1_000f / settledFps,
             source = "SurfaceFlinger presented frames",
             kind = FpsSourceKind.TIMESTATS,
             layer = measuredLayer,
@@ -685,6 +693,30 @@ class FpsSampler(
      */
     private fun isPlausibleFps(fps: Float): Boolean =
         isPlausibleFps(fps, refreshRateHz())
+
+    /**
+     * Removes the few extra frames the compositor adds on top of a game's cap.
+     *
+     * The device-wide counter is the only source that keeps counting when a
+     * game's own entry is frozen, but it counts every surface, so 90 can appear
+     * as 92 and 120 as 129. Only a small overshoot above a normal game cap is
+     * pulled down; a reading below a cap is never inflated, and a game running
+     * at a rate that is not one of these steps is published as measured.
+     */
+    private fun settleToGameCap(fps: Float, displayHz: Float?): Float {
+        val ceiling = displayHz?.takeIf { it > 0f } ?: return fps
+        val caps = floatArrayOf(
+            30f, 45f, 60f, 90f, 120f, 144f, 165f,
+            ceiling, ceiling / 2f, ceiling * 0.6f, ceiling * 0.8f
+        )
+            .filter { it <= ceiling * 1.02f }
+            .distinct()
+            .sortedDescending()
+        for (cap in caps) {
+            if (fps > cap && fps <= cap * 1.08f) return cap
+        }
+        return fps
+    }
 
     /** The refresh rate of the display that is on, when the system can tell. */
     private fun refreshRateHz(): Float? {

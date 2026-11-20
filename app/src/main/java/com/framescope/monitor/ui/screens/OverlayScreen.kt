@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.OverlayStyle
+import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.ChipRow
 import com.framescope.monitor.ui.components.Panel
@@ -462,7 +463,7 @@ private fun overlayRowValue(
     "CPU" -> system.cpuPercent?.let { "${it.toInt()}%" } ?: "--"
     "CPUF" -> system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
     "GPU" -> system.gpuFreqMHz?.let { "$it MHz" } ?: system.gpuName?.let { it.take(14) } ?: "--"
-    "TEMP" -> system.thermalMaxC?.let { "${it.toInt()}°" } ?: "--"
+    "TEMP" -> system.deviceTemperatureC()?.let { "${it.toInt()}°" } ?: "--"
     "BAT" -> system.batteryLevel?.let { "$it%" } ?: "--"
     "POWER" -> system.powerWatts?.let { "${String.format("%.2f", it)} W" } ?: "--"
     "MEM" -> system.ramPercent?.let { "$it%" } ?: "--"

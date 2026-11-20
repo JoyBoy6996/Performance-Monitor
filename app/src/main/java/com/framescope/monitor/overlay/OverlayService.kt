@@ -31,6 +31,7 @@ import com.framescope.monitor.core.FpsSourceKind
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.OverlayStyle
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -496,7 +497,7 @@ class OverlayService : Service() {
         rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
         rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
         rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")
-        val temperature = system.thermalMaxC ?: system.batteryTempC
+        val temperature = system.deviceTemperatureC()
         rowViews["TEMP"]?.text = temperature?.let { "%.1f°C".format(it) } ?: "--"
         // A warm phone throttles long before it is hot, so the temperature
         // carries its own warning colour.

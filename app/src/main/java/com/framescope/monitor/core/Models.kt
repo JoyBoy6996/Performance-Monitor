@@ -100,6 +100,17 @@ data class SystemMetrics(
     }
 }
 
+/**
+ * The phone temperature shown to the user.
+ *
+ * The battery sensor is the one every phone exposes in a known unit. The maximum
+ * of every thermal sensor can name a hotspot deep inside the chip, which is not
+ * the temperature of the phone in the hand, so it is only a fallback.
+ */
+fun SystemMetrics.deviceTemperatureC(): Float? =
+    batteryTempC?.takeIf { it in 0f..100f }
+        ?: thermalMaxC?.takeIf { it in 0f..100f }
+
 /** A recorded gameplay / app session. */
 data class SessionRecord(
     val id: String,

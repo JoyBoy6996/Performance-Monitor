@@ -151,6 +151,18 @@ class FpsSampler(
     private val latencyCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
     private val sceneFpsCalculator = SceneFpsCalculator(windowMs = 500L, staleTimeoutMs = 350L)
 
+    /**
+     * Cumulative counters of the Scene-style timestamp source.
+     *
+     * A `--latency` dump is a ring of the last presents, not a lifetime counter.
+     * The session logger expects a counter that only grows, so the new frames of
+     * each poll are added here instead of publishing the size of one window.
+     */
+    private var sceneTotalFrames = 0L
+    private var sceneJankFrames = 0L
+    private var sceneLastTimestampNs = 0L
+    private var sceneLayerKey = ""
+
     /** Counts the frames of the gfxinfo provider. */
     private val gfxCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
 
@@ -208,6 +220,7 @@ class FpsSampler(
     fun reset() {
         latencyCounter.reset()
         gfxCounter.reset()
+        resetSceneCounters()
         history.clear()
         activeSource = FpsSourceKind.NONE
         measuredLayer = null
@@ -217,6 +230,13 @@ class FpsSampler(
         globalWindowPending = false
         globalCounterUnavailable = false
         _state.value = FpsState()
+    }
+
+    private fun resetSceneCounters() {
+        sceneTotalFrames = 0L
+        sceneJankFrames = 0L
+        sceneLastTimestampNs = 0L
+        sceneLayerKey = ""
     }
 
     /**
@@ -748,6 +768,15 @@ class FpsSampler(
         return fps
     }
 
+    /** The frame rate of the slowest given share of frame intervals. */
+    private fun lowPercentFps(deltas: List<Long>, percent: Int): Float? {
+        if (deltas.size < 2) return null
+        val slowestFirst = deltas.sortedDescending()
+        val index = ((slowestFirst.size - 1) * percent / 100).coerceIn(0, slowestFirst.lastIndex)
+        val frameMs = slowestFirst[index] / 1_000_000f
+        return if (frameMs > 0f) 1000f / frameMs else null
+    }
+
     /** The refresh rate of the display that is on, when the system can tell. */
     private fun refreshRateHz(): Float? {
         val ctx = context ?: return null
@@ -949,7 +978,8 @@ class FpsSampler(
         val fps: Float,
         val ageMs: Long,
         val frames: Int,
-        val windowMs: Long
+        val windowMs: Long,
+        val presents: List<Long>
     )
 
     /**
@@ -990,7 +1020,8 @@ class FpsSampler(
                 fps = fps,
                 ageMs = ageMs,
                 frames = presents.size,
-                windowMs = spanNs / 1_000_000L
+                windowMs = spanNs / 1_000_000L,
+                presents = presents
             )
         }
 
@@ -1022,6 +1053,24 @@ class FpsSampler(
                 .thenBy { it.fps }
         ) ?: return null
 
+        // Only the frames that arrived since the last poll are new. The dump is a
+        // ring of recent presents, so counting the whole window every time would
+        // make a session report several times the frames the game really drew.
+        val key = "$pkg|${best.layer}"
+        if (sceneLayerKey != key) {
+            sceneLayerKey = key
+            sceneTotalFrames = 0L
+            sceneJankFrames = 0L
+            sceneLastTimestampNs = 0L
+        }
+        val newPresents = if (sceneLastTimestampNs > 0L) {
+            best.presents.filter { it > sceneLastTimestampNs }
+        } else best.presents
+        val newDeltas = newPresents.zipWithNext { a, b -> b - a }
+        sceneTotalFrames += newPresents.size
+        sceneJankFrames += computeFrameStats(newDeltas)?.jank?.toLong() ?: 0L
+        if (newPresents.isNotEmpty()) sceneLastTimestampNs = newPresents.last()
+
         // A few compositor frames on top make 90 read as 93 and 120 as 129.
         // Settle a small overshoot onto the cap, never push a low reading up.
         val settled = settleToGameCap(best.fps, refreshRateHz())
@@ -1034,10 +1083,12 @@ class FpsSampler(
             source = "SurfaceFlinger frame times",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = best.layer,
-            totalFrames = best.frames.toLong(),
-            jankFrames = 0L,
+            totalFrames = sceneTotalFrames,
+            jankFrames = sceneJankFrames,
             sampleAgeMs = best.ageMs,
             windowMs = best.windowMs,
+            low1PercentFps = lowPercentFps(best.presents.zipWithNext { a, b -> b - a }, 1),
+            low5PercentFps = lowPercentFps(best.presents.zipWithNext { a, b -> b - a }, 5),
             appPackage = pkg,
             nowUptime = nowUptime
         )
@@ -1186,6 +1237,7 @@ class FpsSampler(
     private fun onTargetChanged(pkg: String?) {
         latencyCounter.reset()
         gfxCounter.reset()
+        resetSceneCounters()
         // The counters are cumulative per layer, so a new app starts a new
         // baseline instead of being credited with the previous app's frames.
         counters.reset()

@@ -53,6 +53,7 @@ import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.BarMeter
@@ -729,7 +730,7 @@ private fun DiagnosticsRow(container: AppContainer) {
 @Composable
 private fun SystemPanel(system: SystemMetrics) {
     val cpu = system.cpuPercent
-    val temp = system.thermalMaxC
+    val temp = system.deviceTemperatureC()
     val tempColor = when {
         temp == null -> MaterialTheme.colorScheme.onSurface
         temp >= 45 -> MaterialTheme.status.critical
@@ -766,7 +767,11 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "°C",
                 accent = tempColor,
                 meter = temp?.let { (it / 60f).coerceIn(0f, 1f) },
-                availability = system.availabilityOf(SystemMetric.THERMAL_MAX_C),
+                availability = if (system.batteryTempC != null) {
+                    system.availabilityOf(SystemMetric.BATTERY_TEMP_C)
+                } else {
+                    system.availabilityOf(SystemMetric.THERMAL_MAX_C)
+                },
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }

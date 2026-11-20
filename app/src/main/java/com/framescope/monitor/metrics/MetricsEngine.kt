@@ -332,9 +332,20 @@ class MetricsEngine(
 
     fun startRecording() {
         if (_recording.value) return
+        // The Record button is tapped inside FrameScope, so the foreground app at
+        // that moment is FrameScope, not the game the run belongs to. The sampler
+        // remembers the last real game while FrameScope is in front; use it for
+        // the session name and let the samples switch app if the player moves.
         val current = _foregroundApp.value.orEmpty()
-        val label = appLabel(current)
-        sessionLogger.start(current, label, _system.value.batteryLevel)
+        val own = com.framescope.monitor.BuildConfig.APPLICATION_ID
+        val remembered = lastMeasuredPackage.value.orEmpty()
+        val target = if (current.isBlank() || current == own ||
+            current.contains("launcher") || current == "com.android.systemui"
+        ) {
+            remembered.takeIf { it.isNotBlank() && it != own } ?: current
+        } else current
+        val label = appLabel(target)
+        sessionLogger.start(target, label, _system.value.batteryLevel)
         _recording.value = true
         _live.value = LiveStats()
     }

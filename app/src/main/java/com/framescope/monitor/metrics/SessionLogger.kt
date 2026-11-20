@@ -5,6 +5,7 @@ import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.core.steadyWindow
 import java.util.UUID
 
@@ -150,7 +151,7 @@ class SessionLogger(private val store: SessionStore) {
         val frameTime = fpsState.frameTimeMs
         val cpu = metrics.cpuPercent ?: 0f
         val gpuFreq = metrics.gpuFreqMHz ?: 0
-        val temp = metrics.thermalMaxC ?: (metrics.batteryTempC ?: 0f)
+        val temp = metrics.deviceTemperatureC() ?: 0f
         val battery = metrics.batteryLevel ?: 0
         val ram = metrics.ramPercent ?: 0
 
@@ -216,15 +217,8 @@ class SessionLogger(private val store: SessionStore) {
 
         if (nowSec > lastBucketSec) {
             flushBucket()
-            // The chart stays continuous, but the gap is counted and kept out of the
-            // numbers rather than being turned into data that was never measured.
-            val gap = (nowSec - lastBucketSec - 1).coerceAtMost(30)
-            if (gap > 0 && secondBuckets.isNotEmpty()) {
-                val last = secondBuckets.last()
-                repeat(gap.toInt()) {
-                    secondBuckets.add(last)
-                }
-            }
+            // Gap time is removed from the averages, not filled with a copy of the
+            // last reading. A copied bucket looks like measured data on the chart.
             lastBucketSec = nowSec
         }
     }

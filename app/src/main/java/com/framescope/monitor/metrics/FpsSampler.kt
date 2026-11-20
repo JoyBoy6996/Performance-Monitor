@@ -319,11 +319,18 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // The counter of the game's own layer is the only source that separates
-        // the game from the rest of the screen. The device-wide counter follows
-        // the panel - this phone refreshes at 150 Hz, so it reads 120+ even in a
-        // 90 fps lobby. It must never win while a real game layer has a growing
-        // counter of its own.
+        // Scene FPS Meter and the other accurate meters read the hardware
+        // present timestamps of the game's own layer and derive FPS from their
+        // span. No wall-clock window or sampling interval can distort that, so
+        // it is the primary source for a game. The panel here runs at 150 Hz;
+        // the device-wide counter measures that, not the game.
+        val fromScene = if (detectedGame) {
+            sampleFromSceneLatency(pkg, nowUptime)
+        } else null
+        if (fromScene != null) return fromScene
+
+        // TimeStats counters are the fallback when a build keeps no present
+        // timestamps for the game's layer.
         val fromCounters = if (detectedGame) {
             sampleFromCounters(pkg, targetFps, nowUptime)
         } else null
@@ -679,13 +686,14 @@ class FpsSampler(
         if (!sceneResult.isSceneActive || sceneResult.fps <= 0) return null
         val fps = sceneResult.fps.toFloat()
         if (!isPlausibleFps(fps)) return null
+        val settled = settleToGameCap(fps, refreshRateHz())
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = layer
 
         publish(
-            fps = fps,
-            frameTimeMs = sceneResult.avgFrameTimeMs.takeIf { it > 0f } ?: (1000f / fps),
+            fps = settled,
+            frameTimeMs = 1_000f / settled,
             source = "SurfaceFlinger frame times",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = layer,
@@ -935,6 +943,107 @@ class FpsSampler(
         return _state.value
     }
 
+    /** One valid present-timestamp reading of a layer. */
+    private data class SceneLatencyReading(
+        val layer: String,
+        val fps: Float,
+        val ageMs: Long,
+        val frames: Int,
+        val windowMs: Long
+    )
+
+    /**
+     * FPS from the hardware present timestamps - the method Scene FPS Meter uses.
+     *
+     * `dumpsys SurfaceFlinger --latency <layer>` answers with the last presents of
+     * one layer. The frame rate is the number of frames over the span of their
+     * timestamps, so neither a slow shell call nor the sampling interval can move
+     * it. Pending and sentinel timestamps are dropped by the parser. TimeStats
+     * counters are only a fallback for builds that keep no present timestamps.
+     */
+    private suspend fun sampleFromSceneLatency(
+        pkg: String,
+        nowUptime: Long
+    ): FpsState? {
+        val nowUptimeNs = SystemClock.uptimeNanos()
+        val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
+        val readings = mutableListOf<SceneLatencyReading>()
+
+        fun consider(layer: String, dump: String) {
+            if (dump.isBlank()) return
+            val sample = parseLayerLatencies("@@@$layer\n$dump").firstOrNull() ?: return
+            val presents = sample.presents.filter { it > 0L && it < Long.MAX_VALUE }
+            if (presents.size < MIN_EXACT_FRAMES) return
+            val spanNs = presents.last() - presents.first()
+            if (spanNs <= 0L) return
+            // The age is only for the report. A build may stamp presents on a
+            // clock this process cannot match; the span between them is still
+            // the frame rate, so it must not throw the reading away.
+            val ageMs = (presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs)
+                ?: 0L) / 1_000_000L
+            val fps = (presents.size - 1) * 1_000_000_000f / spanNs
+            // An idle surface presents a handful of frames a second. Calling
+            // that the game's FPS would be the wrong number again.
+            if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) return
+            readings += SceneLatencyReading(
+                layer = layer,
+                fps = fps,
+                ageMs = ageMs,
+                frames = presents.size,
+                windowMs = spanNs / 1_000_000L
+            )
+        }
+
+        // A game usually names its buffer after its package. Asking those layers
+        // by name is what keeps a system surface from being published as the
+        // game's frame rate.
+        val list = hub.execOrNull(ShellCommands.surfaceList(), LIST_TIMEOUT_MS)?.out.orEmpty()
+        for (name in layerNamesFor(list, pkg, ownLimit = 6, newestLimit = 0)) {
+            val dump = hub.execOrNull(
+                ShellCommands.surfaceLatencyOfLayer(name), EXACT_LATENCY_TIMEOUT_MS
+            )?.out.orEmpty()
+            consider(name, dump)
+        }
+
+        // An engine-named surface carries no package. The unnamed probe answers
+        // for the layer that presented last - the game while it is drawing.
+        if (readings.isEmpty()) {
+            val dump = hub.execOrNull(
+                ShellCommands.surfaceLatencyDefault(), ACTIVE_LATENCY_TIMEOUT_MS
+            )?.out.orEmpty()
+            consider("the layer that is on the screen", dump)
+        }
+
+        // Prefer a layer that names the game, then the fastest one that proved
+        // it is drawing. A game owns several surfaces and only the engine's own
+        // buffer presents the frames the player sees.
+        val best = readings.maxWithOrNull(
+            compareBy<SceneLatencyReading> { it.layer.contains(pkg, ignoreCase = true) }
+                .thenBy { it.fps }
+        ) ?: return null
+
+        // A few compositor frames on top make 90 read as 93 and 120 as 129.
+        // Settle a small overshoot onto the cap, never push a low reading up.
+        val settled = settleToGameCap(best.fps, refreshRateHz())
+        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
+        measuredLayer = best.layer
+        pendingWarmUpReason = null
+        publish(
+            fps = settled,
+            frameTimeMs = 1_000f / settled,
+            source = "SurfaceFlinger frame times",
+            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+            layer = best.layer,
+            totalFrames = best.frames.toLong(),
+            jankFrames = 0L,
+            sampleAgeMs = best.ageMs,
+            windowMs = best.windowMs,
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
+    }
+
     /**
      * The layer SurfaceFlinger is presenting right now.
      *
@@ -974,6 +1083,7 @@ class FpsSampler(
         val stats = computeFrameStats(deltas) ?: return null
         val fps = stats.fps
         if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) return null
+        val settled = settleToGameCap(fps, refreshRateHz())
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = "the layer that is on the screen"
@@ -982,8 +1092,8 @@ class FpsSampler(
         val result = latencyCounter.onSample("active", presents, nowUptime)
 
         publish(
-            fps = fps,
-            frameTimeMs = stats.frameTimeMs,
+            fps = settled,
+            frameTimeMs = 1_000f / settled,
             source = "SurfaceFlinger (the layer on the screen)",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = "active",

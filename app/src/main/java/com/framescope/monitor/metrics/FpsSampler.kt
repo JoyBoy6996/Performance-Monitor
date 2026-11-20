@@ -375,21 +375,14 @@ class FpsSampler(
         val windowSeconds = if (tick.windowNs > 0L) tick.windowNs / 1_000_000_000.0 else 0.0
         if (windowSeconds <= 0.0) return null
 
-        // A screen that is standing still presents no frames at all, and a zero
-        // would look like a broken measurement. The display is still refreshing,
-        // so that is what is shown, named as what it is.
-        // The display refresh rate is only shown when the app in front is the
-        // one that is standing still. A layer of somebody else standing still
-        // says nothing about the game, and showing its rate is a number that
-        // belongs to nothing - the game at 120 fps would read as 144.
+        // When nothing is being presented, the honest answer is 0, not the
+        // display refresh rate. Display refresh rate is a "hz" number; read
+        // as FPS it belongs to nobody, so a game at 90 would read as 144. A
+        // zero that stays means the game is frozen; the frozen block below
+        // asks the game's layers once more before this 0 is published.
         val idle = tick.staticScreen && tick.belongsToApp
-        val fps: Double = if (idle) {
-            // Use the actual display refresh rate, not the 30 Hz bucketed rate.
-            (refreshRateHz()?.toInt() ?: tick.displayRefreshRate)?.toDouble() ?: return null
-        } else {
-            tick.fps
-        }
-        if (fps <= 0.0) return null
+        var fps: Double = if (idle) 0.0 else tick.fps
+        if (fps <= 0.0 && !idle) return null
         // When the layer named its display rate, the counters already clamped
         // the growth to it - and that rate is bucketed in 30 Hz steps, so a
         // 165 Hz panel reads as 180 and must not be judged against 165.
@@ -412,16 +405,19 @@ class FpsSampler(
 
         // The counter can name a surface that is not the one drawing - a game
         // keeps several - so a window with no frames is not proof that nothing
-        // is drawing. Before the display rate is shown, the app's own layers are
-        // asked once more, at a slow cadence so an idle screen stays quiet.
+        // is drawing. Before the app is called frozen, its own layers are asked
+        // once more, at a slow cadence so an idle screen stays quiet.
         //
-        // This is the case that used to read "144 FPS" inside a game running at
-        // 90: its counters were still, so the display rate was published while
-        // the game was drawing all along.
+        // When they say nothing too, the 0 stands: the game is frozen (a
+        // reason might be the game itself is idle or drawing very slowly), so
+        // the app reads 0 instead of the panel's refresh rate as if it were the
+        // game's rate.
         if (idle && SystemClock.elapsedRealtime() >= idleSweepNextAt) {
             idleSweepNextAt = SystemClock.elapsedRealtime() + IDLE_SWEEP_COOLDOWN_MS
             val fromLayers = sampleFromLatency(pkg, targetFps, nowUptime)
             if (fromLayers != null) return fromLayers
+            // Guide: no new frames arriving after waiting -> 0, not 144.
+            fps = 0.0
         }
 
         activeSource = FpsSourceKind.TIMESTATS
@@ -446,9 +442,9 @@ class FpsSampler(
 
         publish(
             fps = fps.toFloat(),
-            frameTimeMs = (1000.0 / fps).toFloat(),
+            frameTimeMs = if (fps > 0.0) (1000.0 / fps).toFloat() else 0.0f,
             source = if (idle) {
-                "display refresh (nothing is drawing)"
+                "no frames are being presented"
             } else {
                 "SurfaceFlinger counters"
             },

@@ -78,6 +78,35 @@ private val DEVICE_NAMES = mapOf(
     "I2405" to "iQOO Neo 10"
 )
 
+/** Standard RAM sizes a phone is sold with, in GiB. */
+private val RAM_VARIANTS_GB = intArrayOf(2, 3, 4, 6, 8, 10, 12, 16, 18, 20, 24, 32)
+
+/** Standard storage sizes a phone is sold with, in decimal GB. */
+private val STORAGE_VARIANTS_GB = intArrayOf(16, 32, 64, 128, 256, 512, 1024)
+
+/**
+ * Android reports usable capacity, not the number on the box: a 12 GB phone
+ * commonly reports 11.x GiB and a 256 GB phone about 236 GB because the system
+ * reserves part of the chip. Map the real reading to the nearest standard
+ * variant instead of showing the usable number as if it were the variant.
+ *
+ * The raw reading is still shown in the RAM and Storage rows below.
+ */
+private fun variantSize(rawGb: Float?, sizes: IntArray): String? {
+    val raw = rawGb?.finiteOrNull()?.takeIf { it > 0f } ?: return null
+    // Smallest marketed size whose usable capacity could look this big.
+    sizes.firstOrNull { size -> raw <= size && raw >= size * 0.82f }?.let { return it.toString() }
+    // A reading above every known size, or between two of them, still gets the
+    // closest standard size. Ties go to the larger one.
+    var best = sizes.first()
+    for (size in sizes) {
+        val gap = kotlin.math.abs(size - raw)
+        val bestGap = kotlin.math.abs(best - raw)
+        if (gap < bestGap || (gap == bestGap && size > best)) best = size
+    }
+    return best.toString()
+}
+
 /**
  * Chipset IDs Android exposes through ro.soc.model, translated to the names people
  * know. An ID that is not listed is shown as-is; nothing is guessed from a GPU name.
@@ -611,8 +640,8 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
 
         divider()
         Text("Memory and display", style = MaterialTheme.typography.titleSmall, color = onSurface)
-        val ramMarketing = system.ramTotalGb.finiteOrNull()?.let { Math.ceil(it.toDouble()).toInt() }
-        val storageMarketing = facts.storageTotalGb.finiteOrNull()?.let { Math.round(it.toDouble()).toInt() }
+        val ramMarketing = variantSize(system.ramTotalGb.finiteOrNull(), RAM_VARIANTS_GB)
+        val storageMarketing = variantSize(facts.storageTotalGb.finiteOrNull(), STORAGE_VARIANTS_GB)
         val variant = when {
             ramMarketing != null && storageMarketing != null ->
                 "$ramMarketing GB + $storageMarketing GB"
@@ -621,6 +650,11 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
             else -> "--"
         }
         MetricLine("Variant", variant, onSurface)
+        Text(
+            text = "Nearest standard size; RAM and Storage show usable capacity",
+            style = MaterialTheme.typography.labelSmall,
+            color = muted
+        )
         MetricLine(
             "RAM",
             system.ramTotalGb.finiteOrNull()?.let { total ->

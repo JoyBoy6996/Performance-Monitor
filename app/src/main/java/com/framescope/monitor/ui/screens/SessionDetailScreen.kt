@@ -160,6 +160,15 @@ fun SessionDetailScreen(
                         accent = MaterialTheme.status.warn
                     )
                 }
+                val finalTemp = session.tempSeries.lastOrNull()
+                val peakTemp = session.maxTempC
+                if (peakTemp != null && finalTemp != null && peakTemp - finalTemp >= 0.1f) {
+                    MetricLine(
+                        label = "Cooled from peak",
+                        value = "${String.format("%.1f", peakTemp - finalTemp)}°C",
+                        accent = MaterialTheme.status.good
+                    )
+                }
                 session.peakThermalStatus?.let { status ->
                     MetricLine(
                         label = "Thermal state",

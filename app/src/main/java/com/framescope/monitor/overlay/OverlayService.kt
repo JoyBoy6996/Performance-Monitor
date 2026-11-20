@@ -491,7 +491,7 @@ class OverlayService : Service() {
             "FRAMESCOPE"
         }
 
-        // Support all 11 rows: FPS, FRAME, CPU, CPUF, GPU, TEMP, BAT, POWER, MEM, REFRESH, APP
+        // Support every selectable row, including the live heat/peak/cool-down pair.
         rowViews["FPS"]?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         rowViews["FRAME"]?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else "--"
         rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
@@ -502,6 +502,10 @@ class OverlayService : Service() {
         // A warm phone throttles long before it is hot, so the temperature
         // carries its own warning colour.
         temperature?.let { rowViews["TEMP"]?.setTextColor(OverlayViews.temperatureColor(it)) }
+        rowViews["HEAT"]?.text = system.tempPeakC?.let { peak ->
+            val cooled = system.tempCooledC ?: 0f
+            "↑%.1f°C ↓%.1f°C".format(peak, cooled)
+        } ?: "--"
         rowViews["BAT"]?.text = system.batteryLevel?.let { "$it%" } ?: "--"
         rowViews["POWER"]?.text = system.powerWatts?.let { "%.2f W".format(it) } ?: "--"
         rowViews["MEM"]?.text = if (system.ramUsedGb != null && system.ramTotalGb != null) {

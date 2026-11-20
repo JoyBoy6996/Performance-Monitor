@@ -82,7 +82,7 @@ class AppSettings(context: Context) {
 
     val overlayEnabled = Pref(sp, "overlay_enabled", false)
     val overlayStyle = Pref(sp, "overlay_style", OverlayStyle.CLASSIC.name)
-    val overlayRows = Pref(sp, "overlay_rows", "FPS,FRAME,CPU,GPU,TEMP,BAT,MEM")
+    val overlayRows = Pref(sp, "overlay_rows", "FPS,FRAME,CPU,GPU,TEMP,HEAT,BAT,MEM")
     val overlayOpacity = Pref(sp, "overlay_opacity", 0.88f)
     val overlayScale = Pref(sp, "overlay_scale", 1.0f)
     val overlayX = Pref(sp, "overlay_x", 0.03f)

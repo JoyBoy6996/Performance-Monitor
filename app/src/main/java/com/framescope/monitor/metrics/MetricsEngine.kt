@@ -9,6 +9,7 @@ import com.framescope.monitor.core.ProtectedApps
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.CoroutineScope
@@ -294,7 +295,7 @@ class MetricsEngine(
     private fun publishSystem() {
         val native = _native.value
         val privileged = _privileged.value
-        _system.value = SystemMetrics(
+        val merged = SystemMetrics(
             cpuPercent = privileged.cpuPercent,
             cpuFreqMHz = privileged.cpuFreqMHz,
             gpuName = privileged.gpuName,
@@ -306,6 +307,7 @@ class MetricsEngine(
             ramTotalGb = native.ramTotalGb,
             ramPercent = native.ramPercent,
             thermalMaxC = privileged.thermalMaxC,
+            thermalStatus = privileged.thermalStatus,
             refreshHz = native.refreshHz,
             updatedAt = maxOf(native.updatedAt, privileged.updatedAt),
             availability = native.availability + privileged.availability,
@@ -315,6 +317,20 @@ class MetricsEngine(
                 privileged.measuredAtElapsedNanos
             )
         )
+
+        // Keep the hottest value until the phone actually drops below it. A dip
+        // between two readings must not erase the peak, or "cooled down" lies.
+        val previous = _system.value
+        val now = merged.deviceTemperatureC()
+        val peak = when {
+            now == null -> previous.tempPeakC
+            previous.tempPeakC == null || now > previous.tempPeakC -> now
+            else -> previous.tempPeakC
+        }
+        val cooled = if (now != null && peak != null) {
+            (peak - now).coerceAtLeast(0f)
+        } else null
+        _system.value = merged.copy(tempPeakC = peak, tempCooledC = cooled)
     }
 
     /** Where the foreground answer came from, in words a user can read. */
@@ -346,6 +362,10 @@ class MetricsEngine(
         } else current
         val label = appLabel(target)
         sessionLogger.start(target, label, _system.value.batteryLevel)
+        // A recording is its own heat story: start the peak from the temperature at
+        // the moment Record was pressed, not from a hot session earlier today.
+        val atStart = _system.value.deviceTemperatureC()
+        _system.value = _system.value.copy(tempPeakC = atStart, tempCooledC = 0f.takeIf { atStart != null })
         _recording.value = true
         _live.value = LiveStats()
     }

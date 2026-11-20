@@ -823,6 +823,33 @@ private fun SystemPanel(system: SystemMetrics) {
                 accent = if (status > 0) MaterialTheme.status.warn else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = Space.md),
+            color = MaterialTheme.colorScheme.outlineVariant
+        )
+        Text(
+            text = "Live temperature",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        MetricLine(
+            label = "Now",
+            value = temp?.let { String.format("%.1f°C", it) } ?: "--",
+            accent = tempColor
+        )
+        MetricLine(
+            label = "Peak",
+            value = system.tempPeakC?.let { String.format("%.1f°C", it) } ?: "--",
+            accent = MaterialTheme.status.warn
+        )
+        MetricLine(
+            label = "Cooled from peak",
+            value = system.tempCooledC?.let { String.format("%.1f°C", it) } ?: "--",
+            accent = if ((system.tempCooledC ?: 0f) >= 0.1f) {
+                MaterialTheme.status.good
+            } else MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

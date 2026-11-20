@@ -69,18 +69,97 @@ import kotlinx.coroutines.launch
 /** Everything needed to see why the frame data looks the way it does. */
 private val DIAGNOSTIC_COMMAND = com.framescope.monitor.ui.Diagnostics.command
 
+/**
+ * Chipset IDs Android exposes through ro.soc.model, translated to the names people
+ * know. An ID that is not listed is shown as-is; nothing is guessed from a GPU name.
+ */
+private val CHIPSET_NAMES = mapOf(
+    "SM8735" to "Snapdragon 8s Gen 4",
+    "SM8750" to "Snapdragon 8 Elite",
+    "SM8650" to "Snapdragon 8 Gen 3",
+    "SM8635" to "Snapdragon 8s Gen 3",
+    "SM8550" to "Snapdragon 8 Gen 2",
+    "SM8475" to "Snapdragon 8+ Gen 1",
+    "SM8450" to "Snapdragon 8 Gen 1",
+    "SM8350" to "Snapdragon 888+",
+    "SM8250" to "Snapdragon 865",
+    "SM8150" to "Snapdragon 855",
+    "SDM845" to "Snapdragon 845",
+    "SDM660" to "Snapdragon 660",
+    "SM7325" to "Snapdragon 778G",
+    "SM7125" to "Snapdragon 720G",
+    "SM6375" to "Snapdragon 695",
+    "SM6150" to "Snapdragon 675",
+    "SM6125" to "Snapdragon 665",
+    "SM4350" to "Snapdragon 480",
+    "SM4250" to "Snapdragon 460",
+    "MT6989" to "Dimensity 9300",
+    "MT6985" to "Dimensity 9200",
+    "MT6983" to "Dimensity 9000",
+    "MT6893" to "Dimensity 8000",
+    "MT6891Z" to "Dimensity 1100",
+    "MT6889Z" to "Dimensity 1000+",
+    "MT6877" to "Dimensity 900",
+    "MT6873" to "Dimensity 800",
+    "MT6833" to "Dimensity 700",
+    "EXYNOS2400" to "Exynos 2400",
+    "EXYNOS2200" to "Exynos 2200",
+    "EXYNOS2100" to "Exynos 2100",
+    "EXYNOS990" to "Exynos 990",
+    "EXYNOS9820" to "Exynos 9820",
+    "EXYNOS9810" to "Exynos 9810",
+    "KIRIN9000S" to "Kirin 9000S",
+    "KIRIN9000" to "Kirin 9000",
+    "KIRIN990" to "Kirin 990",
+    "KIRIN980" to "Kirin 980",
+    "KIRIN970" to "Kirin 970"
+)
+
+/** Turns a raw SoC ID into a readable processor name, on every brand. */
+private fun chipsetDisplayName(
+    soc: String?,
+    vendor: String?,
+    platform: String?,
+    chipset: String?
+): String? {
+    val raw = listOf(chipset, soc, platform)
+        .mapNotNull { it?.trim()?.takeIf { it.isNotBlank() } }
+    val marketing = Regex(
+        "snapdragon|dimensity|exynos|tensor|kirin|helio",
+        RegexOption.IGNORE_CASE
+    )
+    val direct = raw.firstOrNull { marketing.containsMatchIn(it) }
+    if (direct != null) return direct.replace(Regex("\\s+"), " ").take(48)
+
+    val id = raw.map { it.uppercase(java.util.Locale.US) }
+        .mapNotNull { text ->
+            Regex(
+                "(SM[0-9]{4}[A-Z-]*|SDM[0-9]{4}|MSM[0-9]{4}|" +
+                    "MT[0-9]{4}[A-Z]*|EXYNOS[0-9]{4}|KIRIN[0-9]{3,4})"
+            ).find(text)?.value
+        }
+        .firstOrNull()
+        ?.let { if (it.startsWith("SM") && it.length > 6) it.take(6) else it }
+        ?: return raw.firstOrNull()?.take(48)
+
+    return CHIPSET_NAMES[id] ?: id
+}
+
 /** Device facts that are safe to show even when a shell reading is unavailable. */
 private data class DeviceFacts(
     val platform: String? = null,
     val soc: String? = null,
     val vendor: String? = null,
+    val chipset: String? = null,
+    val processor: String? = null,
     val cpu: String? = null,
     val battery: NativeCollectors.BatteryReading? = null,
     val health: String? = null,
     val technology: String? = null,
     val cycles: String? = null,
     val status: String? = null,
-    val storage: String? = null,
+    val storageFreeGb: Float? = null,
+    val storageTotalGb: Float? = null,
     val display: String? = null
 )
 
@@ -93,7 +172,8 @@ private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceF
         hub.execOrNull(
             "echo platform=\$(getprop ro.board.platform); " +
                 "echo soc=\$(getprop ro.soc.model); " +
-                "echo vendor=\$(getprop ro.soc.manufacturer)"
+                "echo vendor=\$(getprop ro.soc.manufacturer); " +
+                "echo chipset=\$(getprop ro.chipset)"
         )?.out.orEmpty()
     }.getOrDefault("")
 
@@ -135,14 +215,28 @@ private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceF
         else -> value
     }
 
+    // "charge counter" is remaining charge in µAh, not a cycle count. Only a
+    // real cycle counter is shown; an absent one stays "--" instead of being faked.
+    val cycleDump = runCatching {
+        hub.execOrNull("cat /sys/class/power_supply/battery/cycle_count 2>/dev/null")?.out.orEmpty()
+    }.getOrDefault("")
+    val cycles = listOf(
+        cycleDump.lineSequence().firstOrNull { it.isNotBlank() }?.trim(),
+        batteryField("cycle_count", "cycles", "cycle")
+    ).mapNotNull { raw ->
+        raw?.toIntOrNull()?.takeIf { it in 0..10_000 }
+    }.firstOrNull()?.toString()
+
     val battery = runCatching { NativeCollectors(context).battery().value }.getOrNull()
 
+    // Storage is sold in decimal GB: 256 GB means 256,000,000,000 bytes, not 238 GiB.
     val storage = runCatching {
         val stat = android.os.StatFs(android.os.Environment.getDataDirectory().path)
-        val gb = 1024f * 1024f * 1024f
-        val total = stat.blockCountLong * stat.blockSizeLong / gb
-        val free = stat.availableBlocksLong * stat.blockSizeLong / gb
-        String.format(java.util.Locale.US, "%.1f / %.1f GB free", free, total)
+        val gb = 1_000_000_000f
+        Pair(
+            stat.availableBlocksLong * stat.blockSizeLong / gb,
+            stat.blockCountLong * stat.blockSizeLong / gb
+        )
     }.getOrNull()
 
     val metrics = context.resources.displayMetrics
@@ -152,13 +246,16 @@ private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceF
         platform = prop("platform"),
         soc = prop("soc"),
         vendor = prop("vendor"),
+        chipset = prop("chipset"),
+        processor = chipsetDisplayName(prop("soc"), prop("vendor"), prop("platform"), prop("chipset")),
         cpu = cpu,
         battery = battery,
         health = health(batteryField("health")),
         technology = batteryField("technology"),
-        cycles = batteryField("cycle", "charge counter"),
+        cycles = cycles,
         status = status(batteryField("status")),
-        storage = storage,
+        storageFreeGb = storage?.first,
+        storageTotalGb = storage?.second,
         display = display
     )
 }
@@ -383,6 +480,7 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
     val onSurface = MaterialTheme.colorScheme.onSurface
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val warn = MaterialTheme.status.warn
+    val good = MaterialTheme.status.good
 
     Panel {
         @Composable
@@ -410,9 +508,12 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
 
         divider()
         Text("Processor", style = MaterialTheme.typography.titleSmall, color = onSurface)
-        facts.platform?.let { MetricLine("Platform", it, onSurface) }
-        facts.vendor?.let { MetricLine("SoC vendor", it, onSurface) }
-        facts.soc?.let { MetricLine("SoC model", it, onSurface) }
+        MetricLine("Processor", facts.processor ?: facts.soc ?: "--", onSurface)
+        facts.soc?.takeIf { it != facts.processor }?.let {
+            MetricLine("SoC ID", it, muted)
+        }
+        facts.vendor?.let { MetricLine("SoC vendor", it, muted) }
+        facts.platform?.let { MetricLine("Platform", it, muted) }
         facts.cpu?.let { MetricLine("CPU", it.take(48), onSurface) }
         MetricLine("CPU clock", system.cpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
         system.cpuPercent?.let {
@@ -423,6 +524,16 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
 
         divider()
         Text("Memory and display", style = MaterialTheme.typography.titleSmall, color = onSurface)
+        val ramMarketing = system.ramTotalGb?.let { Math.ceil(it.toDouble()).toInt() }
+        val storageMarketing = facts.storageTotalGb?.let { Math.round(it.toDouble()).toInt() }
+        val variant = when {
+            ramMarketing != null && storageMarketing != null ->
+                "$ramMarketing GB + $storageMarketing GB"
+            ramMarketing != null -> "$ramMarketing GB RAM"
+            storageMarketing != null -> "$storageMarketing GB storage"
+            else -> "--"
+        }
+        MetricLine("Variant", variant, onSurface)
         MetricLine(
             "RAM",
             system.ramTotalGb?.let { total ->
@@ -430,7 +541,18 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
             } ?: "--",
             onSurface
         )
-        MetricLine("Storage", facts.storage ?: "--", onSurface)
+        MetricLine(
+            "Storage",
+            if (facts.storageFreeGb != null && facts.storageTotalGb != null) {
+                String.format(
+                    java.util.Locale.US,
+                    "%.1f / %.0f GB free",
+                    facts.storageFreeGb,
+                    facts.storageTotalGb
+                )
+            } else "--",
+            onSurface
+        )
         MetricLine("Resolution", facts.display ?: "--", onSurface)
         MetricLine(
             "Refresh rate",
@@ -444,7 +566,7 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
         facts.status?.let { MetricLine("Status", it, onSurface) }
         facts.health?.let { MetricLine("Health", it, onSurface) }
         facts.technology?.let { MetricLine("Technology", it, onSurface) }
-        facts.cycles?.let { MetricLine("Cycles", it, onSurface) }
+        MetricLine("Cycles", facts.cycles ?: "--", onSurface)
         MetricLine(
             "Temperature",
             facts.battery?.temperatureC?.let { String.format("%.1f°C", it) } ?: "--",
@@ -463,6 +585,16 @@ private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
             "Phone temperature",
             system.deviceTemperatureC()?.let { String.format("%.1f°C", it) } ?: "--",
             warn
+        )
+        MetricLine(
+            "Peak temperature",
+            system.tempPeakC?.let { String.format("%.1f°C", it) } ?: "--",
+            warn
+        )
+        MetricLine(
+            "Cooled from peak",
+            system.tempCooledC?.let { String.format("%.1f°C", it) } ?: "--",
+            if ((system.tempCooledC ?: 0f) >= 0.1f) good else muted
         )
         MetricLine(
             "State",

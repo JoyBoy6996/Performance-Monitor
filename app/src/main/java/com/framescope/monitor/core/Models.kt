@@ -61,6 +61,10 @@ data class SystemMetrics(
     val thermalMaxC: Float? = null,
     /** Android's thermal mitigation level: 0 = none, 1 = light, 2 = moderate, 3 = severe. */
     val thermalStatus: Int? = null,
+    /** Warmest temperature seen since monitoring began (or since the current recording). */
+    val tempPeakC: Float? = null,
+    /** How far the phone has cooled from that peak, in °C. */
+    val tempCooledC: Float? = null,
     val refreshHz: Float? = null,
     val updatedAt: Long = 0L,
     /** Why each metric is or is not available. A metric missing here is unavailable. */

@@ -18,12 +18,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Text
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.core.ThemeMode
 import com.framescope.monitor.recorder.ScreenRecorderService
 import com.framescope.monitor.ui.FrameScopeRoot
 import com.framescope.monitor.ui.collectAsStateValue
+import com.framescope.monitor.ui.screens.FirstRunSetupDialog
 import com.framescope.monitor.ui.theme.FrameScopeTheme
 import kotlinx.coroutines.launch
 
@@ -97,12 +103,24 @@ class MainActivity : ComponentActivity() {
                 motionEnabled = motionEnabled
             ) {
                 val windowSize = calculateWindowSizeClass(this)
+                val setupDone = app.settings.setupCompleted.flow.collectAsStateValue()
+                var showSetup by remember { mutableStateOf(!setupDone) }
+                LaunchedEffect(setupDone) {
+                    if (setupDone) showSetup = false
+                }
                 FrameScopeRoot(
                     container = app,
                     widthSizeClass = windowSize.widthSizeClass,
                     onRequestOverlayPermission = { requestOverlayPermission() },
                     onRequestScreenRecord = { requestScreenRecording() }
                 )
+                if (showSetup) {
+                    FirstRunSetupDialog(
+                        container = app,
+                        onRequestOverlayPermission = { requestOverlayPermission() },
+                        onDismiss = { showSetup = false }
+                    )
+                }
             }
         }
     }

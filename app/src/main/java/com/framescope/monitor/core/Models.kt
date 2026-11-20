@@ -108,15 +108,30 @@ data class SystemMetrics(
 }
 
 /**
+ * Temperatures a phone can actually report.
+ *
+ * Several devices return a near-100 value (99.9 is common) from a thermal or
+ * battery sensor that is absent or uncalibrated. A phone switches off long before
+ * 100 °C, so such a reading is a placeholder, never a real heat reading. These
+ * helpers discard it instead of letting it become a "peak" or a chart maximum.
+ */
+const val MAX_BATTERY_TEMP_C = 70f
+const val MAX_HOTSPOT_TEMP_C = 85f
+
+/** Zero is the "no reading" sentinel, so only values strictly above it count. */
+fun Float?.plausibleTempC(max: Float): Float? = this?.takeIf { it > 0f && it <= max }
+
+/**
  * The phone temperature shown to the user.
  *
  * The battery sensor is the one every phone exposes in a known unit. The maximum
  * of every thermal sensor can name a hotspot deep inside the chip, which is not
- * the temperature of the phone in the hand, so it is only a fallback.
+ * the temperature of the phone in the hand, so it is only a fallback. Placeholder
+ * values are rejected before either source is used.
  */
 fun SystemMetrics.deviceTemperatureC(): Float? =
-    batteryTempC?.takeIf { it in 0f..100f }
-        ?: thermalMaxC?.takeIf { it in 0f..100f }
+    batteryTempC.plausibleTempC(MAX_BATTERY_TEMP_C)
+        ?: thermalMaxC.plausibleTempC(MAX_HOTSPOT_TEMP_C)
 
 /** Plain name of Android's thermal mitigation level, or "--" when the device reports none. */
 fun thermalStatusLabel(status: Int?): String = when (status) {

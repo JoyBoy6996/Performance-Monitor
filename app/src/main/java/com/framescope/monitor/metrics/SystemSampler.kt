@@ -1,8 +1,10 @@
 package com.framescope.monitor.metrics
 
+import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
@@ -50,9 +52,10 @@ class SystemSampler(private val hub: ShellHub) {
 
         val gpuName = Parsers.parseGpuName(gpu)
         val gpuFreq = Parsers.parseGpuFreq(gpu)
-        // Some devices expose placeholder sensors at 0 or impossible hotspots.
-        // Neither is the temperature of the phone the user is holding.
-        val maxThermal = thermals.values.filter { it in 0f..100f }.maxOrNull()
+        // Some devices expose placeholder sensors at 99.9 or impossible hotspots.
+        // Neither is the temperature of the phone the user is holding, so reject
+        // them before taking the maximum.
+        val maxThermal = thermals.values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
         val thermalStatus = Parsers.parseThermalStatus(part(3))
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")

@@ -2,10 +2,12 @@ package com.framescope.monitor.metrics
 
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
+import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.core.steadyWindow
 import java.util.UUID
 
@@ -322,7 +324,7 @@ class SessionLogger(private val store: SessionStore) {
             100f
         }
         val avgFt = samples.map { it.frameTimeMs }.average().toFloat()
-        val maxTemp = samples.map { it.thermalMaxC }.filter { it > 0f }.maxOrNull()
+        val maxTemp = samples.mapNotNull { it.thermalMaxC.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
         val peakThermalStatus = samples.mapNotNull { it.thermalStatus }.maxOrNull()
         val throttledSeconds = secondBuckets.count { (it.thermalStatus ?: 0) > 0 }
@@ -390,7 +392,7 @@ class SessionLogger(private val store: SessionStore) {
             samples.map { it.frameTimeMs }.average().toFloat()
         } else if (avgFps > 0f) 1000f / avgFps else 16.6f
 
-        val maxTemp = samples.map { it.thermalMaxC }.filter { it > 0f }.maxOrNull()
+        val maxTemp = samples.mapNotNull { it.thermalMaxC.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
         val peakThermalStatus = samples.mapNotNull { it.thermalStatus }.maxOrNull()
         val throttledSeconds = secondBuckets.count { (it.thermalStatus ?: 0) > 0 }

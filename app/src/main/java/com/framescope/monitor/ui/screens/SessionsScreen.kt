@@ -32,7 +32,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
+import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.EmptyState
 import com.framescope.monitor.ui.components.MetricLine
@@ -290,7 +292,7 @@ private fun SessionCard(
             value = session.totalFrames.toString(),
             accent = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        session.maxTempC?.let {
+        session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let {
             MetricLine(
                 label = "Peak temperature",
                 value = "${it.toInt()}°C",

@@ -25,7 +25,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.core.steadyWindow
 import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.ui.FrameScopeScreen
@@ -153,15 +155,15 @@ fun SessionDetailScreen(
                         MaterialTheme.colorScheme.onSurface
                     }
                 )
-                session.maxTempC?.let {
+                val peakTemp = session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)
+                peakTemp?.let {
                     MetricLine(
                         label = "Peak temperature",
                         value = "${String.format("%.1f", it)}°C",
                         accent = MaterialTheme.status.warn
                     )
                 }
-                val finalTemp = session.tempSeries.lastOrNull()
-                val peakTemp = session.maxTempC
+                val finalTemp = session.tempSeries.lastOrNull().plausibleTempC(MAX_HOTSPOT_TEMP_C)
                 if (peakTemp != null && finalTemp != null && peakTemp - finalTemp >= 0.1f) {
                     MetricLine(
                         label = "Cooled from peak",
@@ -254,7 +256,8 @@ fun SessionDetailScreen(
                 title = "Temperature",
                 values = session.tempSeries,
                 unit = "°C",
-                color = MaterialTheme.status.critical
+                color = MaterialTheme.status.critical,
+                filter = { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) != null }
             )
         }
 
@@ -300,6 +303,17 @@ private data class TimelineMoment(
     val level: Int?
 )
 
+/** Carries the last real reading across placeholder gaps without shifting the axis. */
+private fun List<Float>.sanitizeTemps(): List<Float> {
+    var lastReal = 0f
+    return map { value ->
+        if (value.plausibleTempC(MAX_HOTSPOT_TEMP_C) != null) {
+            lastReal = value
+            value
+        } else lastReal
+    }
+}
+
 /**
  * The readings share one second-by-second axis, so a drop can be matched with
  * the temperature, CPU load and thermal state at that exact moment.
@@ -307,7 +321,7 @@ private data class TimelineMoment(
 @Composable
 private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
     val fps = session.fpsSeries
-    val temp = session.tempSeries
+    val temp = session.tempSeries.sanitizeTemps()
     val cpu = session.cpuSeries
     val thermal = session.thermalStatusSeries
     val count = minOf(fps.size, temp.size, cpu.size)
@@ -412,8 +426,11 @@ private fun SeriesPanel(
     color: Color,
     target: Float? = null,
     targetLabel: String? = null,
-    invert: Boolean = false
+    invert: Boolean = false,
+    /** Drops placeholder readings so they cannot ruin the scale or the stats. */
+    filter: (Float) -> Boolean = { true }
 ) {
+    val shown = values.filter(filter)
     Panel {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -426,7 +443,7 @@ private fun SeriesPanel(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = values.lastOrNull()?.let {
+                text = shown.lastOrNull()?.let {
                     "${String.format("%.1f", it)} $unit"
                 } ?: "--",
                 style = MonoInline,
@@ -436,7 +453,7 @@ private fun SeriesPanel(
 
         Spacer(Modifier.height(Space.sm))
 
-        if (values.size < 2) {
+        if (shown.size < 2) {
             Text(
                 text = "No samples recorded",
                 style = MaterialTheme.typography.bodyMedium,
@@ -452,7 +469,7 @@ private fun SeriesPanel(
                 .background(MaterialTheme.colorScheme.surfaceContainerLowest)
         ) {
             Sparkline(
-                values = values,
+                values = shown,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(120.dp)
@@ -470,9 +487,9 @@ private fun SeriesPanel(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            SeriesStat("Min", values.min(), unit)
-            SeriesStat("Average", values.average().toFloat(), unit)
-            SeriesStat("Max", values.max(), unit)
+            SeriesStat("Min", shown.min(), unit)
+            SeriesStat("Average", shown.average().toFloat(), unit)
+            SeriesStat("Max", shown.max(), unit)
             if (target != null) {
                 SeriesStat("Target", target, "fps")
             }

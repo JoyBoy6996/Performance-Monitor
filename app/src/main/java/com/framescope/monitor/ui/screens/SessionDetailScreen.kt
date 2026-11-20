@@ -272,9 +272,123 @@ fun SessionDetailScreen(
             }
         }
 
+        item { SectionHeader("Linked timeline") }
+
+        item { LinkedTimelinePanel(session, threshold) }
+
         item { SectionHeader("Frame drops") }
 
         item { DropsPanel(session, threshold) }
+    }
+}
+
+/** One second with every reading that belongs to it. */
+private data class TimelineMoment(
+    val second: Int,
+    val fps: Float,
+    val tempC: Float,
+    val cpu: Float,
+    val level: Int?
+)
+
+/**
+ * The readings share one second-by-second axis, so a drop can be matched with
+ * the temperature, CPU load and thermal state at that exact moment.
+ */
+@Composable
+private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
+    val fps = session.fpsSeries
+    val temp = session.tempSeries
+    val cpu = session.cpuSeries
+    val thermal = session.thermalStatusSeries
+    val count = minOf(fps.size, temp.size, cpu.size)
+    val fpsColor = fpsStateColor(session.avgFps, threshold)
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+
+    Panel {
+        Text(
+            text = "Same second, side by side",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(Space.sm))
+
+        if (count < 2) {
+            Text(
+                text = "No samples recorded",
+                style = MaterialTheme.typography.bodyMedium,
+                color = muted
+            )
+            return@Panel
+        }
+
+        @Composable
+        fun chart(label: String, values: List<Float>, color: Color) {
+            Text(text = label, style = MaterialTheme.typography.labelSmall, color = muted)
+            Sparkline(
+                values = values.take(count),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp),
+                color = color,
+                trackColor = MaterialTheme.status.track,
+                gridColor = MaterialTheme.status.grid
+            )
+            Spacer(Modifier.height(Space.xs))
+        }
+
+        chart("FPS", fps, fpsColor)
+        chart("Temperature (°C)", temp, MaterialTheme.status.critical)
+        chart("CPU (%)", cpu, MaterialTheme.colorScheme.primary)
+        if (thermal.size >= count) {
+            chart("Thermal level (0-3+)", thermal, MaterialTheme.status.warn)
+        }
+
+        Spacer(Modifier.height(Space.sm))
+
+        val moments = (0 until count).map { i ->
+            TimelineMoment(
+                second = i,
+                fps = fps[i],
+                tempC = temp[i],
+                cpu = cpu[i],
+                level = thermal.getOrNull(i)?.toInt()
+            )
+        }.sortedBy { it.fps }.take(8).sortedBy { it.second }
+
+        Text(
+            text = "Worst moments",
+            style = MaterialTheme.typography.labelSmall,
+            color = muted
+        )
+        moments.forEach { moment ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "${moment.second + 1}s",
+                    style = MonoInline,
+                    color = muted
+                )
+                Text(
+                    text = buildString {
+                        append(String.format("%.0f", moment.fps)).append(" fps · ")
+                        append(String.format("%.1f", moment.tempC)).append("°C · ")
+                        append(String.format("%.0f", moment.cpu)).append("% CPU · ")
+                        append(
+                            moment.level?.let { thermalStatusLabel(it) } ?: "--"
+                        )
+                    },
+                    style = MonoInline,
+                    color = if (moment.fps < threshold) {
+                        MaterialTheme.status.warn
+                    } else MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
     }
 }
 

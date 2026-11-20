@@ -689,9 +689,10 @@ private fun DiagnosticsRow(container: AppContainer) {
                 modifier = Modifier.padding(top = Space.sm)
             )
         }
-        // The probe runs by itself when the screen opens. Asking the user to
-        // press a button to find out what the device answers is one step too
-        // many, and the answer is what a wrong reading has to be fixed with.
+        // The probe runs by itself when the screen opens so the answer is ready to
+        // read, but it never touches the clipboard. Copy all already includes the
+        // raw probe, and an automatic copy here would overwrite the full report the
+        // user just copied as soon as this screen opens again.
         LaunchedEffect(Unit) {
             val pkg = lastMeasured
             val result = container.hub.execOrNull(
@@ -703,7 +704,6 @@ private fun DiagnosticsRow(container: AppContainer) {
             } else {
                 (result.out + "\n" + result.err).trim()
             }
-            Diagnostics.copy(context, shellSafeText(probeOutput))
         }
 
         if (probeOutput.isNotEmpty()) {

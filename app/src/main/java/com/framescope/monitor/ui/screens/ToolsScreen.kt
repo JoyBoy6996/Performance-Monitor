@@ -19,6 +19,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,8 +47,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import android.content.Context
+import android.os.Build
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.thermalStatusLabel
+import com.framescope.monitor.metrics.NativeCollectors
+import com.framescope.monitor.shell.ShellHub
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.MonoField
@@ -61,13 +68,107 @@ import kotlinx.coroutines.launch
 /** Everything needed to see why the frame data looks the way it does. */
 private val DIAGNOSTIC_COMMAND = com.framescope.monitor.ui.Diagnostics.command
 
+/** Device facts that are safe to show even when a shell reading is unavailable. */
+private data class DeviceFacts(
+    val platform: String? = null,
+    val soc: String? = null,
+    val vendor: String? = null,
+    val cpu: String? = null,
+    val battery: NativeCollectors.BatteryReading? = null,
+    val health: String? = null,
+    val technology: String? = null,
+    val cycles: String? = null,
+    val status: String? = null,
+    val storage: String? = null,
+    val display: String? = null
+)
+
+/**
+ * Reads what the phone is willing to say. Every block is guarded, so a property
+ * that does not exist shows "--" instead of taking the screen down.
+ */
+private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceFacts {
+    val props = runCatching {
+        hub.execOrNull(
+            "echo platform=\$(getprop ro.board.platform); " +
+                "echo soc=\$(getprop ro.soc.model); " +
+                "echo vendor=\$(getprop ro.soc.manufacturer)"
+        )?.out.orEmpty()
+    }.getOrDefault("")
+
+    fun prop(key: String): String? = props.lineSequence()
+        .firstOrNull { it.startsWith("$key=") }
+        ?.substringAfter('=')
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+
+    val cpu = runCatching {
+        hub.execOrNull("cat /proc/cpuinfo 2>/dev/null | grep -m1 -E 'Hardware|Processor|model name'")
+            ?.out?.lineSequence()?.firstOrNull { it.isNotBlank() }
+            ?.substringAfter(':')?.trim()?.takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    val batteryDump = runCatching {
+        hub.execOrNull("dumpsys battery 2>/dev/null | head -30")?.out.orEmpty()
+    }.getOrDefault("")
+
+    fun batteryField(vararg keys: String): String? = batteryDump.lineSequence()
+        .map { it.trim() }
+        .firstOrNull { line -> keys.any { line.startsWith(it, ignoreCase = true) } }
+        ?.substringAfter(':')?.trim()?.takeIf { it.isNotBlank() }
+
+    fun health(value: String?): String? = when (value) {
+        "2" -> "Good"
+        "3" -> "Overheat"
+        "4" -> "Dead"
+        "5" -> "Overvoltage"
+        "7" -> "Cold"
+        else -> value
+    }
+
+    fun status(value: String?): String? = when (value) {
+        "2" -> "Charging"
+        "3" -> "Discharging"
+        "4" -> "Full"
+        "5" -> "Not charging"
+        else -> value
+    }
+
+    val battery = runCatching { NativeCollectors(context).battery().value }.getOrNull()
+
+    val storage = runCatching {
+        val stat = android.os.StatFs(android.os.Environment.getDataDirectory().path)
+        val gb = 1024f * 1024f * 1024f
+        val total = stat.blockCountLong * stat.blockSizeLong / gb
+        val free = stat.availableBlocksLong * stat.blockSizeLong / gb
+        String.format(java.util.Locale.US, "%.1f / %.1f GB free", free, total)
+    }.getOrNull()
+
+    val metrics = context.resources.displayMetrics
+    val display = "${metrics.widthPixels} x ${metrics.heightPixels} · ${metrics.densityDpi} dpi"
+
+    return DeviceFacts(
+        platform = prop("platform"),
+        soc = prop("soc"),
+        vendor = prop("vendor"),
+        cpu = cpu,
+        battery = battery,
+        health = health(batteryField("health")),
+        technology = batteryField("technology"),
+        cycles = batteryField("cycle", "charge counter"),
+        status = status(batteryField("status")),
+        storage = storage,
+        display = display
+    )
+}
+
 @Composable
 fun ToolsScreen(
     container: AppContainer,
     bottomPadding: Dp = 24.dp
 ) {
     var showScreenTest by remember { mutableStateOf(false) }
-    var deviceInfo by remember { mutableStateOf<List<String>>(emptyList()) }
+    var deviceFacts by remember { mutableStateOf(DeviceFacts()) }
     var consoleInput by remember { mutableStateOf("dumpsys battery") }
     var consoleOutput by remember { mutableStateOf("") }
     var diagnosticsOutput by remember { mutableStateOf("") }
@@ -77,11 +178,7 @@ fun ToolsScreen(
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
-        val result = container.hub.execOrNull(
-            "getprop ro.product.model; getprop ro.board.platform; getprop ro.hardware; " +
-                "getprop ro.build.version.release; getprop ro.build.version.sdk"
-        )
-        deviceInfo = result?.out.orEmpty().lines().filter { it.isNotBlank() }
+        deviceFacts = collectDeviceFacts(context, container.hub)
     }
 
     FrameScopeScreen(
@@ -91,7 +188,7 @@ fun ToolsScreen(
     ) {
         item { SectionHeader("Device") }
 
-        item { DevicePanel(deviceInfo = deviceInfo, system = system) }
+        item { DevicePanel(facts = deviceFacts, system = system) }
 
         item { SectionHeader("Screen test") }
 
@@ -281,30 +378,101 @@ fun ToolsScreen(
 }
 
 @Composable
-private fun DevicePanel(deviceInfo: List<String>, system: SystemMetrics) {
+private fun DevicePanel(facts: DeviceFacts, system: SystemMetrics) {
+    val onSurface = MaterialTheme.colorScheme.onSurface
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val warn = MaterialTheme.status.warn
+
     Panel {
-        val labels = listOf("Model", "Platform", "Hardware", "Android", "API level")
-        deviceInfo.forEachIndexed { index, value ->
-            MetricLine(
-                label = labels.getOrElse(index) { "Info" },
-                value = value,
-                accent = MaterialTheme.colorScheme.onSurface
+        @Composable
+        fun divider() {
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = Space.sm),
+                color = MaterialTheme.colorScheme.outlineVariant
             )
         }
-        system.gpuName?.let {
-            MetricLine(
-                label = "GPU",
-                value = it.take(34),
-                accent = MaterialTheme.colorScheme.onSurface
-            )
+
+        Text("Identity", style = MaterialTheme.typography.titleSmall, color = onSurface)
+        MetricLine("Device", "${Build.MANUFACTURER} ${Build.MODEL}", onSurface)
+        MetricLine("Brand", Build.BRAND, onSurface)
+        MetricLine("Codename", Build.DEVICE, onSurface)
+        MetricLine("Product", Build.PRODUCT, onSurface)
+        MetricLine("Board", Build.BOARD, onSurface)
+        MetricLine("Hardware", Build.HARDWARE, onSurface)
+        MetricLine("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})", onSurface)
+        MetricLine(
+            "Architecture",
+            Build.SUPPORTED_ABIS.joinToString(", ").ifBlank { "--" },
+            onSurface
+        )
+        MetricLine("Build", Build.FINGERPRINT.take(64), muted)
+
+        divider()
+        Text("Processor", style = MaterialTheme.typography.titleSmall, color = onSurface)
+        facts.platform?.let { MetricLine("Platform", it, onSurface) }
+        facts.vendor?.let { MetricLine("SoC vendor", it, onSurface) }
+        facts.soc?.let { MetricLine("SoC model", it, onSurface) }
+        facts.cpu?.let { MetricLine("CPU", it.take(48), onSurface) }
+        MetricLine("CPU clock", system.cpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
+        system.cpuPercent?.let {
+            MetricLine("CPU load", String.format(java.util.Locale.US, "%.0f%%", it), onSurface)
         }
-        system.refreshHz?.let {
-            MetricLine(
-                label = "Refresh rate",
-                value = "${it.toInt()} Hz",
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
+        MetricLine("GPU", system.gpuName?.take(34) ?: "--", onSurface)
+        MetricLine("GPU clock", system.gpuFreqMHz?.let { "$it MHz" } ?: "--", onSurface)
+
+        divider()
+        Text("Memory and display", style = MaterialTheme.typography.titleSmall, color = onSurface)
+        MetricLine(
+            "RAM",
+            system.ramTotalGb?.let { total ->
+                "${String.format("%.1f", system.ramUsedGb ?: 0f)} / ${String.format("%.1f", total)} GB"
+            } ?: "--",
+            onSurface
+        )
+        MetricLine("Storage", facts.storage ?: "--", onSurface)
+        MetricLine("Resolution", facts.display ?: "--", onSurface)
+        MetricLine(
+            "Refresh rate",
+            system.refreshHz?.let { "${it.toInt()} Hz" } ?: "--",
+            warn
+        )
+
+        divider()
+        Text("Battery", style = MaterialTheme.typography.titleSmall, color = onSurface)
+        MetricLine("Level", facts.battery?.levelPercent?.let { "$it%" } ?: "--", onSurface)
+        facts.status?.let { MetricLine("Status", it, onSurface) }
+        facts.health?.let { MetricLine("Health", it, onSurface) }
+        facts.technology?.let { MetricLine("Technology", it, onSurface) }
+        facts.cycles?.let { MetricLine("Cycles", it, onSurface) }
+        MetricLine(
+            "Temperature",
+            facts.battery?.temperatureC?.let { String.format("%.1f°C", it) } ?: "--",
+            warn
+        )
+        MetricLine("Voltage", facts.battery?.voltageMilliVolts?.let { "$it mV" } ?: "--", onSurface)
+        MetricLine(
+            "Power",
+            facts.battery?.watts?.let { String.format("%.2f W", it) } ?: "--",
+            onSurface
+        )
+
+        divider()
+        Text("Thermal", style = MaterialTheme.typography.titleSmall, color = onSurface)
+        MetricLine(
+            "Phone temperature",
+            system.deviceTemperatureC()?.let { String.format("%.1f°C", it) } ?: "--",
+            warn
+        )
+        MetricLine(
+            "State",
+            system.thermalStatus?.let { thermalStatusLabel(it) } ?: "--",
+            if ((system.thermalStatus ?: 0) > 0) warn else muted
+        )
+        MetricLine(
+            "Hottest sensor",
+            system.thermalMaxC?.let { String.format("%.1f°C", it) } ?: "--",
+            muted
+        )
     }
 }
 

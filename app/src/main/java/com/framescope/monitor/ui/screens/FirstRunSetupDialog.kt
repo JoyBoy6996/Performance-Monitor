@@ -1,11 +1,15 @@
 package com.framescope.monitor.ui.screens
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -18,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.framescope.monitor.AppContainer
 import kotlinx.coroutines.launch
 
@@ -40,6 +45,10 @@ fun FirstRunSetupDialog(
     val scope = rememberCoroutineScope()
     val status by container.hub.status.collectAsState()
     var message by remember { mutableStateOf<String?>(null) }
+    val usageAccessLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { }
+    val usageGranted = hasUsageAccess(context)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -52,12 +61,30 @@ fun FirstRunSetupDialog(
                         "The app will do the rest."
                 )
                 Text(message ?: status.detail.orEmptyIfBlank())
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    if (usageGranted) {
+                        "Usage access: On. No action needed."
+                    } else {
+                        "Usage access: Off. Tap Usage access → find FrameScope → turn it on."
+                    }
+                )
+                Column {
                     TextButton(onClick = { openShizuku(context) }) {
                         Text("Open Shizuku")
                     }
                     TextButton(onClick = onRequestOverlayPermission) {
-                        Text("Overlay")
+                        Text("Overlay permission")
+                    }
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                usageAccessLauncher.launch(
+                                    Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                                )
+                            }
+                        }
+                    ) {
+                        Text("Usage access")
                     }
                 }
             }
@@ -98,6 +125,10 @@ private fun String.orEmptyIfBlank(): String = if (isBlank()) {
 } else {
     this
 }
+
+internal fun hasUsageAccess(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(context, Manifest.permission.PACKAGE_USAGE_STATS) ==
+        PackageManager.PERMISSION_GRANTED
 
 private fun openShizuku(context: Context) {
     val launchIntent = context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)

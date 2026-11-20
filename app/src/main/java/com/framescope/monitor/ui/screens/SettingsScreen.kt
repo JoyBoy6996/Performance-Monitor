@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -118,6 +119,10 @@ fun SettingsScreen(
             }
         }
     }
+
+    val usageAccessLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { }
 
     LaunchedEffect(Unit) {
         installed = runCatching {
@@ -278,6 +283,32 @@ fun SettingsScreen(
                     badge = "Required",
                     description = "Install and start Shizuku with the official guide for your device, then grant FrameScope permission above. FrameScope checks a real UserService command before it reports Connected. Shell access lasts only as long as Shizuku runs.",
                     context = context
+                )
+            }
+        }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                SettingRow(
+                    title = "Usage access",
+                    supporting = if (hasUsageAccess(context)) {
+                        "On. FrameScope can use it when the window manager cannot name the foreground app."
+                    } else {
+                        "Off. Open settings, find FrameScope and switch it on."
+                    },
+                    trailing = {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    usageAccessLauncher.launch(
+                                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                                    )
+                                }
+                            }
+                        ) {
+                            Text("Open settings")
+                        }
+                    }
                 )
             }
         }

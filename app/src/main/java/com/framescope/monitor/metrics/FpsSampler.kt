@@ -114,6 +114,9 @@ class FpsSampler(
     private val _lastMeasuredPackage = MutableStateFlow<String?>(null)
     val lastMeasuredPackage: StateFlow<String?> = _lastMeasuredPackage.asStateFlow()
 
+    /** When that app was last in front, on the elapsed clock. */
+    private var lastMeasuredAtMs = 0L
+
     /**
      * The frame counters of SurfaceFlinger.
      *
@@ -234,15 +237,39 @@ class FpsSampler(
         foregroundSource = detection.source
         foregroundConfident = detection.confident
 
-        val pkg = detection.packageName
+        val detected = detection.packageName
+
+        // Opening FrameScope straight from a game puts FrameScope's own window in
+        // front and leaves the launcher as the resumed activity behind it. Neither
+        // of them is the app being measured. Keep the game that was in front a
+        // moment ago so the overlay holds its reading and the raw probe still
+        // says `Raw probe (com.pubg.imobile)` instead of losing the name.
+        val remembered = _lastMeasuredPackage.value
+        val pkg = if (
+            detected.isNullOrBlank() || detected == ownPackage || isNonGame(detected)
+        ) {
+            if (
+                !remembered.isNullOrBlank() && !isNonGame(remembered) &&
+                nowMs - lastMeasuredAtMs < REMEMBERED_TARGET_MS
+            ) remembered else detected
+        } else detected
+
+        // The unnamed SurfaceFlinger probe is only allowed while the game itself
+        // is in front. When FrameScope or the launcher is in front that same
+        // probe describes a system surface, and publishing it as the game's FPS
+        // is the wrong number this fix must never produce.
+        val foregroundIsTarget = detected == pkg && !pkg.isNullOrBlank() &&
+            pkg != ownPackage && !isNonGame(pkg)
+
         if (pkg != foregroundApp) {
             // A different app is in front. Everything measured so far belonged to the
             // old one, so the counters start again.
             onTargetChanged(pkg)
         }
         foregroundApp = pkg
-        if (!pkg.isNullOrBlank() && pkg != ownPackage) {
+        if (!pkg.isNullOrBlank() && pkg != ownPackage && !isNonGame(pkg)) {
             _lastMeasuredPackage.value = pkg
+            lastMeasuredAtMs = nowMs
         }
 
         if (pkg.isNullOrBlank()) {
@@ -275,11 +302,15 @@ class FpsSampler(
         // FrameScope cannot measure itself: its own layers have no frame timeline
         // that belongs to a game, and walking them fills the report with noise.
         // The reading of the app in front of it is what the user wants.
-        if (pkg == ownPackage) {
+        if (pkg == ownPackage || isNonGame(pkg)) {
             return publishUnavailable(
                 source = "no source",
                 kind = FpsSourceKind.NONE,
-                reason = "FrameScope is in front - open the game to measure it",
+                reason = if (pkg == ownPackage) {
+                    "FrameScope is in front - open the game to measure it"
+                } else {
+                    "$pkg is in front - open a game to measure its frame rate"
+                },
                 availability = MetricAvailability.UNSUPPORTED,
                 nowUptime = nowUptime
             )
@@ -296,12 +327,16 @@ class FpsSampler(
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
-        // The unnamed `dumpsys SurfaceFlinger --latency` answer is deliberately
-        // NOT used here. On the device this build has to support it answers with
-        // the status bar's frames, not the game's, and publishing those as the
-        // game's FPS is exactly the wrong number this fix is here to stop.
-        // Only a layer whose name can be attributed to the foreground app, or
-        // SurfaceFlinger's own per-layer counters, are allowed to publish.
+        // 2. The layer SurfaceFlinger is presenting right now. This is the probe
+        // that measured the game correctly in the build the user confirmed: a
+        // game names its surface after its engine, so looking for the package
+        // in the layer list finds nothing while the game is drawing. It is used
+        // only while the game itself is in front; when FrameScope or the launcher
+        // is in front the same answer describes a system surface and is refused.
+        if (foregroundIsTarget) {
+            val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
+            if (fromActive != null) return fromActive
+        }
 
         // 3. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
@@ -555,6 +590,12 @@ class FpsSampler(
         return _state.value
     }
 
+    /** A launcher or a system surface is never the game the user is measuring. */
+    private fun isNonGame(pkg: String): Boolean {
+        val p = pkg.lowercase()
+        return p.contains("launcher") || p == "com.android.systemui"
+    }
+
     /**
      * True when a frame rate can belong to this screen.
      *
@@ -707,6 +748,68 @@ class FpsSampler(
             totalFrames = latencyCounter.totalUniqueFrames,
             jankFrames = latencyCounter.totalJankFrames,
             sampleAgeMs = sampleAgeNs / 1_000_000L,
+            windowMs = result.windowMs,
+            low1PercentFps = latencyCounter.low1PercentFps(),
+            low5PercentFps = latencyCounter.low5PercentFps(),
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
+    }
+
+    /**
+     * The layer SurfaceFlinger is presenting right now.
+     *
+     * Asked without a name, `--latency` answers with the active layer. On a game
+     * that layer carries the engine's name and no package name, so it is the
+     * only probe that finds the frames of a game like com.pubg.imobile. A dump
+     * that only holds the refresh period, or frames whose newest timestamp is
+     * old on both clocks, is refused: that is a system surface or history, not
+     * the game the user is looking at.
+     */
+    private suspend fun sampleFromActiveLayer(
+        pkg: String,
+        targetFps: Int,
+        nowUptime: Long
+    ): FpsState? {
+        val dump = hub.execOrNull(
+            ShellCommands.surfaceLatencyDefault(),
+            ACTIVE_LATENCY_TIMEOUT_MS
+        )?.out.orEmpty()
+        if (dump.isBlank()) return null
+
+        val (_, presents) = Parsers.parseLatency(dump)
+        if (presents.size < MIN_ACTIVE_FRAMES) return null
+
+        // The dump keeps old frames after the app stopped drawing. A frame that
+        // is old on whichever clock the device stamped it with is not a live
+        // reading, and must never become the game's FPS.
+        val ageNs = presentationAgeNs(
+            presents.last(),
+            nowUptime,
+            SystemClock.elapsedRealtimeNanos()
+        ) ?: return null
+
+        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
+        val stats = computeFrameStats(deltas) ?: return null
+        val fps = stats.fps
+        if (!isPlausibleFps(fps)) return null
+
+        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
+        measuredLayer = "the layer that is on the screen"
+
+        latencyCounter.frameBudgetNs = frameBudgetNs(targetFps)
+        val result = latencyCounter.onSample("active", presents, nowUptime)
+
+        publish(
+            fps = fps,
+            frameTimeMs = stats.frameTimeMs,
+            source = "SurfaceFlinger (the layer on the screen)",
+            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+            layer = "active",
+            totalFrames = latencyCounter.totalUniqueFrames,
+            jankFrames = latencyCounter.totalJankFrames,
+            sampleAgeMs = ageNs / 1_000_000L,
             windowMs = result.windowMs,
             low1PercentFps = latencyCounter.low1PercentFps(),
             low5PercentFps = latencyCounter.low5PercentFps(),
@@ -889,30 +992,32 @@ class FpsSampler(
         availability: MetricAvailability
     ): FpsState {
         val last = _state.value
-        // A real number is still a real number even after one empty poll. The
-        // old sampler copied its state here instead of writing 0. Checking
-        // `last.valid` made the first empty poll write fps=0, after which every
-        // later poll saw fps=0 and the overlay stayed on "--fps" until the next
-        // source happened to answer. Only fps matters for keeping the number.
-        val hasReading = last.fps > 0f
+        // A real number is still a real number after one empty poll. Writing an
+        // invalid state here is what made the overlay flip to "--fps" between
+        // real readings, which is what the user saw. Keep the reading and its
+        // own, already clock-checked age; never recompute that age from wall
+        // time, which is how the "134117 ms old" line was produced.
+        val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
+        val keep = last.fps > 0f &&
+            nowElapsedNs - last.measuredAtElapsedNanos < KEEP_LAST_READING_NS
         return FpsState(
-            fps = if (hasReading) last.fps else 0f,
-            frameTimeMs = if (hasReading) last.frameTimeMs else 0f,
-            history = if (hasReading) last.history else history.toList(),
-            totalFrames = if (hasReading) last.totalFrames else latencyCounter.totalUniqueFrames.toInt(),
-            jankFrames = if (hasReading) last.jankFrames else latencyCounter.totalJankFrames.toInt(),
+            fps = if (keep) last.fps else 0f,
+            frameTimeMs = if (keep) last.frameTimeMs else 0f,
+            history = if (keep) last.history else history.toList(),
+            totalFrames = if (keep) last.totalFrames else latencyCounter.totalUniqueFrames.toInt(),
+            jankFrames = if (keep) last.jankFrames else latencyCounter.totalJankFrames.toInt(),
             source = source,
-            surface = if (hasReading) last.surface else null,
-            valid = false,
+            surface = if (keep) last.surface else null,
+            valid = keep,
             reason = reason,
-            availability = availability,
-            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
-            sampleAgeMs = 0L,
-            measurementWindowMs = 0L,
+            availability = if (keep) MetricAvailability.AVAILABLE else availability,
+            measuredAtElapsedNanos = if (keep) last.measuredAtElapsedNanos else nowElapsedNs,
+            sampleAgeMs = if (keep) last.sampleAgeMs else 0L,
+            measurementWindowMs = if (keep) last.measurementWindowMs else 0L,
             sourceKind = kind,
-            low1PercentFps = if (hasReading) last.low1PercentFps else null,
-            low5PercentFps = if (hasReading) last.low5PercentFps else null,
-            appPackage = if (hasReading) last.appPackage else null
+            low1PercentFps = if (keep) last.low1PercentFps else null,
+            low5PercentFps = if (keep) last.low5PercentFps else null,
+            appPackage = if (keep) last.appPackage else null
         )
     }
 
@@ -986,6 +1091,25 @@ class FpsSampler(
 
         /** Fewer frames than this say nothing about a frame rate. */
         private const val MIN_EXACT_FRAMES = 8
+
+        /** Fewer frames than this on the active layer say nothing about FPS. */
+        private const val MIN_ACTIVE_FRAMES = 4
+
+        /** How long the unnamed active-layer probe may take. */
+        private const val ACTIVE_LATENCY_TIMEOUT_MS = 3_000L
+
+        /**
+         * How long a real reading is kept while FrameScope or the launcher is in
+         * front. Past that the number is history and is blanked rather than
+         * shown as a current reading.
+         */
+        private const val KEEP_LAST_READING_NS = 300_000_000_000L
+
+        /**
+         * How long the game that was just in front stays the measurement target
+         * when FrameScope's own window or the launcher takes the focus.
+         */
+        private const val REMEMBERED_TARGET_MS = 600_000L
 
         /**
          * How old the newest frame of a layer may be to still be its meter.

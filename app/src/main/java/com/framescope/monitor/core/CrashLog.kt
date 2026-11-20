@@ -19,6 +19,14 @@ object CrashLog {
 
     private fun file(context: Context): File = File(context.filesDir, FILE)
 
+    /**
+     * A second copy on shared storage. The internal file needs `run-as`, which
+     * is not always available; this one can be read from a phone shell at
+     * /sdcard/Android/data/com.framescope.monitor/files/last-crash.txt
+     */
+    private fun externalFile(context: Context): File? =
+        context.getExternalFilesDir(null)?.let { File(it, FILE) }
+
     /** Keeps the next crash instead of losing it with the process. */
     fun install(context: Context) {
         val app = context.applicationContext
@@ -32,19 +40,27 @@ object CrashLog {
     fun write(context: Context, error: Throwable) {
         val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
         val trace = error.stackTraceToString()
-        runCatching {
-            file(context).writeText("$stamp\n${error.javaClass.name}: ${error.message}\n\n$trace")
-        }
+        val text = "$stamp\n${error.javaClass.name}: ${error.message}\n\n$trace"
+        runCatching { file(context).writeText(text) }
+        runCatching { externalFile(context)?.writeText(text) }
     }
 
     /** The text of the last crash, or null when there was none. */
-    fun last(context: Context): String? = runCatching {
-        val f = file(context)
-        if (!f.exists()) return null
-        f.readText().trim().takeIf { it.isNotEmpty() }
-    }.getOrNull()
+    fun last(context: Context): String? {
+        val candidates = listOfNotNull(file(context), externalFile(context))
+        for (f in candidates) {
+            runCatching {
+                if (f.exists()) {
+                    val text = f.readText().trim()
+                    if (text.isNotEmpty()) return text
+                }
+            }
+        }
+        return null
+    }
 
     fun clear(context: Context) {
         runCatching { file(context).delete() }
+        runCatching { externalFile(context)?.delete() }
     }
 }

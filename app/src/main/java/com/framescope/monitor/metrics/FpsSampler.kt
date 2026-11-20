@@ -199,21 +199,11 @@ class FpsSampler(
      * "this needs Shizuku" instead of showing an empty reading with no explanation.
      */
     fun reportUnavailable(reason: String, availability: MetricAvailability) {
-        _state.value = FpsState(
-            fps = 0f,
-            frameTimeMs = 0f,
-            history = history.toList(),
-            totalFrames = latencyCounter.totalUniqueFrames.toInt(),
-            jankFrames = latencyCounter.totalJankFrames.toInt(),
+        _state.value = rememberLastReading(
             source = "no source",
-            surface = null,
-            valid = false,
+            kind = FpsSourceKind.NONE,
             reason = reason,
-            availability = availability,
-            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
-            sampleAgeMs = 0L,
-            measurementWindowMs = 0L,
-            sourceKind = FpsSourceKind.NONE
+            availability = availability
         )
     }
 
@@ -297,28 +287,30 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // 1. Primary: the frames SurfaceFlinger itself counted for the app. This
-        // is the only source that also works for a game: a game renders into a
-        // buffer queue that keeps no frame timeline, but SurfaceFlinger still
-        // counts every frame it presents.
-        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
-        if (fromCounters != null) return fromCounters
-
-        // 2. The presentation timestamps of a layer of the app. This carries the
-        // per-frame detail - the slowest frames of the window are only visible
-        // here - and is kept as the second source.
+        // The presentation timestamps are tried first, as they were in the
+        // version that measured games correctly: they are the frames themselves
+        // and give the median frame time. The counters are a fallback for the
+        // builds where a game keeps no timestamps.
+        //
+        // 1. The presentation timestamps of a layer of the app.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
-        // 3. The layer that is on the screen right now. A game names its surface
+        // 2. The layer that is on the screen right now. A game names its surface
         // after its engine and not after its package, so the layer of the game
         // cannot always be found by name - but it is the layer that is active.
         val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
         if (fromActive != null) return fromActive
 
-        // 4. Fallback: the app's own graphics pipeline.
+        // 3. Fallback: the app's own graphics pipeline.
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
         if (fromGfx != null) return fromGfx
+
+        // 4. Last resort: the frame counters. They are only used for a window
+        // that actually grew. A standing counter publishes nothing, so a frozen
+        // or idle app can never show a false 0 as if it were a frame rate.
+        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
+        if (fromCounters != null) return fromCounters
 
         // A layer was found and it is still warming up - that is a better answer
         // than "no source".
@@ -397,18 +389,20 @@ class FpsSampler(
         val windowSeconds = if (tick.windowNs > 0L) tick.windowNs / 1_000_000_000.0 else 0.0
         if (windowSeconds <= 0.0) return null
 
-        // When nothing is being presented, the honest answer is 0, not the
-        // display refresh rate. Display refresh rate is a "hz" number; read
-        // as FPS it belongs to nobody, so a game at 90 would read as 144. A
-        // zero that stays means the game is frozen; the frozen block below
-        // asks the game's layers once more before this 0 is published.
+        // The counter is a cumulative total. It only says something when it
+        // grew during this window. A standing counter - a game that froze, an
+        // app that went idle, or a surface that stopped presenting - is NOT a
+        // zero frame rate. Publishing 0 here is what made the overlay show
+        // "0.0 fps / 0.0 ms" even though the game had been measured correctly
+        // moments before. The old sampler kept its last reading instead.
         val idle = tick.staticScreen && tick.belongsToApp
-        var fps: Double = if (idle) 0.0 else tick.fps
-        if (fps <= 0.0 && !idle) return null
+        if (idle || tick.frames <= 0L) return null
+        val fps: Double = tick.fps
+        if (fps <= 0.0) return null
         // When the layer named its display rate, the counters already clamped
         // the growth to it - and that rate is bucketed in 30 Hz steps, so a
         // 165 Hz panel reads as 180 and must not be judged against 165.
-        if (!idle && tick.displayRefreshRate == null && !isPlausibleFps(fps.toFloat())) {
+        if (tick.displayRefreshRate == null && !isPlausibleFps(fps.toFloat())) {
             return null
         }
 
@@ -424,23 +418,6 @@ class FpsSampler(
         // through to the display rate below.
         val exact = sampleExactLatency(pkg, tick.layer, targetFps)
         if (exact != null) return exact
-
-        // The counter can name a surface that is not the one drawing - a game
-        // keeps several - so a window with no frames is not proof that nothing
-        // is drawing. Before the app is called frozen, its own layers are asked
-        // once more, at a slow cadence so an idle screen stays quiet.
-        //
-        // When they say nothing too, the 0 stands: the game is frozen (a
-        // reason might be the game itself is idle or drawing very slowly), so
-        // the app reads 0 instead of the panel's refresh rate as if it were the
-        // game's rate.
-        if (idle && SystemClock.elapsedRealtime() >= idleSweepNextAt) {
-            idleSweepNextAt = SystemClock.elapsedRealtime() + IDLE_SWEEP_COOLDOWN_MS
-            val fromLayers = sampleFromLatency(pkg, targetFps, nowUptime)
-            if (fromLayers != null) return fromLayers
-            // Guide: no new frames arriving after waiting -> 0, not 144.
-            fps = 0.0
-        }
 
         activeSource = FpsSourceKind.TIMESTATS
 
@@ -465,11 +442,7 @@ class FpsSampler(
         publish(
             fps = fps.toFloat(),
             frameTimeMs = if (fps > 0.0) (1000.0 / fps).toFloat() else 0.0f,
-            source = if (idle) {
-                "no frames are being presented"
-            } else {
-                "SurfaceFlinger counters"
-            },
+            source = "SurfaceFlinger counters",
             kind = FpsSourceKind.TIMESTATS,
             layer = tick.layer,
             totalFrames = tick.frames,
@@ -880,6 +853,45 @@ class FpsSampler(
         )
     }
 
+    /**
+     * Builds a "no new reading" state that keeps the last real measurement.
+     *
+     * This is the behaviour of the version that measured games correctly: when
+     * a source has nothing new - a frozen game, an idle screen, a dump that did
+     * not arrive - the number on screen stays at the last true value and only
+     * the status changes. Showing 0 as a frame rate is a different claim: it
+     * says the screen rendered nothing, which cannot be concluded from a source
+     * that simply did not answer.
+     */
+    private fun rememberLastReading(
+        source: String,
+        kind: FpsSourceKind,
+        reason: String,
+        availability: MetricAvailability
+    ): FpsState {
+        val last = _state.value
+        val hasReading = last.valid && last.fps > 0f
+        return FpsState(
+            fps = if (hasReading) last.fps else 0f,
+            frameTimeMs = if (hasReading) last.frameTimeMs else 0f,
+            history = if (hasReading) last.history else history.toList(),
+            totalFrames = if (hasReading) last.totalFrames else latencyCounter.totalUniqueFrames.toInt(),
+            jankFrames = if (hasReading) last.jankFrames else latencyCounter.totalJankFrames.toInt(),
+            source = source,
+            surface = if (hasReading) last.surface else null,
+            valid = false,
+            reason = reason,
+            availability = availability,
+            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+            sampleAgeMs = 0L,
+            measurementWindowMs = 0L,
+            sourceKind = kind,
+            low1PercentFps = if (hasReading) last.low1PercentFps else null,
+            low5PercentFps = if (hasReading) last.low5PercentFps else null,
+            appPackage = if (hasReading) last.appPackage else null
+        )
+    }
+
     /** Publishes the absence of a measurement, and why. */
     private fun publishUnavailable(
         source: String,
@@ -888,22 +900,7 @@ class FpsSampler(
         availability: MetricAvailability,
         nowUptime: Long
     ): FpsState {
-        val state = FpsState(
-            fps = 0f,
-            frameTimeMs = 0f,
-            history = history.toList(),
-            totalFrames = latencyCounter.totalUniqueFrames.toInt(),
-            jankFrames = latencyCounter.totalJankFrames.toInt(),
-            source = source,
-            surface = null,
-            valid = false,
-            reason = reason,
-            availability = availability,
-            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
-            sampleAgeMs = 0L,
-            measurementWindowMs = 0L,
-            sourceKind = kind
-        )
+        val state = rememberLastReading(source, kind, reason, availability)
         _state.value = state
         return state
     }

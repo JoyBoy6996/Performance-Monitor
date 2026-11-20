@@ -118,6 +118,15 @@ class FpsSampler(
     private var lastMeasuredAtMs = 0L
 
     /**
+     * The device-wide frame counter of the previous poll.
+     *
+     * A game's own timestats entry can stay frozen while it presents hundreds
+     * of frames; the total at the top of the dump is the counter that moves.
+     */
+    private var lastGlobalFrames = -1L
+    private var lastGlobalAtMs = 0L
+
+    /**
      * The frame counters of SurfaceFlinger.
      *
      * This is the source that works for games: a game draws into a buffer
@@ -192,6 +201,8 @@ class FpsSampler(
         measuredLayer = null
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
+        lastGlobalFrames = -1L
+        lastGlobalAtMs = 0L
         _state.value = FpsState()
     }
 
@@ -333,6 +344,11 @@ class FpsSampler(
         // launcher is in front the same answer describes a system surface and
         // is refused.
         if (foregroundIsTarget) {
+            // The device-wide counter cannot pick a wrong layer, and it is the
+            // only one that keeps counting when a game's own entry is frozen.
+            val fromGlobal = sampleFromGlobalCounter(pkg, nowUptime)
+            if (fromGlobal != null) return fromGlobal
+
             val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
             if (fromActive != null) return fromActive
         }
@@ -401,6 +417,56 @@ class FpsSampler(
             if (dump.isNotBlank()) samples += parseLayerLatencies("@@@$name\n$dump")
         }
         return samples
+    }
+
+    /**
+     * The frames SurfaceFlinger counted while the game was in front.
+     *
+     * The per-layer counter of a game can stay frozen while the game keeps
+     * presenting frames; on this device the total at the top of the timestats
+     * dump grows by the game's real frame count (264 frames in two seconds for
+     * a game running at 120). The growth between two polls is therefore the
+     * reading, and it cannot pick a wrong layer because it names no layer.
+     */
+    private suspend fun sampleFromGlobalCounter(
+        pkg: String,
+        nowUptime: Long
+    ): FpsState? {
+        val dump = hub.execOrNull(
+            ShellCommands.surfaceTotalFrames(),
+            GLOBAL_COUNTER_TIMEOUT_MS
+        )?.out.orEmpty()
+        val frames = GLOBAL_FRAMES_RE.find(dump)?.groupValues?.get(1)?.toLongOrNull()
+            ?: return null
+
+        val nowMs = SystemClock.elapsedRealtime()
+        val previous = lastGlobalFrames
+        val previousAt = lastGlobalAtMs
+        lastGlobalFrames = frames
+        lastGlobalAtMs = nowMs
+        if (previous < 0L || frames < previous) return null
+
+        val elapsedMs = nowMs - previousAt
+        if (elapsedMs < MIN_COUNTER_WINDOW_MS) return null
+        val fps = (frames - previous) * 1_000f / elapsedMs
+        if (!isPlausibleFps(fps)) return null
+
+        activeSource = FpsSourceKind.TIMESTATS
+        measuredLayer = "the frames presented while $pkg was in front"
+        publish(
+            fps = fps,
+            frameTimeMs = 1_000f / fps,
+            source = "SurfaceFlinger presented frames",
+            kind = FpsSourceKind.TIMESTATS,
+            layer = measuredLayer,
+            totalFrames = frames - previous,
+            jankFrames = 0L,
+            sampleAgeMs = 0L,
+            windowMs = elapsedMs,
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
     }
 
     /**
@@ -780,7 +846,10 @@ class FpsSampler(
         // rolling counter that only sees a few new frames per dump underreports
         // a game running at 90-120 as 24, which is what the overlay showed.
         val fps = ownStats.fps
-        if (!isPlausibleFps(fps)) {
+        // An idle UI surface presents a handful of frames a second. Calling
+        // that the game produced 4 fps was wrong; it is not a frame rate of
+        // the game and is refused instead of replacing a real reading.
+        if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) {
             pendingWarmUpReason = "Waiting for ${target.name} to present frames"
             return null
         }
@@ -841,7 +910,7 @@ class FpsSampler(
         val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
         val stats = computeFrameStats(deltas) ?: return null
         val fps = stats.fps
-        if (!isPlausibleFps(fps)) return null
+        if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) return null
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = "the layer that is on the screen"
@@ -952,6 +1021,8 @@ class FpsSampler(
         history.clear()
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
+        lastGlobalFrames = -1L
+        lastGlobalAtMs = 0L
         if (pkg != null) {
             // Reset the baselines for the new app, but keep the number that was
             // already on screen. The old sampler never blanked its reading when
@@ -1139,6 +1210,18 @@ class FpsSampler(
 
         /** Fewer frames than this say nothing about a frame rate. */
         private const val MIN_EXACT_FRAMES = 8
+
+        /** The first `totalFrames` of the dump is the device-wide counter. */
+        private val GLOBAL_FRAMES_RE = Regex("""totalFrames\s*=\s*(\d+)""")
+
+        /** A game that is drawing does not present four frames a second. */
+        private const val MIN_GAME_FPS = 20f
+
+        /** How long the device-wide counter may take to answer. */
+        private const val GLOBAL_COUNTER_TIMEOUT_MS = 3_000L
+
+        /** A window shorter than this makes a counter difference meaningless. */
+        private const val MIN_COUNTER_WINDOW_MS = 300L
 
         /** Fewer frames than this on the active layer say nothing about FPS. */
         private const val MIN_ACTIVE_FRAMES = 4

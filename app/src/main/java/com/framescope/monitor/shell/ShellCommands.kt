@@ -114,6 +114,17 @@ object ShellCommands {
     fun surfaceTimeStatsDump(): String = "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null"
 
     /**
+     * The device-wide presented-frame counter, and nothing else.
+     *
+     * A game's own timestats entry can stay frozen while it keeps presenting
+     * frames; on this device the total at the top of the dump is the counter
+     * that grows with the game. Only the first line is taken so the answer
+     * stays small enough for every poll.
+     */
+    fun surfaceTotalFrames(): String =
+        "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 'totalFrames'"
+
+    /**
      * The counters of one app, without the counters of every other app.
      *
      * The dump of the whole device holds a block for every layer it has, and a

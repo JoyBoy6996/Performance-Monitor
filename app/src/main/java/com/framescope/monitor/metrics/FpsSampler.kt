@@ -564,10 +564,11 @@ class FpsSampler(
         if (dump.isBlank()) return null
 
         val (_, presents) = Parsers.parseLatency(dump)
-        if (!isPlausibleSeries(presents)) return null
+        if (presents.size < 4) return null
 
-        // The same arithmetic every other source uses: the median interval is
-        // the frame time, and the jank is every interval that misses the budget.
+        // The same arithmetic every other source uses: the mean interval
+        // between the frames is the frame time, and the jank is every interval
+        // that misses the budget.
         val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
         val stats = computeFrameStats(deltas) ?: return null
         val fps = stats.fps
@@ -663,13 +664,6 @@ class FpsSampler(
                 dump = "one layer at a time:\n" + oneByOne.joinToString("\n") { it.name }
             }
         }
-
-        // The old sampler rejected a layer before it ever computed a number from
-        // it: a series with long idle gaps is a screen that was standing still,
-        // not a game running at a low frame rate. Filtering here keeps those stray
-        // timestamps from becoming the 7 / 12 / 24 fps readings that replaced a
-        // real game rate.
-        samples = samples.filter { isPlausibleSeries(it.presents, it.refreshPeriodNs) }
 
         val report = buildProbeReport(pkg, dump) +
             if (fallbackDump.isBlank()) "" else {
@@ -801,19 +795,18 @@ class FpsSampler(
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
         if (pkg != null) {
-            // The counters need a new baseline for the new app, but the number on
-            // screen does not. The old sampler never blanked its reading on an app
-            // switch: it kept the last real frame rate while the new app warmed up.
-            // Writing a fresh empty state here is what made the overlay drop to
-            // "--fps" the moment FrameScope itself came to the front.
+            // Reset the baselines for the new app, but keep the number that was
+            // already on screen. The old sampler never blanked its reading when
+            // the app in front changed; writing an empty state here dropped the
+            // overlay to "--fps" every time FrameScope or the launcher came up.
             val last = _state.value
-            if (last.fps > 0f) {
-                _state.value = last.copy(
+            _state.value = if (last.fps > 0f) {
+                last.copy(
                     availability = MetricAvailability.WARMING_UP,
                     reason = "Waiting for $pkg to present frames"
                 )
             } else {
-                _state.value = FpsState(
+                FpsState(
                     availability = MetricAvailability.WARMING_UP,
                     reason = "Waiting for $pkg to present frames"
                 )
@@ -889,14 +882,11 @@ class FpsSampler(
         availability: MetricAvailability
     ): FpsState {
         val last = _state.value
-        // The old sampler kept its last real reading when a source had nothing
-        // new: it copied the state and only changed the status text. There was
-        // no age limit. On this phone a fresh reading can be more than a minute
-        // apart from the previous one, so any short staleness window blanks the
-        // number almost all the time. Worse, once it writes fps=0 the next poll
-        // sees fps=0 and can never bring the number back - a one-way latch to
-        // "--fps". Keep the number and the valid flag until a new reading or a
-        // real reset replaces them.
+        // A real number is still a real number even after one empty poll. The
+        // old sampler copied its state here instead of writing 0. Checking
+        // `last.valid` made the first empty poll write fps=0, after which every
+        // later poll saw fps=0 and the overlay stayed on "--fps" until the next
+        // source happened to answer. Only fps matters for keeping the number.
         val hasReading = last.fps > 0f
         return FpsState(
             fps = if (hasReading) last.fps else 0f,
@@ -904,20 +894,14 @@ class FpsSampler(
             history = if (hasReading) last.history else history.toList(),
             totalFrames = if (hasReading) last.totalFrames else latencyCounter.totalUniqueFrames.toInt(),
             jankFrames = if (hasReading) last.jankFrames else latencyCounter.totalJankFrames.toInt(),
-            source = if (hasReading) last.source else source,
+            source = source,
             surface = if (hasReading) last.surface else null,
-            // Only an invalid state is shown as "--" by the overlay. Keep the
-            // reading valid so a slow or empty dump cannot blank the number.
-            valid = hasReading,
+            valid = false,
             reason = reason,
-            availability = if (hasReading) MetricAvailability.AVAILABLE else availability,
-            measuredAtElapsedNanos = if (hasReading) last.measuredAtElapsedNanos
-                else SystemClock.elapsedRealtimeNanos(),
-            sampleAgeMs = if (hasReading) {
-                ((SystemClock.elapsedRealtimeNanos() - last.measuredAtElapsedNanos) / 1_000_000L)
-                    .coerceAtLeast(0L)
-            } else 0L,
-            measurementWindowMs = if (hasReading) last.measurementWindowMs else 0L,
+            availability = availability,
+            measuredAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
+            sampleAgeMs = 0L,
+            measurementWindowMs = 0L,
             sourceKind = kind,
             low1PercentFps = if (hasReading) last.low1PercentFps else null,
             low5PercentFps = if (hasReading) last.low5PercentFps else null,
@@ -963,7 +947,6 @@ class FpsSampler(
     companion object {
         private const val HISTORY_SIZE = 60
         private const val BASE_BACKOFF_NS = 2_000_000_000L
-
         private const val DEFAULT_FRAME_BUDGET_NS = 16_666_666L
 
         /**

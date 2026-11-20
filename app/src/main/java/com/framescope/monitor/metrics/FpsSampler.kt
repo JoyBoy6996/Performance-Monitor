@@ -118,12 +118,12 @@ class FpsSampler(
     private var lastMeasuredAtMs = 0L
 
     /**
-     * The device-wide frame counter over the last couple of seconds.
+     * The device-wide frame counter over the last second.
      *
      * A game's own timestats entry can stay frozen while it presents hundreds
      * of frames; the total at the top of the dump is the counter that moves. A
-     * two-second baseline is used instead of the previous poll because a
-     * half-second window makes the same 120 fps game read as 104 or 129.
+     * one-second baseline answers quickly when a scene changes, and the cap
+     * settling below keeps that shorter window from overshooting 90 or 120.
      */
     private val globalHistory = ArrayDeque<Pair<Long, Long>>()
 
@@ -271,6 +271,19 @@ class FpsSampler(
         // is the wrong number this fix must never produce.
         val foregroundIsTarget = detected == pkg && !pkg.isNullOrBlank() &&
             pkg != ownPackage && !isNonGame(pkg)
+
+        // The launcher is not a game. A reading left over from the game would sit
+        // on the overlay as a live 120 fps forever after the game is closed, so
+        // clear the published value as soon as the home screen appears. The
+        // remembered package stays for the raw probe.
+        if (!detected.isNullOrBlank() && isNonGame(detected)) {
+            _state.value = FpsState()
+        }
+        // A gap outside the game makes old counter samples a false baseline when
+        // the game comes back. Start the window again on the next poll.
+        if (!foregroundIsTarget && !detected.isNullOrBlank()) {
+            globalHistory.clear()
+        }
 
         if (pkg != foregroundApp) {
             // A different app is in front. Everything measured so far belonged to the
@@ -425,7 +438,7 @@ class FpsSampler(
      * The per-layer counter of a game can stay frozen while the game keeps
      * presenting frames; on this device the total at the top of the timestats
      * dump grows by the game's real frame count (264 frames in two seconds for
-     * a game running at 120). The growth over the two-second window is the
+     * a game running at 120). The growth over the one-second window is the
      * reading, and it cannot pick a wrong layer because it names no layer.
      */
     private suspend fun sampleFromGlobalCounter(
@@ -1260,11 +1273,11 @@ class FpsSampler(
         /** How long the device-wide counter may take to answer. */
         private const val GLOBAL_COUNTER_TIMEOUT_MS = 3_000L
 
-        /** The counter difference is taken over about two seconds, not one poll. */
-        private const val GLOBAL_COUNTER_WINDOW_MS = 2_000L
+        /** The counter difference is taken over about one second, not one poll. */
+        private const val GLOBAL_COUNTER_WINDOW_MS = 1_000L
 
         /** A window shorter than this makes a counter difference meaningless. */
-        private const val MIN_COUNTER_WINDOW_MS = 800L
+        private const val MIN_COUNTER_WINDOW_MS = 500L
 
         /** Fewer frames than this on the active layer say nothing about FPS. */
         private const val MIN_ACTIVE_FRAMES = 4
@@ -1280,9 +1293,9 @@ class FpsSampler(
         private const val ACTIVE_LATENCY_TIMEOUT_MS = 3_000L
 
         /**
-         * How long a real reading is kept while FrameScope or the launcher is in
-         * front. Past that the number is history and is blanked rather than
-         * shown as a current reading.
+         * How long a real reading is kept while the game or FrameScope is in
+         * front. The launcher clears it at once; past this point a number is
+         * history and is blanked rather than shown as a current reading.
          */
         private const val KEEP_LAST_READING_NS = 300_000_000_000L
 

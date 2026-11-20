@@ -319,11 +319,18 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // The device-wide presented-frame counter is the live screen FPS. It
-        // counts what the display actually presented over the last second for
-        // any app in front - a game, the launcher, FrameScope or anything else.
-        // It names no layer, so it cannot publish another surface's rate as the
-        // app's, and a scroll or a scene change moves it within one window.
+        // The counter of the game's own layer is the only source that separates
+        // the game from the rest of the screen. The device-wide counter follows
+        // the panel - this phone refreshes at 150 Hz, so it reads 120+ even in a
+        // 90 fps lobby. It must never win while a real game layer has a growing
+        // counter of its own.
+        val fromCounters = if (detectedGame) {
+            sampleFromCounters(pkg, targetFps, nowUptime)
+        } else null
+        if (fromCounters != null) return fromCounters
+
+        // The device-wide counter is the live screen FPS for home and other
+        // apps, and the fallback for a game whose layer counter is frozen.
         val fromGlobal = sampleFromGlobalCounter(
             pkg,
             nowUptime,
@@ -357,9 +364,6 @@ class FpsSampler(
 
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
         if (fromGfx != null) return fromGfx
-
-        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
-        if (fromCounters != null) return fromCounters
 
         // A layer was found and it is still warming up - that is a better answer
         // than "no source".
@@ -532,6 +536,10 @@ class FpsSampler(
         // moments before. The old sampler kept its last reading instead.
         val idle = tick.staticScreen && tick.belongsToApp
         if (idle || tick.frames <= 0L) return null
+        // When the game does not name its surface, the engine falls back to the
+        // layer that grew most. That could be any other app; its rate must never
+        // be published as the game's. Let the global counter answer instead.
+        if (!tick.belongsToApp) return null
         val fps: Double = tick.fps
         if (fps <= 0.0) return null
         // When the layer named its display rate, the counters already clamped
@@ -574,9 +582,13 @@ class FpsSampler(
             }
         )
 
+        // The counter sees the game plus the small compositor overhead, so a
+        // 90 fps lobby can read 93 and a 120 fps match 129. Settle a small
+        // overshoot onto the real cap; never push a low reading upward.
+        val settledFps = settleToGameCap(fps.toFloat(), refreshRateHz())
         publish(
-            fps = fps.toFloat(),
-            frameTimeMs = if (fps > 0.0) (1000.0 / fps).toFloat() else 0.0f,
+            fps = settledFps,
+            frameTimeMs = if (settledFps > 0f) (1000f / settledFps).toFloat() else 0f,
             source = "SurfaceFlinger counters",
             kind = FpsSourceKind.TIMESTATS,
             layer = tick.layer,

@@ -22,6 +22,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -79,8 +80,11 @@ fun OverlayScreen(
     val showGraph by settings.overlayShowGraph.flow.collectAsState()
     val graphHeight by settings.overlayGraphHeight.flow.collectAsState()
     val threshold = settings.fpsThreshold.flow.collectAsState().value
+    val previewRows = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        .map { it to overlayRowValue(it, fps, system) }
 
     var canDraw by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var showAllPreviews by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) {
         canDraw = Settings.canDrawOverlays(context)
         onPauseOrDispose { }
@@ -91,6 +95,70 @@ fun OverlayScreen(
         subtitle = "Live telemetry on top of any app",
         bottomPadding = bottomPadding
     ) {
+        item {
+            Panel {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "Preview",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (showAllPreviews) {
+                                "All five overlay styles, full width."
+                            } else {
+                                "The selected style, full width."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(Space.md))
+                    OutlinedButton(onClick = { showAllPreviews = !showAllPreviews }) {
+                        Text(if (showAllPreviews) "Selected style" else "All styles")
+                    }
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(Space.md)) {
+                if (showAllPreviews) {
+                    OverlayStyle.entries.forEach { styleOption ->
+                        HudPreview(
+                            fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                            frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                            cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
+                            history = fps.history,
+                            style = styleOption.name,
+                            rows = previewRows,
+                            showGraph = showGraph,
+                            threshold = threshold,
+                            label = styleOption.name,
+                            caption = "$styleOption style preview"
+                        )
+                    }
+                } else {
+                    HudPreview(
+                        fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                        frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                        cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
+                        history = fps.history,
+                        style = style,
+                        rows = previewRows,
+                        showGraph = showGraph,
+                        threshold = threshold,
+                        label = style
+                    )
+                }
+            }
+        }
+
         item {
             Panel {
                 Row(
@@ -172,22 +240,6 @@ fun OverlayScreen(
                     }
                 }
             }
-        }
-
-        item { SectionHeader("Preview") }
-
-        item {
-            HudPreview(
-                fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
-                frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
-                cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
-                history = fps.history,
-                style = style,
-                rows = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                    .map { it to overlayRowValue(it, fps, system) },
-                showGraph = showGraph,
-                threshold = threshold
-            )
         }
 
         item { SectionHeader("Style") }
@@ -297,10 +349,17 @@ private fun HudPreview(
     style: String,
     rows: List<Pair<String, String>>,
     showGraph: Boolean,
-    threshold: Int
+    threshold: Int,
+    label: String,
+    caption: String = "Preview of the floating widget"
 ) {
     if (style.uppercase() == "PILL") {
-        PillPreview(fpsText = fpsText, frameText = frameText)
+        PillPreview(
+            fpsText = fpsText,
+            frameText = frameText,
+            label = label,
+            caption = caption
+        )
         return
     }
 
@@ -310,12 +369,18 @@ private fun HudPreview(
     Panel {
         Box(
             modifier = Modifier
-                .width(196.dp)
+                .fillMaxWidth()
                 .clip(MaterialTheme.shapes.small)
                 .background(HudBackground)
                 .padding(Space.md)
         ) {
             Column {
+                Text(
+                    text = label.uppercase(),
+                    style = MonoBlock.copy(fontSize = 9.sp, letterSpacing = 1.sp),
+                    color = HudMuted
+                )
+                Spacer(Modifier.height(Space.xs))
                 if (style.uppercase() == "RTSS" || style.uppercase() == "DETAILED") {
                     Text(
                         text = "FRAMESCOPE",
@@ -384,7 +449,7 @@ private fun HudPreview(
             }
         }
         Text(
-            text = "Preview of the floating widget",
+            text = caption,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = Space.sm)
@@ -397,8 +462,19 @@ private fun HudPreview(
  * frame time once the widget is expanded.
  */
 @Composable
-private fun PillPreview(fpsText: String, frameText: String) {
+private fun PillPreview(
+    fpsText: String,
+    frameText: String,
+    label: String,
+    caption: String
+) {
     Panel {
+        Text(
+            text = label.uppercase(),
+            style = MonoBlock.copy(fontSize = 9.sp, letterSpacing = 1.sp),
+            color = HudMuted
+        )
+        Spacer(Modifier.height(Space.xs))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -445,7 +521,7 @@ private fun PillPreview(fpsText: String, frameText: String) {
             )
         }
         Text(
-            text = "Preview of the floating widget",
+            text = caption,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = Space.sm)

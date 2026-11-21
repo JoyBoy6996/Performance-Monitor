@@ -33,7 +33,7 @@ private fun List<List<Float?>>.toNullableJsonArrays(): JSONArray = JSONArray().a
 }
 
 /** Integer clocks keep a null per core, never a zero that looks measured. */
-private fun List<List<Int?>>.toNullableJsonArrays(): JSONArray = JSONArray().apply {
+private fun List<List<Int?>>.toNullableIntJsonArrays(): JSONArray = JSONArray().apply {
     forEach { row ->
         put(JSONArray().apply {
             row.forEach { value ->
@@ -287,7 +287,7 @@ class SessionStore(context: Context) {
         put("cpuGroupSeries", record.cpuGroupSeries.toNullableJsonArrays())
         put("cpuGroupFreqSeries", record.cpuGroupFreqSeries.toNullableJsonArrays())
         put("perCoreLoadSeries", record.perCoreLoadSeries.toNullableJsonArrays())
-        put("perCoreFreqSeries", record.perCoreFreqSeries.toNullableJsonArrays())
+        put("perCoreFreqSeries", record.perCoreFreqSeries.toNullableIntJsonArrays())
         put("ddrFreqSeries", JSONArray(record.ddrFreqSeries))
         put("threadNames", JSONArray(record.threadNames))
         put("threadAvgLoads", JSONArray(record.threadAvgLoads.finiteDoubles()))
@@ -718,7 +718,7 @@ class SessionStore(context: Context) {
                 put("cpu_group_series", record.cpuGroupSeries.toNullableJsonArrays().toString())
                 put("cpu_group_freq_series", record.cpuGroupFreqSeries.toNullableJsonArrays().toString())
                 put("per_core_load_series", record.perCoreLoadSeries.toNullableJsonArrays().toString())
-                put("per_core_freq_series", record.perCoreFreqSeries.toNullableJsonArrays().toString())
+                put("per_core_freq_series", record.perCoreFreqSeries.toNullableIntJsonArrays().toString())
                 put("ddr_freq_series", JSONArray(record.ddrFreqSeries).toString())
                 put("thread_names", JSONArray(record.threadNames).toString())
                 put("thread_avg_loads", JSONArray(record.threadAvgLoads.finiteDoubles()).toString())

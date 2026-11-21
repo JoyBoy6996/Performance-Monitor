@@ -447,14 +447,17 @@ object SessionShare {
             val pages = renderPages(session, threshold)
             val dir = File(context.filesDir, "exports").apply { mkdirs() }
             val file = File(dir, "FrameScope_${safeName(session)}_${session.id}.pdf")
-            PdfDocument().use { document ->
+            val document = PdfDocument()
+            try {
                 pages.forEachIndexed { index, bitmap ->
                     val info = PdfDocument.PageInfo.Builder(595, 842, index + 1).create()
                     val page = document.startPage(info)
                     page.canvas.drawBitmap(bitmap, null, Rect(0, 0, 595, 842), null)
                     document.finishPage(page)
                 }
-                FileOutputStream(file).use { document.writeTo(it) }
+                FileOutputStream(file).use { output -> document.writeTo(output) }
+            } finally {
+                document.close()
             }
             val uri = FileProvider.getUriForFile(
                 context, "${context.packageName}.files", file

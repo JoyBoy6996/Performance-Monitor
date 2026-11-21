@@ -1,6 +1,5 @@
 package com.framescope.monitor.ui.screens
 
-import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,11 +24,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
@@ -62,11 +63,12 @@ fun SessionsScreen(
     onOpenSession: (SessionRecord) -> Unit = {},
     bottomPadding: Dp = 24.dp
 ) {
-    val context = LocalContext.current
     val sessions by container.store.sessions.collectAsState()
     val formatter = remember { SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()) }
     val threshold = container.settings.fpsThreshold.flow.collectAsState().value
+    var shareTarget by remember { mutableStateOf<SessionRecord?>(null) }
 
+    Box(Modifier.fillMaxSize()) {
     FrameScopeScreen(
         title = "Sessions",
         subtitle = if (sessions.isEmpty()) {
@@ -96,27 +98,20 @@ fun SessionsScreen(
                     threshold = threshold,
                     formattedDate = formatter.format(Date(session.startedAt)),
                     onOpen = { onOpenSession(session) },
-                    onShare = {
-                        val csv = container.store.toCsv(session)
-                        val exportDir = java.io.File(context.filesDir, "exports").apply { mkdirs() }
-                        val file = java.io.File(exportDir, "session_${session.id}.csv").apply { writeText(csv) }
-                        val uri = androidx.core.content.FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.files",
-                            file
-                        )
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/csv"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            putExtra(Intent.EXTRA_SUBJECT, "FrameScope session - ${session.appLabel}")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        context.startActivity(Intent.createChooser(send, "Export session"))
-                    },
+                    onShare = { shareTarget = session },
                     onDelete = { container.store.delete(session.id) }
                 )
             }
         }
+    }
+
+    shareTarget?.let { target ->
+        SessionShareDialog(
+            session = target,
+            threshold = threshold,
+            onDismiss = { shareTarget = null }
+        )
+    }
     }
 }
 

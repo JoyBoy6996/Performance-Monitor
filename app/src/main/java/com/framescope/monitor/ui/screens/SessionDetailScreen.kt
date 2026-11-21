@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -123,12 +125,21 @@ fun SessionDetailScreen(
     val appName = session.appLabel.ifBlank {
         session.appPackage.ifBlank { "Unknown app" }
     }
+    var shareOpen by remember { mutableStateOf(false) }
 
+    Box(Modifier.fillMaxSize()) {
     FrameScopeScreen(
         title = appName,
         subtitle = "${formatter.format(Date(session.startedAt))} · ${formatDuration(session.durationMs)}",
         bottomPadding = bottomPadding,
         actions = {
+            IconButton(onClick = { shareOpen = true }) {
+                Icon(
+                    imageVector = Icons.Rounded.Share,
+                    contentDescription = "Share session",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             IconButton(onClick = onBack) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
@@ -479,6 +490,15 @@ fun SessionDetailScreen(
 
         item { SectionHeader("Diagnostics") }
         item { ShellLogsCard(session.shellLogs) }
+    }
+
+    if (shareOpen) {
+        SessionShareDialog(
+            session = session,
+            threshold = threshold,
+            onDismiss = { shareOpen = false }
+        )
+    }
     }
 }
 

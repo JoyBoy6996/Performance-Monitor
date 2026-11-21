@@ -79,8 +79,9 @@ fun TelemetryChart(
         return
     }
 
+    val gridColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
     Canvas(modifier = modifier.fillMaxWidth().height(height)) {
-        val grid = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+        val grid = gridColor
         for (i in 0..4) {
             val y = size.height * i / 4f
             drawLine(
@@ -165,8 +166,9 @@ fun SpikeChart(
         return
     }
     val ceiling = (clean.maxOrNull() ?: 1f).coerceAtLeast(1f)
+    val gridColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
     Canvas(modifier = modifier.fillMaxWidth().height(height)) {
-        val grid = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+        val grid = gridColor
         for (i in 0..4) {
             val y = size.height * i / 4f
             drawLine(

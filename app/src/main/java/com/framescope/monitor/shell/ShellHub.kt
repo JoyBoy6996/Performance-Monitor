@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 enum class AccessState { READY, NEEDS_SETUP, UNAVAILABLE }
@@ -83,6 +85,13 @@ class ShellHub(
     val adbAuthState: StateFlow<AdbAuthState> = adb.authState
 
     private val statusScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val adbSetupMutex = Mutex()
+
+    // Shizuku often becomes READY a moment after the permission popup is closed.
+    // Refresh() alone cannot open the bridge then, because the key is not stored
+    // yet. Remember the transition so setup runs once by itself.
+    private var lastShizukuReady = false
+    private var adbAutoSetupAttempted = false
 
     init {
         statusScope.launch {
@@ -94,7 +103,19 @@ class ShellHub(
                 _adbReason
             ) { state, details, error, adbReady, adbReason ->
                 accessStatus(state, details, error, adbReady, adbReason)
-            }.collect { _status.value = it }
+            }.collect { status ->
+                _status.value = status
+                val ready = shizukuRunner.connectionState.value == ShizukuRunner.ConnectionState.READY
+                if (!ready) {
+                    lastShizukuReady = false
+                } else if (!lastShizukuReady) {
+                    lastShizukuReady = true
+                    if (!adbAutoSetupAttempted && !adb.authorisationStored && !_adbReady.value) {
+                        adbAutoSetupAttempted = true
+                        statusScope.launch { runCatching { setupAdbBridge() } }
+                    }
+                }
+            }
         }
     }
 
@@ -126,25 +147,27 @@ class ShellHub(
      * port. The RSA key is saved as soon as the phone accepts it.
      */
     suspend fun setupAdbBridge(): String = withContext(Dispatchers.IO) {
-        adb.retarget(LOOPBACK, adbPort)
+        adbSetupMutex.withLock {
+            adb.retarget(LOOPBACK, adbPort)
 
-        // Give Shizuku one fresh chance first. Without a privileged shell the
-        // app cannot install its key or open an ADB port on a stock ROM.
-        if (shizukuHelper() == null) {
-            runCatching { shizukuRunner.refresh(forceReconnect = true) }
+            // Give Shizuku one fresh chance first. Without a privileged shell the
+            // app cannot install its key or open an ADB port on a stock ROM.
+            if (shizukuHelper() == null) {
+                runCatching { shizukuRunner.refresh(forceReconnect = true) }
+            }
+
+            // The USB debugging prompt the user sees while starting Shizuku is for
+            // Shizuku's key, not ours. Install our own key with the already-available
+            // privileged shell first, so FrameScope never needs a second prompt.
+            val keyInstalled = trustKeyWithShell(shizukuHelper())
+
+            if (runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false)) {
+                finishAdbSetup(keyInstalled)
+            } else {
+                publishAdbState(false)
+                adbSetupFailureMessage()
+            }
         }
-
-        // The USB debugging prompt the user sees while starting Shizuku is for
-        // Shizuku's key, not ours. Install our own key with the already-available
-        // privileged shell first, so FrameScope never needs a second prompt.
-        val keyInstalled = trustKeyWithShell(shizukuHelper())
-
-        if (runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false)) {
-            return@withContext finishAdbSetup(keyInstalled)
-        }
-
-        publishAdbState(false)
-        adbSetupFailureMessage()
     }
 
     /**
@@ -297,6 +320,7 @@ class ShellHub(
     suspend fun resetAdbAuthorisation() {
         adb.resetAuthorisation()
         adbKeys.clearAuthorisationStored()
+        adbAutoSetupAttempted = false
         publishAdbState(false)
     }
 

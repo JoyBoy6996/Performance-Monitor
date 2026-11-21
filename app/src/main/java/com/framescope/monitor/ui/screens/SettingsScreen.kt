@@ -316,7 +316,13 @@ fun SettingsScreen(
                         adbAuth == AdbAuthState.STORED ->
                             "Bridge: key is trusted. Keep Shizuku running (or Wireless debugging ON); " +
                                 "the port opens and reconnects by itself."
-                        else -> "Bridge: not set up yet. Start Shizuku, or tap Set up bridge."
+                        status.commandVerified ->
+                            "Shizuku is active. Grant FrameScope permission in Shizuku; the bridge then " +
+                                "opens by itself. If it stays here, tap Set up bridge once."
+                        status.detail.contains("permission", ignoreCase = true) ->
+                            "Grant FrameScope permission in Shizuku, then the bridge opens by itself."
+                        else -> "Bridge: not set up yet. Start Shizuku (USB debugging works, no Wi-Fi needed), " +
+                            "grant FrameScope permission, then tap Set up bridge if needed."
                     }
                     Text(
                         text = adbLine,

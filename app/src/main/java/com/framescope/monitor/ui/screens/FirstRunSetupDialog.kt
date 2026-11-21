@@ -70,10 +70,10 @@ fun FirstRunSetupDialog(
                     }
                 )
                 Text(
-                    "Prefer Shizuku. With USB debugging ON, Shizuku can open the local bridge " +
-                        "for the app — no Wi-Fi or PC needed. Tap Set up ADB bridge, accept the " +
-                        "“Always allow” prompt, and it reconnects by itself. Wireless debugging " +
-                        "is an alternative if your phone blocks that."
+                    "Prefer Shizuku. With USB debugging ON and FrameScope permission granted in " +
+                        "Shizuku, the local bridge opens by itself — no Wi-Fi or PC needed. If it " +
+                        "does not appear, tap Set up ADB bridge once. Wireless debugging is only " +
+                        "a fallback."
                 )
                 Column {
                     TextButton(onClick = { openShizuku(context) }) {

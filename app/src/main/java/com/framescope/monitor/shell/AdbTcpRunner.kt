@@ -140,6 +140,53 @@ class AdbTcpRunner(
         true
     }
 
+    /**
+     * Proves the phone kept our key by opening a fresh session without offering
+     * it again. If adbd accepts the signature silently, the trust is real and
+     * future launches may reconnect without showing a prompt.
+     */
+    suspend fun verifyStoredKey(): Boolean = mutex.withLock {
+        closeSession()
+        val opened = try {
+            openSessionAt(
+                host,
+                port,
+                force = true,
+                handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS,
+                allowKeyOffer = false
+            )
+        } catch (e: Exception) {
+            lastError = "The phone did not remember this ADB key. " +
+                "Accept the prompt again with “Always allow”. (${e.message ?: "no reason"})"
+            lastFailureAt = System.currentTimeMillis()
+            failureCount++
+            keys.clearAuthorisationStored()
+            _authState.value = AdbAuthState.UNKNOWN
+            return@withLock false
+        }
+
+        val probe = try {
+            opened.exec(PROBE_COMMAND, PROBE_TIMEOUT_MS)
+        } catch (e: Exception) {
+            lastError = e.message ?: "The ADB bridge did not answer"
+            runCatching { opened.close() }
+            return@withLock false
+        }
+        if (!probe.out.contains(PROBE_MARK)) {
+            lastError = "The ADB bridge answered but did not run commands."
+            runCatching { opened.close() }
+            return@withLock false
+        }
+
+        keys.markAuthorisationStored()
+        keyOfferUsed = true
+        lastError = null
+        failureCount = 0
+        session = opened
+        _authState.value = AdbAuthState.STORED
+        true
+    }
+
     fun fingerprint(): String = keys.publicKeyFingerprint()
 
     override suspend fun unavailableReason(): String = lastError
@@ -180,7 +227,8 @@ class AdbTcpRunner(
         targetHost: String,
         targetPort: Int,
         force: Boolean = false,
-        handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS
+        handshakeTimeoutMs: Int = HANDSHAKE_TIMEOUT_MS,
+        allowKeyOffer: Boolean = true
     ): AdbSession {
         val cooling = System.currentTimeMillis() - lastFailureAt
         val requiredBackoff = (BASE_BACKOFF_MS * (1 shl minOf(failureCount, 4))).coerceIn(BASE_BACKOFF_MS, MAX_BACKOFF_MS)
@@ -197,7 +245,7 @@ class AdbTcpRunner(
             val session = AdbSession(
                 socket = socket,
                 keys = keys,
-                canOfferKey = { !keyOfferUsed },
+                canOfferKey = { allowKeyOffer && !keyOfferUsed },
                 onKeyOffered = {
                     keyOfferUsed = true
                     _authState.value = AdbAuthState.PROMPT_SENT

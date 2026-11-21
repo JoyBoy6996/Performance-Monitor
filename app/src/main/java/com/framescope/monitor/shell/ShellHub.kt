@@ -104,10 +104,12 @@ class ShellHub(
         if (state == ShizukuRunner.ConnectionState.READY) {
             tryGrantDumpPermission()
         }
-        val adbOk = if (adb.authorisationStored || _adbReady.value || forceReconnect) {
-            runCatching { adb.isAvailable() }.getOrDefault(false)
-        } else {
-            false
+        val shizukuReady = state == ShizukuRunner.ConnectionState.READY
+        val adbWanted = adb.authorisationStored || _adbReady.value || forceReconnect
+        val adbOk = when {
+            !adbWanted -> false
+            shizukuReady && !forceReconnect -> runCatching { adb.isAvailable() }.getOrDefault(false)
+            else -> runCatching { ensureAdbBridge() }.getOrDefault(false)
         }
         publishAdbState(adbOk)
         _status.value
@@ -126,8 +128,7 @@ class ShellHub(
         adb.retarget(LOOPBACK, adbPort)
 
         if (runCatching { adb.isAvailable() }.getOrDefault(false)) {
-            publishAdbState(true)
-            return@withContext adbSuccessMessage()
+            return@withContext finishAdbSetup()
         }
 
         val repairer = adb as AdbBridgeRepairer
@@ -139,8 +140,7 @@ class ShellHub(
             if (switched) {
                 delay(1_500)
                 if (runCatching { adb.isAvailable() }.getOrDefault(false)) {
-                    publishAdbState(true)
-                    return@withContext adbSuccessMessage()
+                    return@withContext finishAdbSetup()
                 }
             }
         }
@@ -150,14 +150,44 @@ class ShellHub(
         val helper: ShellRunner? = shizukuRunner
             .takeIf { it.connectionState.value == ShizukuRunner.ConnectionState.READY }
         if (bootstrapAdbPort(helper)) {
-            publishAdbState(true)
-            return@withContext adbSuccessMessage()
+            return@withContext finishAdbSetup()
         }
 
         publishAdbState(false)
         val reason = adb.unavailableReason()
         "Could not open the local ADB bridge. $reason " +
             "Turn on Wireless debugging, accept the prompt with “Always allow”, then try again."
+    }
+
+    /**
+     * Silent self-heal after a reboot or a Wireless debugging toggle. The port
+     * changes, but the trusted key stays; find the phone's new port and move it
+     * back to the fixed loopback port without asking the user again.
+     */
+    private suspend fun ensureAdbBridge(): Boolean {
+        if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
+        if (!adb.authorisationStored) return false
+        val repairer = adb as AdbBridgeRepairer
+        val discovered = runCatching { repairer.discoverLocalAdbPort() }.getOrNull()
+            ?: return false
+        val switched = runCatching {
+            repairer.requestTcpPort(adbPort, discovered)
+        }.getOrDefault(false)
+        if (!switched) return false
+        delay(1_200)
+        return runCatching { adb.isAvailable() }.getOrDefault(false)
+    }
+
+    /** Confirms that the phone kept the key, not just this one session. */
+    private suspend fun finishAdbSetup(): String {
+        val verified = adb.verifyStoredKey()
+        publishAdbState(verified)
+        return if (verified) {
+            adbSuccessMessage()
+        } else {
+            "The bridge connected, but the phone did not remember this key. " +
+                "Accept the prompt again with “Always allow”. ${adb.unavailableReason()}"
+        }
     }
 
     private suspend fun bootstrapAdbPort(helper: ShellRunner?): Boolean {

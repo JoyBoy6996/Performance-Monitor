@@ -474,7 +474,7 @@ fun ToolsScreen(
                             scope.launch {
                                 val result = container.hub.execOrNull(DIAGNOSTIC_COMMAND)
                                 diagnosticsOutput = if (result == null) {
-                                    "Shizuku is not connected. Please start Shizuku and grant permission."
+                                    "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
                                 } else {
                                     (result.out + result.err).trim()
                                 }
@@ -542,7 +542,7 @@ fun ToolsScreen(
                             scope.launch {
                                 val result = container.hub.execOrNull(consoleInput.trim())
                                 consoleOutput = if (result == null) {
-                                    "Shizuku is not connected. Please start Shizuku and grant permission."
+                                    "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
                                 } else {
                                     (result.out + result.err).trim().ifEmpty { "exit code ${result.code}" }
                                 }
@@ -758,7 +758,7 @@ private fun CommandPanel(
                     busy = true
                     val result = container.hub.execOrNull(command)
                     output = if (result == null) {
-                        "Shizuku is not connected. Please start Shizuku and grant permission."
+                        "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
                     } else {
                         (result.out + result.err).trim().ifEmpty { "no output" }
                     }

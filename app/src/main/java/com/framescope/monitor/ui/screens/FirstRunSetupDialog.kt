@@ -45,6 +45,7 @@ fun FirstRunSetupDialog(
     val scope = rememberCoroutineScope()
     val status by container.hub.status.collectAsState()
     var message by remember { mutableStateOf<String?>(null) }
+    var adbMessage by remember { mutableStateOf<String?>(null) }
     val usageAccessLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { }
@@ -60,13 +61,19 @@ fun FirstRunSetupDialog(
                         "Tap Grant access, then choose Allow in the Shizuku popup. " +
                         "The app will do the rest."
                 )
-                Text(message ?: status.detail.orEmptyIfBlank())
+                Text(message ?: adbMessage ?: status.detail.orEmptyIfBlank())
                 Text(
                     if (usageGranted) {
                         "Usage access: On. No action needed."
                     } else {
                         "Usage access: Off. Tap Usage access → find FrameScope → turn it on."
                     }
+                )
+                Text(
+                    "Prefer Shizuku. If it is not running, set up the local ADB bridge: " +
+                        "open Developer options, turn on USB and Wireless debugging, tap " +
+                        "Set up ADB bridge, then accept the prompt with “Always allow”. " +
+                        "After that it reconnects by itself."
                 )
                 Column {
                     TextButton(onClick = { openShizuku(context) }) {
@@ -85,6 +92,34 @@ fun FirstRunSetupDialog(
                         }
                     ) {
                         Text("Usage access")
+                    }
+                    TextButton(
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }.onFailure { adbMessage = it.message ?: "Could not open Developer options." }
+                        }
+                    ) {
+                        Text("Developer options")
+                    }
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                adbMessage = "Looking for the phone's ADB daemon..."
+                                val result = runCatching { container.hub.setupAdbBridge() }
+                                    .getOrElse { it.message ?: "Could not set up the bridge." }
+                                val refreshed = runCatching { container.hub.refresh() }.getOrNull()
+                                if (refreshed?.commandVerified == true) {
+                                    container.settings.setupCompleted.value = true
+                                }
+                                adbMessage = result
+                            }
+                        }
+                    ) {
+                        Text("Set up ADB bridge")
                     }
                 }
             }

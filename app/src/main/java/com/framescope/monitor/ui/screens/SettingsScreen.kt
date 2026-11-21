@@ -48,6 +48,7 @@ import com.framescope.monitor.core.Backup
 import com.framescope.monitor.core.ProtectedApps
 import com.framescope.monitor.core.ThemeMode
 import com.framescope.monitor.shell.AccessState
+import com.framescope.monitor.shell.AdbAuthState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.Diagnostics
 import com.framescope.monitor.ui.components.MetricLine
@@ -96,7 +97,9 @@ fun SettingsScreen(
     }
     var checking by remember { mutableStateOf(false) }
     var connectMessage by remember { mutableStateOf<String?>(null) }
+    var adbMessage by remember { mutableStateOf<String?>(null) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
+    val adbAuth by container.hub.adbAuthState.collectAsState()
     val scope = rememberCoroutineScope()
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -172,7 +175,7 @@ fun SettingsScreen(
                         if (setupCompleted) {
                             "Setup was verified previously. Shell access is temporary and is available only while Shizuku is running."
                         } else {
-                            diagnostic ?: "Privileged shell access is provided exclusively via Shizuku UserService."
+                            diagnostic ?: "Shizuku is preferred; the local ADB bridge is used only when Shizuku is not answering."
                         }
                     },
                     trailing = {
@@ -283,6 +286,134 @@ fun SettingsScreen(
                     description = "Install and start Shizuku with the official guide for your device, then grant FrameScope permission above. FrameScope checks a real UserService command before it reports Connected. Shell access lasts only as long as Shizuku runs.",
                     context = context
                 )
+            }
+        }
+
+        item { SectionHeader("Local ADB bridge (optional)") }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                Column(Modifier.padding(Space.lg)) {
+                    Text(
+                        text = "One-time setup, then it reconnects by itself",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Text(
+                        text = "Shizuku stays first. This bridge is a fallback for when Shizuku is stopped. " +
+                            "The app generates one ADB key, asks the phone to trust it once, and then " +
+                            "connects on 127.0.0.1 only — no PC and no Wi-Fi needed after setup.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    val adbLine = when {
+                        status.adbReady -> "Bridge: connected on 127.0.0.1:5555. Auto-reconnect is on."
+                        adbAuth == AdbAuthState.PROMPT_SENT ->
+                            "Bridge: waiting for the “Allow USB debugging?” prompt on your phone."
+                        adbAuth == AdbAuthState.STORED ->
+                            "Bridge: key is trusted. It will reconnect when the bridge is available."
+                        else -> "Bridge: not set up yet."
+                    }
+                    Text(
+                        text = adbLine,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.xs))
+                    val fingerprint = status.adbFingerprint
+                    Text(
+                        text = if (fingerprint.isBlank()) {
+                            "Key fingerprint: --"
+                        } else {
+                            "Key fingerprint: $fingerprint"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    val message = adbMessage
+                    if (message != null) {
+                        Spacer(Modifier.height(Space.sm))
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(Space.md))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        FilledTonalButton(
+                            enabled = !checking,
+                            onClick = {
+                                checking = true
+                                adbMessage = "Looking for the phone's ADB daemon..."
+                                scope.launch {
+                                    val result = runCatching { container.hub.setupAdbBridge() }
+                                        .getOrElse { it.describe() }
+                                    val refreshed = runCatching { container.hub.refresh() }
+                                        .getOrNull()
+                                    if (refreshed?.commandVerified == true) {
+                                        settings.setupCompleted.value = true
+                                    }
+                                    adbMessage = result
+                                    checking = false
+                                }
+                            }
+                        ) {
+                            Text("Set up bridge")
+                        }
+                        OutlinedButton(
+                            enabled = !checking,
+                            onClick = {
+                                checking = true
+                                adbMessage = "Reconnecting to the local ADB bridge..."
+                                scope.launch {
+                                    val result = runCatching {
+                                        container.hub.refresh(forceReconnect = true)
+                                    }.getOrNull()
+                                    adbMessage = result?.detail?.ifBlank { "Bridge rechecked." }
+                                        ?: "Bridge recheck failed."
+                                    checking = false
+                                }
+                            }
+                        ) {
+                            Text("Reconnect")
+                        }
+                    }
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }.onFailure { adbMessage = it.describe() }
+                            }
+                        ) {
+                            Text("Developer options")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                Diagnostics.copy(
+                                    context,
+                                    "FrameScope local ADB setup\n" +
+                                        "1. Open Developer options.\n" +
+                                        "2. Turn on USB debugging and Wireless debugging.\n" +
+                                        "3. Tap Set up bridge in FrameScope.\n" +
+                                        "4. Accept “Allow USB debugging?” with “Always allow”.\n" +
+                                        "5. Match this fingerprint: ${status.adbFingerprint}\n" +
+                                        "After that FrameScope reconnects by itself on 127.0.0.1."
+                                )
+                                adbMessage = "Setup steps copied - paste them where needed."
+                            }
+                        ) {
+                            Text("Copy steps")
+                        }
+                    }
+                }
             }
         }
 

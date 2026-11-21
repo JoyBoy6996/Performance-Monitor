@@ -73,7 +73,7 @@ class AppSettings(context: Context) {
     val measurementEnabled = Pref(sp, "measurement_enabled", true)
 
     /**
-     * True after Shizuku UserService command verification has succeeded.
+     * True after either Shizuku or the local ADB bridge answered a real command.
      *
      * The setup is a one-time thing: the phone remembers the key, so the app
      * must not ask for the setup again after the first success.

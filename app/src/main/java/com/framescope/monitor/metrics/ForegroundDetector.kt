@@ -99,7 +99,7 @@ class ForegroundDetector(
             packageName = null,
             source = Source.NONE,
             confident = false,
-            detail = "Shizuku is not connected, so the foreground app is unknown"
+            detail = "No privileged shell is connected, so the foreground app is unknown"
         )
     }
 

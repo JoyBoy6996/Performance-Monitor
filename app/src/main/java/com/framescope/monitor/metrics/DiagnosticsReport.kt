@@ -51,6 +51,12 @@ object DiagnosticsReport {
         sb.appendLine("binder available: ${status.binderAvailable}")
         sb.appendLine("user service connected: ${status.userServiceConnected}")
         sb.appendLine("command verified: ${status.commandVerified}")
+        sb.appendLine("active shell: ${status.shellSource}")
+        sb.appendLine("local adb bridge ready: ${status.adbReady}")
+        sb.appendLine("local adb key trusted: ${status.adbAuthorised}")
+        if (status.adbFingerprint.isNotBlank()) {
+            sb.appendLine("local adb fingerprint: ${status.adbFingerprint}")
+        }
         if (status.detail.isNotBlank()) {
             sb.appendLine("detail: ${status.detail}")
         }

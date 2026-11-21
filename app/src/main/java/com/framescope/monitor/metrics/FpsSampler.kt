@@ -342,7 +342,8 @@ class FpsSampler(
             return publishUnavailable(
                 source = "no source",
                 kind = FpsSourceKind.NONE,
-                reason = "Shizuku is not connected, so the frame rate of $pkg cannot be measured",
+                reason = "No privileged shell is connected (Shizuku or local ADB), " +
+                    "so the frame rate of $pkg cannot be measured",
                 availability = MetricAvailability.SHIZUKU_REQUIRED,
                 nowUptime = nowUptime
             )

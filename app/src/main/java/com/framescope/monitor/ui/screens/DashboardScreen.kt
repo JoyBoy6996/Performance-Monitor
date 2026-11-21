@@ -616,7 +616,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                             20_000
                         )
                         probeOutput = if (result == null) {
-                            "Shizuku is not connected. Start it and grant permission first."
+                            "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
                         } else {
                             (result.out + "\n" + result.err).trim()
                         }
@@ -701,7 +701,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                 20_000
             )
             probeOutput = if (result == null) {
-                "Shizuku is not connected. Start it and grant permission first."
+                "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
             } else {
                 (result.out + "\n" + result.err).trim()
             }

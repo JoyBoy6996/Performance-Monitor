@@ -54,6 +54,7 @@ class OverlayService : Service() {
     private var fpsText: TextView? = null
     private var unitText: TextView? = null
     private var frameText: TextView? = null
+    private var recText: TextView? = null
     private var titleText: TextView? = null
     private var graphView: GraphView? = null
     private val rowViews = mutableMapOf<String, TextView>()
@@ -144,6 +145,7 @@ class OverlayService : Service() {
 
     private fun buildOverlay() {
         graphView = null
+        recText = null
         if (!Settings.canDrawOverlays(this)) return
 
         val app = applicationContext as? FrameScopeApp ?: return
@@ -173,6 +175,9 @@ class OverlayService : Service() {
             else -> buildStandard(settings)
         }
         applyExpandedState()
+        updateRecordIndicator(
+            (applicationContext as? FrameScopeApp)?.container?.engine?.recording?.value == true
+        )
     }
 
     /**
@@ -211,12 +216,19 @@ class OverlayService : Service() {
             }
         }
 
+        recText = OverlayViews.label(this, "●", Color.parseColor("#64748B")).apply {
+            textSize = 9f * currentScale
+        }
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 16f * currentScale)
         unitText = OverlayViews.label(this, "FPS", Color.parseColor("#94A3B8")).apply {
             textSize = 9f * currentScale
         }
         frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 11f * currentScale)
 
+        layout.addView(recText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = OverlayViews.dp(this@OverlayService, 4f) })
         layout.addView(fpsText)
         layout.addView(unitText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -360,9 +372,15 @@ class OverlayService : Service() {
         }
 
         var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        if (settings.overlayClickThrough.value) {
+        // A Pill that records on tap must stay touchable. Other styles, and a
+        // Pill with the feature switched off, still honour pass-through.
+        val pillTapEnabled = currentStyle == OverlayStyle.PILL &&
+            settings.overlayPillTapToRecord.value
+        if (settings.overlayClickThrough.value && !pillTapEnabled) {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
+        layout.isClickable = true
+        layout.setOnClickListener { handleOverlayTap(settings) }
 
         val windowWidth = if (currentStyle == OverlayStyle.PILL) {
             WindowManager.LayoutParams.WRAP_CONTENT
@@ -414,9 +432,9 @@ class OverlayService : Service() {
                         settings.overlayX.value = (lp.x.toFloat() / dm.widthPixels).coerceIn(0f, 1f)
                         settings.overlayY.value = (lp.y.toFloat() / dm.heightPixels).coerceIn(0f, 1f)
                     } else {
+                        // Only a real tap reaches here. A drag has already moved
+                        // the window and must never toggle a recording.
                         v.performClick()
-                        expanded = !expanded
-                        applyExpandedState()
                     }
                     true
                 }
@@ -426,6 +444,35 @@ class OverlayService : Service() {
 
         root = layout
         runCatching { windowManager.addView(layout, lp) }
+    }
+
+    /** A tap on the Pill is the Scene-style manual Record button. */
+    private fun handleOverlayTap(settings: AppSettings) {
+        if (currentStyle == OverlayStyle.PILL) {
+            if (settings.overlayPillTapToRecord.value) toggleRecording()
+            return
+        }
+        expanded = !expanded
+        applyExpandedState()
+    }
+
+    /** Manual only: a tap starts when idle and stops when a run is active. */
+    private fun toggleRecording() {
+        val engine = (applicationContext as? FrameScopeApp)?.container?.engine ?: return
+        if (engine.recording.value) {
+            engine.stopRecordingManually()
+        } else {
+            engine.startRecording()
+        }
+        updateRecordIndicator(engine.recording.value)
+    }
+
+    /** Shows the real recording state on the Pill, including runs started elsewhere. */
+    private fun updateRecordIndicator(recording: Boolean) {
+        recText?.text = if (recording) "● REC" else "●"
+        recText?.setTextColor(
+            Color.parseColor(if (recording) "#F87171" else "#64748B")
+        )
     }
 
     private fun applyExpandedState() {
@@ -474,10 +521,16 @@ class OverlayService : Service() {
                 settings.overlayOpacity.flow,
                 settings.overlayShowGraph.flow,
                 settings.overlayGraphHeight.flow,
-                settings.overlayClickThrough.flow
-            ) { _, _, _, _ -> }.collect {
+                settings.overlayClickThrough.flow,
+                settings.overlayPillTapToRecord.flow
+            ) { _, _, _, _, _ -> }.collect {
                 restyleOverlay(settings)
             }
+        }
+
+        // Runs started from the dashboard must show the same REC state on the Pill.
+        scope.launch {
+            engine.recording.collect { updateRecordIndicator(it) }
         }
     }
 
@@ -489,7 +542,9 @@ class OverlayService : Service() {
         graphHeight = settings.overlayGraphHeight.value
 
         lp.alpha = currentOpacity
-        if (settings.overlayClickThrough.value) {
+        val pillTapEnabled = currentStyle == OverlayStyle.PILL &&
+            settings.overlayPillTapToRecord.value
+        if (settings.overlayClickThrough.value && !pillTapEnabled) {
             lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
             lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()

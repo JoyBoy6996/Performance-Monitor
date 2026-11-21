@@ -91,6 +91,12 @@ class AppSettings(context: Context) {
     val overlayGraphHeight = Pref(sp, "overlay_graph_h", 54)
     val overlayClickThrough = Pref(sp, "overlay_click_through", false)
 
+    /**
+     * Scene-style control: tapping the Pill starts or stops a recording.
+     * Kept optional so a user who wants pure pass-through can still disable touches.
+     */
+    val overlayPillTapToRecord = Pref(sp, "overlay_pill_tap_record", true)
+
     val protectBankApps = Pref(sp, "protect_bank_apps", true)
     val protectedApps = Pref(sp, "protected_apps", "")
 
@@ -154,6 +160,7 @@ class AppSettings(context: Context) {
     private fun allPrefs(): List<Pref<*>> = listOf(
         overlayEnabled, overlayStyle, overlayRows, overlayOpacity, overlayScale,
         overlayX, overlayY, overlayShowGraph, overlayGraphHeight, overlayClickThrough,
+        overlayPillTapToRecord,
         protectBankApps, protectedApps,
         fpsThreshold, sampleIntervalMs, monitorWhileBackground,
         measurementEnabled, setupCompleted,

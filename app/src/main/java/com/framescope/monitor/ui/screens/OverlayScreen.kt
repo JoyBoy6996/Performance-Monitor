@@ -79,6 +79,7 @@ fun OverlayScreen(
     val scale by settings.overlayScale.flow.collectAsState()
     val showGraph by settings.overlayShowGraph.flow.collectAsState()
     val graphHeight by settings.overlayGraphHeight.flow.collectAsState()
+    val pillTapToRecord by settings.overlayPillTapToRecord.flow.collectAsState()
     val threshold = settings.fpsThreshold.flow.collectAsState().value
     val previewRows = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         .map { it to overlayRowValue(it, fps, system) }
@@ -174,7 +175,11 @@ fun OverlayScreen(
                         )
                         Text(
                             text = if (running) {
-                                "Drag to reposition, tap to collapse."
+                                if (style.equals("PILL", ignoreCase = true) && pillTapToRecord) {
+                                    "Drag to reposition, tap to start/stop recording."
+                                } else {
+                                    "Drag to reposition, tap to collapse."
+                                }
                             } else {
                                 "Start it, then leave the app you want to measure."
                             },
@@ -263,6 +268,31 @@ fun OverlayScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = Space.md)
                 )
+                if (style.equals("PILL", ignoreCase = true)) {
+                    Spacer(Modifier.height(Space.md))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "Tap pill to record",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Scene-style control: tap starts, tap again stops. " +
+                                    "The pill stays touchable even if click-through is on.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = pillTapToRecord,
+                            onCheckedChange = { settings.overlayPillTapToRecord.value = it }
+                        )
+                    }
+                }
             }
         }
 

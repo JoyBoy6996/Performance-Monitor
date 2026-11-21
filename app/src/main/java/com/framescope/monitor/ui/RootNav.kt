@@ -1,5 +1,6 @@
 package com.framescope.monitor.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -72,6 +73,12 @@ fun FrameScopeRoot(
 ) {
     var tab by rememberSaveable { mutableStateOf(AppTab.MONITOR) }
     var openSession by remember { mutableStateOf<SessionRecord?>(null) }
+
+    // A session is a page inside the app, not a new Activity. Without this the
+    // hardware Back key falls through and finishes the whole app from the detail page.
+    BackHandler(enabled = openSession != null) {
+        openSession = null
+    }
 
     // On a wide screen the content stays a readable column instead of stretching edge to edge.
     val contentModifier = if (widthSizeClass == WindowWidthSizeClass.Compact) {

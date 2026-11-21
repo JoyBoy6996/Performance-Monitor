@@ -311,7 +311,11 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(Space.md))
                     val adbLine = when {
-                        status.adbReady -> "Bridge: connected on 127.0.0.1:5555. Auto-reconnect is on."
+                        status.adbReady && status.adbAuthorised ->
+                            "Bridge: connected on 127.0.0.1:5555. Key saved — auto-reconnect is on."
+                        status.adbReady ->
+                            "Bridge: connected on 127.0.0.1:5555 — live FPS works now. Key not saved; " +
+                                "repeat setup once after reboot or USB toggle. Tick “Always allow” to save it."
                         adbAuth == AdbAuthState.PROMPT_SENT ->
                             "Bridge: waiting for the “Allow USB debugging?” prompt on your phone."
                         adbAuth == AdbAuthState.STORED ->

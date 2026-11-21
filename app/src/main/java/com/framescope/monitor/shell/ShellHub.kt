@@ -236,25 +236,32 @@ class ShellHub(
             "Or turn on Wireless debugging and tap Set up bridge again."
     }
 
-    /** Confirms that the phone kept the key, not just this one session. */
+    /**
+     * A working bridge is a working bridge. ensureAdbBridge() already ran a real
+     * command on it, so shell access is live regardless of whether the ROM kept
+     * our key. Persistence only affects auto-reconnect later; it must never
+     * throw away a session that is answering right now.
+     */
     private suspend fun finishAdbSetup(keyInstalledByShell: Boolean): String {
-        var verified = adb.verifyStoredKey()
-        if (!verified) {
-            verified = runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false) &&
-                adb.verifyStoredKey()
+        // ensureAdbBridge() already ran a real probe on this session. isAvailable()
+        // confirms it is still alive without offering a key or closing anything.
+        // Never call verifyStoredKey() here: it closes the session, so a ROM that
+        // will not keep the key would throw away a bridge that works right now.
+        val live = runCatching { adb.isAvailable() }.getOrDefault(false)
+        if (!live) {
+            publishAdbState(false)
+            return "The bridge stopped answering right after setup. " + adbSetupFailureMessage()
         }
-        publishAdbState(verified)
-        return if (verified) {
+
+        publishAdbState(true)
+        val keyStored = adb.authorisationStored || keyInstalledByShell
+        return if (keyStored) {
             adbSuccessMessage()
-        } else if (!keyInstalledByShell) {
-            "The bridge answered, but FrameScope could not save its key. " +
-                "Grant Shizuku permission and tap Set up bridge again; " +
-                "accepting a prompt without “Always allow” is not enough. " +
-                adb.unavailableReason()
         } else {
-            "The bridge answered, but the phone did not keep FrameScope's key. " +
-                "Grant Shizuku permission again and tap Set up bridge. " +
-                adb.unavailableReason()
+            "Local ADB bridge is live on $LOOPBACK:$adbPort — live FPS and telemetry work " +
+                "right now. This phone did not save FrameScope's key, so after a reboot or " +
+                "USB debugging toggle repeat once: PC + USB cable, 'adb tcpip 5555', then " +
+                "Set up bridge here and tick “Always allow”. No Shizuku needed."
         }
     }
 
@@ -516,7 +523,12 @@ class ShellHub(
         if (adbReady) {
             return AccessStatus(
                 state = AccessState.READY,
-                detail = "Local ADB bridge connected on $LOOPBACK:$adbPort. It reconnects automatically.",
+                detail = if (adbAuthorised) {
+                    "Local ADB bridge connected on $LOOPBACK:$adbPort. Key saved — it reconnects automatically."
+                } else {
+                    "Local ADB bridge connected on $LOOPBACK:$adbPort for this session. " +
+                        "Key not saved — repeat setup once after reboot or USB debugging toggle."
+                },
                 checkedAt = System.currentTimeMillis(),
                 permissionGranted = true,
                 binderAvailable = false,
@@ -524,7 +536,7 @@ class ShellHub(
                 commandVerified = true,
                 shellSource = "Local ADB bridge",
                 adbReady = true,
-                adbAuthorised = true,
+                adbAuthorised = adbAuthorised,
                 adbFingerprint = fingerprint
             )
         }

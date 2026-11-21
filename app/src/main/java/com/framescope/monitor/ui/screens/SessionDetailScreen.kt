@@ -1193,20 +1193,33 @@ private fun PowerCapacityCard(session: SessionRecord) {
 
 @Composable
 private fun CpuTemperatureCard(session: SessionRecord) {
-    val temps = plausibleValues(session.cpuTempSeries)
+    val named = plausibleValues(session.cpuTempSeries)
+    val hotspot = plausibleValues(session.socTempSeries)
+    // Many phones print real thermal sensors without the words "cpu" or "soc".
+    // Their maximum is a genuine chip hotspot, so use it when no named sensor exists.
+    val useHotspot = named.size < 2 && hotspot.size >= 2
+    val temps = if (useHotspot) hotspot else named
     val bounds = paddedBounds(temps)
     Panel {
         Text("CPU Temperature(°C)", style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.onSurface)
         Spacer(Modifier.height(Space.sm))
         if (temps.size < 2) {
-            Text("CPU/SoC sensor: -- (this device does not name one)",
+            Text(
+                text = "CPU/SoC temperature: -- (no sensor or hotspot samples were stored in this run)",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         } else {
             TelemetryChart(
-                listOf(TelemetrySeries("CPU temp", temps, Color(0xFF93C5FD), "°C",
-                    bounds.first, bounds.second))
+                listOf(TelemetrySeries(
+                    if (useHotspot) "SoC hotspot" else "CPU/SoC sensor",
+                    temps,
+                    Color(0xFF93C5FD),
+                    "°C",
+                    bounds.first,
+                    bounds.second
+                ))
             )
             TimeAxis(session.durationMs, temps.size)
             Text(
@@ -1217,6 +1230,14 @@ private fun CpuTemperatureCard(session: SessionRecord) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = Space.sm)
             )
+            if (!useHotspot && hotspot.size >= 2) {
+                Text(
+                    text = "SoC hotspot MAX ${fmt(hotspot.maxOrNull(), 1, "°C")}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = Space.xs)
+                )
+            }
         }
     }
 }

@@ -45,6 +45,8 @@ data class SecondBucket(
     val cpuFreqMHz: Int = 0,
     val gpuFreqMHz: Int = 0,
     val cpuTempC: Float = 0f,
+    /** Max of all plausible thermal sensors; not a battery reading. */
+    val socTempC: Float = 0f,
     val gpuPercent: Float = 0f,
     val cpuGroups: List<CpuGroupMetric> = emptyList(),
     /** The observed cap at the end of this second; zero means not confirmed yet. */
@@ -97,6 +99,7 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketCpuFreq = ArrayList<Int>()
     private val bucketGpuFreq = ArrayList<Int>()
     private val bucketCpuTemp = ArrayList<Float>()
+    private val bucketSocTemp = ArrayList<Float>()
     private val bucketGpuPercent = ArrayList<Float>()
     private val bucketCpuGroups = ArrayList<List<CpuGroupMetric>>()
     private val bucketCap = ArrayList<Int>()
@@ -160,6 +163,7 @@ class SessionLogger(private val store: SessionStore) {
         bucketCpuFreq.clear()
         bucketGpuFreq.clear()
         bucketCpuTemp.clear()
+        bucketSocTemp.clear()
         bucketGpuPercent.clear()
         bucketCpuGroups.clear()
         bucketCap.clear()
@@ -296,6 +300,7 @@ class SessionLogger(private val store: SessionStore) {
         metrics.cpuFreqMHz?.let { if (it > 0) bucketCpuFreq.add(it) }
         metrics.gpuFreqMHz?.let { if (it > 0) bucketGpuFreq.add(it) }
         metrics.cpuTempC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { bucketCpuTemp.add(it) }
+        metrics.thermalMaxC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { bucketSocTemp.add(it) }
         metrics.gpuPercent?.finiteOrNull()?.let { bucketGpuPercent.add(it) }
         if (metrics.cpuGroups.isNotEmpty()) bucketCpuGroups.add(metrics.cpuGroups)
         if (capFps != null) bucketCap.add(capFps)
@@ -379,6 +384,7 @@ class SessionLogger(private val store: SessionStore) {
                 cpuFreqMHz = if (bucketCpuFreq.isEmpty()) 0 else bucketCpuFreq.average().toInt(),
                 gpuFreqMHz = if (bucketGpuFreq.isEmpty()) 0 else bucketGpuFreq.average().toInt(),
                 cpuTempC = if (bucketCpuTemp.isEmpty()) 0f else bucketCpuTemp.average().toFloat(),
+                socTempC = if (bucketSocTemp.isEmpty()) 0f else bucketSocTemp.average().toFloat(),
                 gpuPercent = if (bucketGpuPercent.isEmpty()) 0f else bucketGpuPercent.average().toFloat(),
                 cpuGroups = averageCpuGroups,
                 capFps = cap.toFloat(),
@@ -396,6 +402,7 @@ class SessionLogger(private val store: SessionStore) {
         bucketCpuFreq.clear()
         bucketGpuFreq.clear()
         bucketCpuTemp.clear()
+        bucketSocTemp.clear()
         bucketGpuPercent.clear()
         bucketCpuGroups.clear()
         bucketCap.clear()
@@ -589,6 +596,7 @@ class SessionLogger(private val store: SessionStore) {
             cpuFreqSeries = secondBuckets.map { it.cpuFreqMHz.toFloat() },
             gpuFreqSeries = secondBuckets.map { it.gpuFreqMHz.toFloat() },
             cpuTempSeries = secondBuckets.map { it.cpuTempC },
+            socTempSeries = secondBuckets.map { it.socTempC },
             gpuPercentSeries = secondBuckets.map { it.gpuPercent },
             cpuGroupNames = cpuGroupNames,
             cpuGroupSeries = cpuGroupSeries,

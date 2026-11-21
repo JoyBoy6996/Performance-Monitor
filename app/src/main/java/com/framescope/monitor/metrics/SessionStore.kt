@@ -256,6 +256,7 @@ class SessionStore(context: Context) {
         put("cpuFreqSeries", JSONArray(record.cpuFreqSeries.finiteDoubles()))
         put("gpuFreqSeries", JSONArray(record.gpuFreqSeries.finiteDoubles()))
         put("cpuTempSeries", JSONArray(record.cpuTempSeries.finiteDoubles()))
+        put("socTempSeries", JSONArray(record.socTempSeries.finiteDoubles()))
         put("gpuPercentSeries", JSONArray(record.gpuPercentSeries.finiteDoubles()))
         put("cpuGroupNames", JSONArray(record.cpuGroupNames))
         put("cpuGroupSeries", record.cpuGroupSeries.toNullableJsonArrays())
@@ -317,6 +318,7 @@ class SessionStore(context: Context) {
             cpuFreqSeries = o.optJSONArray("cpuFreqSeries").toFloatList(),
             gpuFreqSeries = o.optJSONArray("gpuFreqSeries").toFloatList(),
             cpuTempSeries = o.optJSONArray("cpuTempSeries").toFloatList(),
+            socTempSeries = o.optJSONArray("socTempSeries").toFloatList(),
             gpuPercentSeries = o.optJSONArray("gpuPercentSeries").toFloatList(),
             cpuGroupNames = o.optJSONArray("cpuGroupNames")?.let { names ->
                 (0 until names.length()).mapNotNull { i ->
@@ -334,7 +336,7 @@ class SessionStore(context: Context) {
     fun toCsv(record: SessionRecord): String {
         val sb = StringBuilder()
         sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status,cap_fps,")
-        sb.append("power_w,cpu_freq_mhz,gpu_freq_mhz,cpu_temp_c,gpu_percent\n")
+        sb.append("power_w,cpu_freq_mhz,gpu_freq_mhz,cpu_temp_c,soc_temp_c,gpu_percent\n")
         val size = maxOf(
             record.fpsSeries.size,
             record.cpuSeries.size,
@@ -343,7 +345,8 @@ class SessionStore(context: Context) {
             record.batterySeries.size,
             record.powerSeries.size,
             record.cpuFreqSeries.size,
-            record.cpuTempSeries.size
+            record.cpuTempSeries.size,
+            record.socTempSeries.size
         )
         for (i in 0 until size) {
             sb.append(i).append(',')
@@ -364,6 +367,8 @@ class SessionStore(context: Context) {
             sb.append(record.gpuFreqSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
             sb.append(',')
             sb.append(record.cpuTempSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
+            sb.append(',')
+            sb.append(record.socTempSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
             sb.append(',')
             sb.append(record.gpuPercentSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
             sb.append('\n')
@@ -450,6 +455,7 @@ class SessionStore(context: Context) {
                     cpu_freq_series TEXT,
                     gpu_freq_series TEXT,
                     cpu_temp_series TEXT,
+                    soc_temp_series TEXT,
                     gpu_percent_series TEXT,
                     cpu_group_names TEXT,
                     cpu_group_series TEXT,
@@ -517,6 +523,9 @@ class SessionStore(context: Context) {
                 addColumnIfMissing(db, TABLE_RECORDS, "cpu_group_freq_series", "TEXT")
                 addColumnIfMissing(db, TABLE_RECORDS, "shell_logs", "TEXT")
                 addColumnIfMissing(db, TABLE_RECORDS, "note", "TEXT")
+            }
+            if (oldVersion < 7) {
+                addColumnIfMissing(db, TABLE_RECORDS, "soc_temp_series", "TEXT")
             }
         }
 
@@ -618,6 +627,7 @@ class SessionStore(context: Context) {
                 put("cpu_freq_series", JSONArray(record.cpuFreqSeries.finiteDoubles()).toString())
                 put("gpu_freq_series", JSONArray(record.gpuFreqSeries.finiteDoubles()).toString())
                 put("cpu_temp_series", JSONArray(record.cpuTempSeries.finiteDoubles()).toString())
+                put("soc_temp_series", JSONArray(record.socTempSeries.finiteDoubles()).toString())
                 put("gpu_percent_series", JSONArray(record.gpuPercentSeries.finiteDoubles()).toString())
                 put("cpu_group_names", JSONArray(record.cpuGroupNames).toString())
                 put("cpu_group_series", record.cpuGroupSeries.toNullableJsonArrays().toString())
@@ -689,6 +699,7 @@ class SessionStore(context: Context) {
                     val cpuFreqSeriesIdx = c.getColumnIndex("cpu_freq_series")
                     val gpuFreqSeriesIdx = c.getColumnIndex("gpu_freq_series")
                     val cpuTempSeriesIdx = c.getColumnIndex("cpu_temp_series")
+                    val socTempSeriesIdx = c.getColumnIndex("soc_temp_series")
                     val gpuPercentSeriesIdx = c.getColumnIndex("gpu_percent_series")
                     val cpuGroupNamesIdx = c.getColumnIndex("cpu_group_names")
                     val cpuGroupSeriesIdx = c.getColumnIndex("cpu_group_series")
@@ -761,6 +772,9 @@ class SessionStore(context: Context) {
                             cpuTempSeries = if (cpuTempSeriesIdx >= 0) {
                                 jsonToFloatList(c.getString(cpuTempSeriesIdx))
                             } else emptyList(),
+                            socTempSeries = if (socTempSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(socTempSeriesIdx))
+                            } else emptyList(),
                             gpuPercentSeries = if (gpuPercentSeriesIdx >= 0) {
                                 jsonToFloatList(c.getString(gpuPercentSeriesIdx))
                             } else emptyList(),
@@ -814,7 +828,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 6
+            private const val DB_VERSION = 7
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

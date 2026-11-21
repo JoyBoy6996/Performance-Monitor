@@ -244,8 +244,10 @@ data class SessionRecord(
     val cpuFreqSeries: List<Float> = emptyList(),
     /** GPU clock per second, in MHz. */
     val gpuFreqSeries: List<Float> = emptyList(),
-    /** CPU/SoC sensor temperature per second, in °C. */
+    /** Named CPU/SoC sensor temperature per second, in °C, when the device names one. */
     val cpuTempSeries: List<Float> = emptyList(),
+    /** Max of the real thermal sensors per second; the honest hotspot fallback. */
+    val socTempSeries: List<Float> = emptyList(),
     /** Real GPU busy time per second, in percent, on devices that expose it. */
     val gpuPercentSeries: List<Float> = emptyList(),
     /** Names of the CPU clusters found on this device, in a fixed order. */

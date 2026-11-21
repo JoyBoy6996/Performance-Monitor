@@ -80,6 +80,15 @@ private fun duration(ms: Long): String {
     else String.format(Locale.US, "%d:%02d", m, s)
 }
 
+/** First and last real reading only - no graph for power, chip temperature or battery. */
+private fun beforeAfterValue(values: List<Float>, decimals: Int, unit: String): String {
+    val clean = values.mapNotNull { it.finiteOrNull() }
+    if (clean.isEmpty()) return "--"
+    val first = fmt(clean.first(), decimals)
+    val last = fmt(clean.last(), decimals)
+    return if (clean.size == 1) "$first$unit" else "$first$unit → $last$unit"
+}
+
 /**
  * Draws the same Scene-style breakdown the detail screen shows onto bitmap pages.
  * The very same pages become the PNG images and the PDF, so neither format can
@@ -408,15 +417,6 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
         session.tempSeries.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) },
         RED, "°C"
     )
-    if (session.batterySeries.isNotEmpty()) {
-        painter.chart("Battery (%)", session.batterySeries, GREEN, "%")
-    }
-    if (session.powerSeries.isNotEmpty()) {
-        painter.chart(
-            "Power (W)", session.powerSeries.filter { it.finiteOrNull() != null && it > 0f },
-            CYAN, "W"
-        )
-    }
     if (session.cpuFreqSeries.isNotEmpty()) {
         painter.chart(
             "CPU frequency (MHz)",
@@ -424,13 +424,18 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
             CYAN, "MHz"
         )
     }
-    if (session.socTempSeries.isNotEmpty()) {
-        painter.chart(
-            "SoC hotspot (°C)",
-            session.socTempSeries.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) },
-            RED, "°C"
+
+    painter.section("Before & after")
+    painter.metricRow("Power draw", beforeAfterValue(session.powerSeries, 2, " W"))
+    painter.metricRow(
+        "CPU temperature",
+        beforeAfterValue(
+            session.cpuTempSeries.ifEmpty { session.socTempSeries }
+                .mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) },
+            1, "°C"
         )
-    }
+    )
+    painter.metricRow("Battery", beforeAfterValue(session.batterySeries, 0, "%"))
 
     painter.footer()
     return painter.pages

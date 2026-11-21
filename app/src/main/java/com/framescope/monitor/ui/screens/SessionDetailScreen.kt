@@ -385,92 +385,17 @@ fun SessionDetailScreen(
             }
         }
 
-        item { SectionHeader("Frame rate") }
-
-        item {
-            SeriesPanel(
-                title = "Frames per second",
-                values = session.fpsSeries,
-                unit = "fps",
-                color = stateColor,
-                target = threshold.toFloat(),
-                targetLabel = "$threshold fps target",
-                reference = session.capSeries,
-                referenceLabel = capLegend(session)
-            )
-        }
-
-        item { SectionHeader("Frame time") }
-
-        item {
-            SeriesPanel(
-                title = "Milliseconds per frame",
-                values = session.frameTimeSeries,
-                unit = "ms",
-                color = MaterialTheme.status.warn,
-                invert = true
-            )
-        }
-
-        item { SectionHeader("Device during the run") }
-
-        item {
-            SeriesPanel(
-                title = "CPU load",
-                values = session.cpuSeries,
-                unit = "%",
-                color = MaterialTheme.colorScheme.primary
-            )
-        }
-
-        item {
-            SeriesPanel(
-                title = "Temperature",
-                values = session.tempSeries,
-                unit = "°C",
-                color = MaterialTheme.status.critical,
-                filter = { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) != null }
-            )
-        }
-
-        if (session.thermalStatusSeries.isNotEmpty()) {
-            item {
-                SeriesPanel(
-                    title = "Thermal state",
-                    values = session.thermalStatusSeries,
-                    unit = "level",
-                    color = MaterialTheme.status.warn,
-                    targetLabel = "0 = none · 1 = light · 2 = moderate · 3+ = severe"
-                )
-            }
-        }
-
-        if (session.batterySeries.isNotEmpty()) {
-            item {
-                SeriesPanel(
-                    title = "Battery",
-                    values = session.batterySeries,
-                    unit = "%",
-                    color = MaterialTheme.status.good
-                )
-            }
-        }
-
         if (session.capChanges.isNotEmpty()) {
             item { SectionHeader("FPS cap changes") }
 
             item { CapChangesPanel(session) }
         }
 
-        item { SectionHeader("Linked timeline") }
-
-        item { LinkedTimelinePanel(session, threshold) }
-
         item { SectionHeader("Frame drops") }
 
         item { DropsPanel(session, threshold) }
 
-        item { SectionHeader("Graph details") }
+        item { SectionHeader("Graphs") }
 
         item { SectionHeader("Overview") }
         item { ThermalWarningCard(session) }
@@ -485,8 +410,9 @@ fun SessionDetailScreen(
         item { SectionHeader("Device load") }
         item { CpuUsageCard(session) }
         item { CpuFrequencyCard(session) }
-        item { PowerCapacityCard(session) }
-        item { CpuTemperatureCard(session) }
+
+        item { SectionHeader("Before & after") }
+        item { BeforeAfterCard(session) }
 
         item { SectionHeader("Diagnostics") }
         item { ShellLogsCard(session.shellLogs) }
@@ -1122,30 +1048,50 @@ private fun AppMetricsCard(session: SessionRecord) {
 private fun FpsTemperatureCard(session: SessionRecord, threshold: Int) {
     val fps = session.fpsSeries
     val temps = plausibleValues(session.tempSeries)
-    val cpu = session.cpuSeries
-    val gpu = positiveValues(session.gpuPercentSeries)
     val fpsBounds = paddedBounds(fps.ifEmpty { listOf(threshold.toFloat()) })
     val tempBounds = paddedBounds(temps)
     val lines = listOf(
         TelemetrySeries("FPS", fps, MaterialTheme.colorScheme.onSurface, "fps",
             fpsBounds.first, fpsBounds.second),
         TelemetrySeries("TEMP(°C)", temps, Color(0xFFF97316), "°C",
-            tempBounds.first, tempBounds.second),
-        TelemetrySeries("CPU(%)", cpu, Color(0xFFA78BFA), "%", 0f, 100f),
-        TelemetrySeries("GPU(%)", gpu, Color(0xFF60A5FA), "%", 0f, 100f)
+            tempBounds.first, tempBounds.second)
     )
     Panel {
         Text("FPS & Temperature(°C)", style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.onSurface)
         Spacer(Modifier.height(Space.sm))
         TelemetryChart(lines)
-        TimeAxis(session.durationMs, maxCount(fps, temps, cpu, gpu))
+        TimeAxis(session.durationMs, maxCount(fps, temps))
         Text(
-            text = "Each line uses its own range shown above; GPU appears only when the device reports load.",
+            text = "FPS and temperature use their own ranges shown above.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = Space.sm)
         )
+    }
+}
+
+/** Power, CPU temperature and battery are written as plain before → after values, no graphs. */
+@Composable
+private fun BeforeAfterCard(session: SessionRecord) {
+    fun beforeAfter(values: List<Float>, decimals: Int, unit: String): String {
+        val clean = values.mapNotNull { it.finiteOrNull() }
+        if (clean.isEmpty()) return "--"
+        val first = fmt(clean.first(), decimals)
+        val last = fmt(clean.last(), decimals)
+        return if (clean.size == 1) "$first$unit" else "$first$unit → $last$unit"
+    }
+    val power = beforeAfter(session.powerSeries.filter { it > 0f }, 2, " W")
+    val chipTemp = beforeAfter(
+        session.cpuTempSeries.ifEmpty { session.socTempSeries }
+            .mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) },
+        1, "°C"
+    )
+    val battery = beforeAfter(session.batterySeries, 0, "%")
+    Panel {
+        MetricLine("Power draw", power, MaterialTheme.colorScheme.onSurfaceVariant)
+        MetricLine("CPU temperature", chipTemp, MaterialTheme.colorScheme.onSurfaceVariant)
+        MetricLine("Battery", battery, MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

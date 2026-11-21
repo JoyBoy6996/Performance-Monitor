@@ -12,8 +12,8 @@ android {
         applicationId = "com.framescope.monitor"
         minSdk = 26
         targetSdk = 36
-        versionCode = 18
-        versionName = "1.1.16"
+        versionCode = 19
+        versionName = "1.1.17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

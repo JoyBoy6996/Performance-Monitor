@@ -5,11 +5,13 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -46,7 +48,9 @@ import com.framescope.monitor.core.Backup
 import com.framescope.monitor.core.ProtectedApps
 import com.framescope.monitor.core.ThemeMode
 import com.framescope.monitor.shell.AccessState
+import com.framescope.monitor.shell.AdbAuthState
 import com.framescope.monitor.ui.FrameScopeScreen
+import com.framescope.monitor.ui.Diagnostics
 import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.MonoField
 import com.framescope.monitor.ui.components.Panel
@@ -60,6 +64,12 @@ import com.framescope.monitor.ui.components.ValueSlider
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
 import kotlinx.coroutines.launch
+
+/** A failure that would otherwise close the app is shown where the user tapped. */
+private fun Throwable.describe(): String {
+    val detail = message?.takeIf { it.isNotBlank() }
+    return if (detail != null) "$detail (${javaClass.simpleName})" else javaClass.name
+}
 
 @Composable
 fun SettingsScreen(
@@ -77,7 +87,6 @@ fun SettingsScreen(
     val measuring by settings.measurementEnabled.flow.collectAsState()
     val threshold by settings.fpsThreshold.flow.collectAsState()
     val interval by settings.sampleIntervalMs.flow.collectAsState()
-    val autoRecord by settings.autoRecord.flow.collectAsState()
     val extraProtected by settings.protectedApps.flow.collectAsState()
 
     var installed by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
@@ -87,7 +96,10 @@ fun SettingsScreen(
         }.getOrNull()
     }
     var checking by remember { mutableStateOf(false) }
+    var connectMessage by remember { mutableStateOf<String?>(null) }
+    var adbMessage by remember { mutableStateOf<String?>(null) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
+    val adbAuth by container.hub.adbAuthState.collectAsState()
     val scope = rememberCoroutineScope()
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -110,6 +122,10 @@ fun SettingsScreen(
         }
     }
 
+    val usageAccessLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { }
+
     LaunchedEffect(Unit) {
         installed = runCatching {
             val pm = context.packageManager
@@ -126,7 +142,7 @@ fun SettingsScreen(
         bottomPadding = bottomPadding
     ) {
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Frame rate measurement",
                     supporting = if (measuring) {
@@ -152,14 +168,14 @@ fun SettingsScreen(
         item { SectionHeader("Privileged access") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Shizuku service",
                     supporting = status.detail.ifBlank {
                         if (setupCompleted) {
                             "Setup was verified previously. Shell access is temporary and is available only while Shizuku is running."
                         } else {
-                            diagnostic ?: "Privileged shell access is provided exclusively via Shizuku UserService."
+                            diagnostic ?: "Shizuku is preferred; the local ADB bridge is used only when Shizuku is not answering."
                         }
                     },
                     trailing = {
@@ -191,8 +207,11 @@ fun SettingsScreen(
                         enabled = !checking,
                         onClick = {
                             checking = true
+                            connectMessage = "Checking the connection..."
                             scope.launch {
-                                container.hub.refresh(forceReconnect = true)
+                                runCatching { container.hub.refresh(forceReconnect = true) }
+                                    .onFailure { connectMessage = it.describe() }
+                                    .onSuccess { connectMessage = it.detail.ifBlank { "Connection checked." } }
                                 checking = false
                             }
                         }
@@ -208,9 +227,13 @@ fun SettingsScreen(
                         enabled = !checking,
                         onClick = {
                             checking = true
+                            connectMessage = "Asking for permission..."
                             scope.launch {
-                                container.hub.requestPermission()
-                                container.hub.refresh(forceReconnect = true)
+                                runCatching {
+                                    container.hub.requestPermission()
+                                    container.hub.refresh(forceReconnect = true)
+                                }.onFailure { connectMessage = it.describe() }
+                                    .onSuccess { connectMessage = it.detail.ifBlank { "Connection checked." } }
                                 checking = false
                             }
                         }
@@ -224,30 +247,286 @@ fun SettingsScreen(
                         )
                     }
                 }
+                val message = connectMessage
+                if (message != null) {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = Space.lg, vertical = Space.sm)
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        val crash = com.framescope.monitor.core.CrashLog.last(context)
+                        Diagnostics.copy(
+                            context,
+                            crash ?: "No crash was recorded on this device."
+                        )
+                        connectMessage = if (crash == null) {
+                            "No crash was recorded on this device."
+                        } else {
+                            "Last crash copied - paste it here."
+                        }
+                    },
+                    modifier = Modifier.padding(horizontal = Space.lg, vertical = Space.sm)
+                ) {
+                    Text("Copy last crash")
+                }
             }
         }
 
         item { SectionHeader("Shizuku setup") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SetupOption(
                     title = "Start Shizuku",
                     badge = "Required",
-                    description = "Install and start Shizuku using the official guide for your device, then grant FrameScope permission above. FrameScope verifies a real UserService command before showing Connected. Shell access is temporary and ends when Shizuku stops; it does not persistently grant Android permissions.",
+                    description = "For phones without Wi-Fi, use ShizukuNext: start it from USB debugging, no PC needed. Grant Qstats permission above. Official Shizuku and wireless debugging work too. Qstats checks a real UserService command before it reports Connected.",
                     context = context
                 )
+            }
+        }
+
+        item { SectionHeader("Local ADB bridge (optional)") }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                Column(Modifier.padding(Space.lg)) {
+                    Text(
+                        text = "One-time setup, then it reconnects by itself",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Text(
+                        text = "No Wi-Fi and no Shizuku? Connect the phone to a PC with a USB cable once and " +
+                            "run 'adb tcpip 5555' on the PC, then unplug. Tap Set up bridge here, approve the " +
+                            "“Allow USB debugging?” prompt, and the key is saved. After that it reconnects on " +
+                            "127.0.0.1 by itself — no PC, no Wi-Fi, no Shizuku. Shizuku and wireless debugging " +
+                            "are other ways to open the same port.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    val adbLine = when {
+                        status.adbReady && status.adbAuthorised ->
+                            "Bridge: connected on 127.0.0.1:5555. Key saved — auto-reconnect is on."
+                        status.adbReady ->
+                            "Bridge: connected on 127.0.0.1:5555 — live FPS works now. Key not saved; " +
+                                "repeat setup once after reboot or USB toggle. Tick “Always allow” to save it."
+                        adbAuth == AdbAuthState.PROMPT_SENT ->
+                            "Bridge: waiting for the “Allow USB debugging?” prompt on your phone. " +
+                                "Tick “Always allow”, tap Allow, then Reconnect."
+                        adbAuth == AdbAuthState.STORED ->
+                            "Bridge: key is trusted. Keep Shizuku running (or Wireless debugging ON); " +
+                                "the port opens and reconnects by itself."
+                        status.commandVerified ->
+                            "Shizuku is active. Grant Qstats permission in Shizuku; the bridge then " +
+                                "opens by itself. If it stays here, tap Set up bridge once."
+                        status.detail.contains("permission", ignoreCase = true) ->
+                            "Grant Qstats permission in Shizuku, then the bridge opens by itself."
+                        else -> "Bridge: not set up yet. Start Shizuku (USB debugging works, no Wi-Fi needed), " +
+                            "grant Qstats permission, then tap Set up bridge if needed."
+                    }
+                    Text(
+                        text = adbLine,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.xs))
+                    val fingerprint = status.adbFingerprint
+                    Text(
+                        text = if (fingerprint.isBlank()) {
+                            "Key fingerprint: --"
+                        } else {
+                            "Key fingerprint: $fingerprint"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    val message = adbMessage
+                    if (message != null) {
+                        Spacer(Modifier.height(Space.sm))
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(Space.md))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        FilledTonalButton(
+                            enabled = !checking,
+                            onClick = {
+                                checking = true
+                                adbMessage = "Opening the local ADB bridge..."
+                                scope.launch {
+                                    val result = runCatching { container.hub.setupAdbBridge() }
+                                        .getOrElse { it.describe() }
+                                    val refreshed = runCatching { container.hub.refresh() }
+                                        .getOrNull()
+                                    if (refreshed?.commandVerified == true) {
+                                        settings.setupCompleted.value = true
+                                    }
+                                    adbMessage = result
+                                    checking = false
+                                }
+                            }
+                        ) {
+                            Text("Set up bridge")
+                        }
+                        OutlinedButton(
+                            enabled = !checking,
+                            onClick = {
+                                checking = true
+                                adbMessage = "Reconnecting to the local ADB bridge..."
+                                scope.launch {
+                                    val result = runCatching {
+                                        container.hub.refresh(forceReconnect = true)
+                                    }.getOrNull()
+                                    adbMessage = result?.detail?.ifBlank { "Bridge rechecked." }
+                                        ?: "Bridge recheck failed."
+                                    checking = false
+                                }
+                            }
+                        ) {
+                            Text("Reconnect")
+                        }
+                    }
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }.onFailure { adbMessage = it.describe() }
+                            }
+                        ) {
+                            Text("Developer options")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                Diagnostics.copy(
+                                    context,
+                                    "Qstats local ADB setup - pick ONE way to open port 5555\n" +
+                                        "\n" +
+                                        "A) NO Wi-Fi, NO Shizuku (PC + USB cable, one time):\n" +
+                                        "   1. Developer options -> USB debugging ON.\n" +
+                                        "   2. Connect phone to PC with USB cable.\n" +
+                                        "   3. On the PC run: adb tcpip 5555\n" +
+                                        "   4. Unplug the cable.\n" +
+                                        "   5. In Qstats tap Set up bridge.\n" +
+                                        "   6. On the phone prompt tick “Always allow” and match: ${status.adbFingerprint}\n" +
+                                        "\n" +
+                                        "B) NO PC: install ShizukuNext, start it from USB debugging, grant Qstats permission, then tap Set up bridge.\n" +
+                                        "\n" +
+                                        "After the key is saved once, Qstats reconnects by itself on 127.0.0.1 - offline, no PC and no Wi-Fi needed."
+                                )
+                                adbMessage = "Setup steps copied - paste them where needed."
+                            }
+                        ) {
+                            Text("Copy steps")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                SettingRow(
+                    title = "Usage access",
+                    supporting = if (hasUsageAccess(context)) {
+                        "On. Qstats can use it when the window manager cannot name the foreground app."
+                    } else {
+                        "Off. Open settings, find Qstats and switch it on."
+                    },
+                    trailing = {
+                        OutlinedButton(
+                            onClick = {
+                                runCatching {
+                                    usageAccessLauncher.launch(
+                                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                                    )
+                                }
+                            }
+                        ) {
+                            Text("Open settings")
+                        }
+                    }
+                )
+            }
+        }
+
+        item { SectionHeader("Permanent shell access") }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                Column(Modifier.padding(Space.lg)) {
+                    Text(
+                        text = "Grant the app the right to run dumpsys itself",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Text(
+                        text = "With this permission the frame rate is read in the app's own " +
+                            "shell: the answer is never cut short and the reading of a game " +
+                            "is the same one the device itself gives. It is granted once and " +
+                            "lasts until the app is removed.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    val dumpGranted = container.hub.hasDumpPermission()
+                    Text(
+                        text = if (dumpGranted) {
+                            "Granted - the app reads the frame timings by itself."
+                        } else {
+                            "Not granted yet."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        FilledTonalButton(
+                            enabled = !dumpGranted,
+                            onClick = {
+                                scope.launch {
+                                    container.hub.tryGrantDumpPermission()
+                                    container.hub.refresh()
+                                }
+                            }
+                        ) {
+                            Text("Grant it now")
+                        }
+                        OutlinedButton(onClick = {
+                            Diagnostics.copy(
+                                context,
+                                "pm grant ${context.packageName} android.permission.DUMP"
+                            )
+                        }) {
+                            Text("Copy the command")
+                        }
+                    }
+                }
             }
         }
 
         item { SectionHeader("Banking app protection") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Hide overlay in banking apps",
-                    supporting = "FrameScope needs no root, no accessibility and no device admin, and the " +
-                        "overlay steps aside for banking and payment apps.",
+                    supporting = "No root, no accessibility, no device admin. The overlay steps " +
+                        "aside for banking and payment apps.",
                     trailing = {
                         Switch(
                             checked = protectApps,
@@ -290,7 +569,7 @@ fun SettingsScreen(
         item { SectionHeader("Monitoring") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
                     ValueSlider(
                         label = "Sampling interval",
@@ -309,24 +588,13 @@ fun SettingsScreen(
                         steps = 19
                     )
                 }
-                PanelDivider()
-                SettingRow(
-                    title = "Auto record",
-                    supporting = "Start a recording as soon as a new app comes to the foreground.",
-                    trailing = {
-                        Switch(
-                            checked = autoRecord,
-                            onCheckedChange = { settings.autoRecord.value = it }
-                        )
-                    }
-                )
             }
         }
 
         item { SectionHeader("Appearance") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 Column(Modifier.padding(horizontal = Space.lg, vertical = Space.md)) {
                     SegmentedOptions(
                         options = listOf("System", "Light", "Dark"),
@@ -356,7 +624,7 @@ fun SettingsScreen(
         item { SectionHeader("Backup") }
 
         item {
-            Panel {
+            Panel(contentPadding = 0.dp) {
                 SettingRow(
                     title = "Export backup",
                     supporting = "Writes every recorded session and all settings into one JSON file.",
@@ -381,7 +649,7 @@ fun SettingsScreen(
                                 putExtra(Intent.EXTRA_STREAM, uri)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
-                            context.startActivity(Intent.createChooser(send, "Export FrameScope backup"))
+                            context.startActivity(Intent.createChooser(send, "Export Qstats backup"))
                             backupMessage = "Backup ready to share."
                         }.onFailure {
                             backupMessage = "The backup could not be created."
@@ -486,7 +754,12 @@ private fun SetupOption(
             )
             if (badge != null) {
                 Spacer(Modifier.width(Space.sm))
-                StatusPill(text = badge, color = MaterialTheme.status.good)
+                // A requirement is not a health reading, so it stays a neutral chip.
+                StatusPill(
+                    text = badge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
         Text(
@@ -501,7 +774,7 @@ private fun SetupOption(
                 text = command,
                 onCopy = {
                     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("FrameScope command", command))
+                    clipboard.setPrimaryClip(ClipData.newPlainText("Qstats command", command))
                 }
             )
         }

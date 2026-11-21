@@ -73,7 +73,7 @@ class AppSettings(context: Context) {
     val measurementEnabled = Pref(sp, "measurement_enabled", true)
 
     /**
-     * True after Shizuku UserService command verification has succeeded.
+     * True after either Shizuku or the local ADB bridge answered a real command.
      *
      * The setup is a one-time thing: the phone remembers the key, so the app
      * must not ask for the setup again after the first success.
@@ -82,7 +82,7 @@ class AppSettings(context: Context) {
 
     val overlayEnabled = Pref(sp, "overlay_enabled", false)
     val overlayStyle = Pref(sp, "overlay_style", OverlayStyle.CLASSIC.name)
-    val overlayRows = Pref(sp, "overlay_rows", "FPS,FRAME,CPU,GPU,TEMP,BAT,MEM")
+    val overlayRows = Pref(sp, "overlay_rows", "FPS,FRAME,CAP,CPU,GPU,TEMP,HEAT,BAT,MEM")
     val overlayOpacity = Pref(sp, "overlay_opacity", 0.88f)
     val overlayScale = Pref(sp, "overlay_scale", 1.0f)
     val overlayX = Pref(sp, "overlay_x", 0.03f)
@@ -91,12 +91,17 @@ class AppSettings(context: Context) {
     val overlayGraphHeight = Pref(sp, "overlay_graph_h", 54)
     val overlayClickThrough = Pref(sp, "overlay_click_through", false)
 
+    /**
+     * Scene-style control: tapping the Pill starts or stops a recording.
+     * Kept optional so a user who wants pure pass-through can still disable touches.
+     */
+    val overlayPillTapToRecord = Pref(sp, "overlay_pill_tap_record", true)
+
     val protectBankApps = Pref(sp, "protect_bank_apps", true)
     val protectedApps = Pref(sp, "protected_apps", "")
 
     val fpsThreshold = Pref(sp, "fps_threshold", 45)
     val sampleIntervalMs = Pref(sp, "sample_interval", 400)
-    val autoRecord = Pref(sp, "auto_record", false)
     val monitorWhileBackground = Pref(sp, "monitor_background", true)
 
     val themeMode = Pref(sp, "theme_mode", ThemeMode.SYSTEM.name)
@@ -155,8 +160,9 @@ class AppSettings(context: Context) {
     private fun allPrefs(): List<Pref<*>> = listOf(
         overlayEnabled, overlayStyle, overlayRows, overlayOpacity, overlayScale,
         overlayX, overlayY, overlayShowGraph, overlayGraphHeight, overlayClickThrough,
+        overlayPillTapToRecord,
         protectBankApps, protectedApps,
-        fpsThreshold, sampleIntervalMs, autoRecord, monitorWhileBackground,
+        fpsThreshold, sampleIntervalMs, monitorWhileBackground,
         measurementEnabled, setupCompleted,
         themeMode, dynamicColor
     )

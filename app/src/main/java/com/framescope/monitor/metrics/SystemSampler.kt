@@ -1,69 +1,235 @@
 package com.framescope.monitor.metrics
 
+import com.framescope.monitor.core.CpuGroupMetric
+import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
+import com.framescope.monitor.core.MetricAvailability
+import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
 
-/** Collects device metrics that change slowly (CPU, RAM, battery, thermals, GPU). */
+/**
+ * The device metrics that need a privileged shell.
+ *
+ * These are the readings a normal app cannot get: the CPU frequency node, the GPU clock
+ * and the detailed thermal sensors. They are only available while Shizuku is connected,
+ * and each one reports its own state so that a command which fails does not take the
+ * others down with it.
+ */
 class SystemSampler(private val hub: ShellHub) {
 
     private var lastCpu: LongArray? = null
+    private var lastCpuCores: Map<Int, LongArray>? = null
+    private var lastGpuBusy: Pair<Long, Long>? = null
+    private var lastGroupNames: List<String> = emptyList()
+    private val sceneCollectors = SceneCollectors()
 
-    suspend fun sample(): SystemMetrics? {
+    /** Forgets the per-core and per-thread deltas when a new run begins. */
+    fun resetDeltas() = sceneCollectors.reset()
+
+    /**
+     * Reads the privileged metrics.
+     *
+     * The result always describes every metric, including the ones that could not be
+     * read. It never returns null: the caller merges this over whatever the native
+     * collectors produced and keeps the native values for everything that is missing
+     * here.
+     */
+    suspend fun sample(packageName: String = ""): SystemMetrics {
+        val now = android.os.SystemClock.elapsedRealtimeNanos()
+        val availability = mutableMapOf<SystemMetric, MetricAvailability>()
+        val sources = mutableMapOf<SystemMetric, String>()
+
         val script = ShellCommands.batch(
             ShellCommands.cpuStat(),
-            ShellCommands.memInfo(),
-            ShellCommands.battery(),
-            ShellCommands.thermal(),
             ShellCommands.gpuInfo(),
             ShellCommands.cpuFreq(),
-            ShellCommands.displayInfo()
+            ShellCommands.thermal(),
+            ShellCommands.cpuCoreDump(),
+            ShellCommands.cpuCoreFreq(),
+            ShellCommands.gpuBusy(),
+            ShellCommands.ddrFreq(),
+            ShellCommands.threadStat(packageName),
+            ShellCommands.clockTicks()
         )
-        val result = hub.execOrNull(script) ?: return null
-        if (!result.ok) return null
-        val out = result.out
-        val parts = ShellCommands.split(out)
+        val result = hub.execOrNull(script)
+
+        val parts = if (result != null) ShellCommands.split(result.out) else emptyList()
         fun part(index: Int): String = parts.getOrElse(index) { "" }
 
         val cpu = cpuPercent(part(0))
-        val (total, available) = Parsers.parseMemInfo(part(1))
-        val battery = Parsers.parseBattery(part(2))
+        val gpu = part(1)
+        val cpuFreq = Parsers.parseCpuFreq(part(2))
         val thermals = Parsers.parseThermals(part(3))
-        val gpu = part(4)
-        val cpuFreq = Parsers.parseCpuFreq(part(5))
-        val refresh = Parsers.parseRefreshRate(part(6))
+        val cpuGroups = cpuGroups(part(4), part(5))
+        val gpuPercent = gpuPercent(part(6))
+        val scene = sceneCollectors.parse(
+            coreDump = part(4),
+            coreFreqDump = part(5),
+            ddrDump = part(7),
+            threadDump = part(8),
+            clockDump = part(9),
+            nowWallMs = System.currentTimeMillis()
+        )
 
-        val level = battery["level"]?.toIntOrNull()
-        val batteryTemp = battery["temperature"]?.toFloatOrNull()?.let { it / 10f }
-        val current = battery["current_now"]?.toIntOrNull()
-        val voltage = battery["voltage"]?.toIntOrNull()
-        val power = if (current != null && voltage != null) {
-            (current.toDouble() / 1_000_000.0 * voltage / 1000.0).toFloat()
-        } else null
+        val gpuName = Parsers.parseGpuName(gpu)
+        val gpuFreq = Parsers.parseGpuFreq(gpu)
+        // Some devices expose placeholder sensors at 99.9 or impossible hotspots.
+        // Neither is the temperature of the phone the user is holding, so reject
+        // them before taking the maximum.
+        val maxThermal = thermals.values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
+        val cpuTemp = thermals.entries
+            .filter { (name, value) ->
+                name.contains("cpu", true) || name.contains("soc", true) ||
+                    name.contains("cluster", true)
+            }
+            .mapNotNull { it.value.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+            .maxOrNull()
+        val thermalStatus = Parsers.parseThermalStatus(part(3))
 
-        val usedGb = if (total > 0) (total - available) / 1_073_741_824f else null
-        val totalGb = if (total > 0) total / 1_073_741_824f else null
-        val ramPercent = if (total > 0) ((total - available) * 100 / total).toInt() else null
-        val maxThermal = thermals.values.maxOrNull()
+        record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
+        record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
+        record(availability, sources, SystemMetric.GPU_NAME, gpuName != null, "GPU_NAME", "privileged SurfaceFlinger")
+        record(availability, sources, SystemMetric.GPU_FREQ_MHZ, gpuFreq != null, "GPU_FREQ_MHZ", "privileged GPU frequency node")
+        record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "privileged thermalservice")
+        record(availability, sources, SystemMetric.CPU_TEMP_C, cpuTemp != null, "CPU_TEMP_C", "named CPU/SoC thermal sensor")
+        record(availability, sources, SystemMetric.GPU_PERCENT, gpuPercent != null, "GPU_PERCENT", "GPU busy/total counters")
+        record(availability, sources, SystemMetric.CPU_CORES, scene.cpuCoreLoadPct.any { it != null }, "CPU_CORES", "per-core /proc/stat")
+        record(availability, sources, SystemMetric.DDR_FREQ_MHZ, scene.ddrFreqMHz != null, "DDR_FREQ_MHZ", "memory devfreq")
+        record(availability, sources, SystemMetric.THREAD_LOAD, scene.threadLoads.isNotEmpty(), "THREAD_LOAD", "per-thread /proc/<pid>/task")
+        record(availability, sources, SystemMetric.THERMAL_STATUS, thermalStatus != null, "THERMAL_STATUS", "thermalservice status")
 
         return SystemMetrics(
             cpuPercent = cpu,
             cpuFreqMHz = cpuFreq?.let { it / 1000 },
-            gpuName = Parsers.parseGpuName(gpu),
-            gpuFreqMHz = Parsers.parseGpuFreq(gpu)?.let { it / 1000 },
-            batteryLevel = level,
-            batteryTempC = batteryTemp,
-            powerWatts = power?.takeIf { it > 0 },
-            ramUsedGb = usedGb,
-            ramTotalGb = totalGb,
-            ramPercent = ramPercent,
+            gpuName = gpuName,
+            gpuFreqMHz = gpuFreq?.let { it / 1000 },
+            gpuPercent = gpuPercent,
+            cpuGroups = cpuGroups,
+            cpuCoreLoadPct = scene.cpuCoreLoadPct,
+            cpuCoreFreqMHz = scene.cpuCoreFreqMHz,
+            ddrFreqMHz = scene.ddrFreqMHz,
+            threadLoads = scene.threadLoads,
             thermalMaxC = maxThermal,
-            refreshHz = refresh,
-            updatedAt = System.currentTimeMillis()
+            cpuTempC = cpuTemp,
+            thermalStatus = thermalStatus,
+            updatedAt = System.currentTimeMillis(),
+            availability = availability,
+            sources = sources,
+            measuredAtElapsedNanos = now
         )
     }
 
+    /** Source label for the extra Scene-style collectors, for the diagnostics report. */
+    fun sceneSourceText(): String = buildString {
+        appendLine("per-core CPU: /proc/stat + cpufreq scaling_cur_freq")
+        appendLine("memory clock: devfreq cur_freq")
+        appendLine("thread CPU: /proc/<pid>/task/<tid>/stat")
+    }.trimEnd()
+
+    /**
+     * Real CPU clusters: cores are grouped by the maximum clock the kernel reports.
+     * A device that does not publish those nodes gets one line per core instead.
+     */
+    private fun cpuGroups(coreDump: String, coreFreqDump: String): List<CpuGroupMetric> {
+        val current = Parsers.parsePerCoreCpuStat(coreDump)
+        if (current.isEmpty()) return emptyList()
+        val previous = lastCpuCores
+        lastCpuCores = current
+
+        val maxFreqs = Parsers.parseCpuMaxFreqs(coreDump)
+        val nowFreqs = Parsers.parseCpuFreqs(coreFreqDump)
+        val cores = current.keys.sorted()
+        val grouped = if (maxFreqs.keys.containsAll(cores)) {
+            cores.groupBy { maxFreqs[it] ?: 0 }
+                .values.sortedByDescending { maxFreqs[it.first()] ?: 0 }
+        } else {
+            cores.map { listOf(it) }
+        }
+
+        // Keep the same order on every poll so a chart line never jumps to a
+        // different colour when the shell returns the nodes in another order.
+        val currentNames = grouped.map(::groupLabel)
+        val ordered = if (lastGroupNames.isNotEmpty() &&
+            lastGroupNames.toSet() == currentNames.toSet()
+        ) {
+            lastGroupNames.mapNotNull { name ->
+                grouped.firstOrNull { groupLabel(it) == name }
+            }
+        } else {
+            grouped
+        }
+        lastGroupNames = ordered.map(::groupLabel)
+
+        return ordered.map { group ->
+            var totalDelta = 0L
+            var idleDelta = 0L
+            group.forEach { core ->
+                val now = current[core] ?: return@forEach
+                val before = previous?.get(core) ?: return@forEach
+                totalDelta += now[0] - before[0]
+                idleDelta += now[1] - before[1]
+            }
+            val percent = if (totalDelta > 0L) {
+                ((1.0 - idleDelta.toDouble() / totalDelta.toDouble()) * 100.0)
+                    .toFloat().coerceIn(0f, 100f)
+            } else null
+            val freqKhz = group.mapNotNull { nowFreqs[it] }.filter { it > 0 }
+            val freqMHz = if (freqKhz.isEmpty()) null else (freqKhz.average() / 1000).toInt()
+            CpuGroupMetric(groupLabel(group), percent, freqMHz)
+        }
+    }
+
+    private fun groupLabel(cores: List<Int>): String = if (cores.size == 1) {
+        "CPU${cores.first()}"
+    } else {
+        "CPU ${cores.first()}~${cores.last()}"
+    }
+
+    /** GPU load from busy/total ticks; a device without counters gets null. */
+    private fun gpuPercent(dump: String): Float? {
+        val now = Parsers.parseGpuBusy(dump) ?: run {
+            lastGpuBusy = null
+            return null
+        }
+        val before = lastGpuBusy
+        lastGpuBusy = now
+        if (before == null || now.second <= before.second) return null
+        val busyDelta = now.first - before.first
+        if (busyDelta < 0L) return null
+        return (busyDelta * 100f / (now.second - before.second).toFloat()).coerceIn(0f, 100f)
+    }
+
+    /**
+     * Notes whether a metric could be read.
+     *
+     * A metric that is missing because the shell could not be reached needs Shizuku; one
+     * that is missing because the device does not expose it does not.
+     */
+    private fun record(
+        availability: MutableMap<SystemMetric, MetricAvailability>,
+        sources: MutableMap<SystemMetric, String>,
+        metric: SystemMetric,
+        present: Boolean,
+        source: String,
+        @Suppress("UNUSED_PARAMETER") sourceDetail: String
+    ) {
+        sources[metric] = source
+        availability[metric] = if (present) {
+            MetricAvailability.AVAILABLE
+        } else {
+            MetricAvailability.SHIZUKU_REQUIRED
+        }
+    }
+
+    /**
+     * The CPU load between two readings of `/proc/stat`.
+     *
+     * A single reading is not enough: the counters only say how much time was used in
+     * total, so the load is the difference between two of them.
+     */
     private fun cpuPercent(cpuDump: String): Float? {
         val current = Parsers.parseCpuStat(cpuDump) ?: return null
         val previous = lastCpu

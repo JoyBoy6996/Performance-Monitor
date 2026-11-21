@@ -13,7 +13,9 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -27,9 +29,12 @@ import com.framescope.monitor.FrameScopeApp
 import com.framescope.monitor.MainActivity
 import com.framescope.monitor.R
 import com.framescope.monitor.core.AppSettings
+import com.framescope.monitor.core.FpsSourceKind
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.OverlayStyle
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -51,10 +56,16 @@ class OverlayService : Service() {
     private var fpsText: TextView? = null
     private var unitText: TextView? = null
     private var frameText: TextView? = null
+    private var recText: TextView? = null
+    private var pillBackground: GradientDrawable? = null
     private var titleText: TextView? = null
     private var graphView: GraphView? = null
     private val rowViews = mutableMapOf<String, TextView>()
     private val rowLabels = mutableMapOf<String, TextView>()
+
+    private val recStatusHandler = Handler(Looper.getMainLooper())
+    private var recStatusRunnable: Runnable? = null
+    private var recordingNow = false
 
     private var expanded = true
     private var dragStartX = 0f
@@ -102,6 +113,8 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        recStatusRunnable?.let { recStatusHandler.removeCallbacks(it) }
+        recStatusRunnable = null
         scope.cancel()
         removeOverlay()
         super.onDestroy()
@@ -116,18 +129,48 @@ class OverlayService : Service() {
         root = null
     }
 
+    /**
+     * Asks the system for the two exemptions the overlay needs.
+     *
+     * The Settings app hides overlays it does not trust, and a privileged shell
+     * can switch that off. Without it the overlay disappears the moment the
+     * user opens the Settings app, which is where the overlay permission is.
+     */
+    private fun grantOverlayExemptions(app: FrameScopeApp) {
+        val pkg = applicationContext.packageName
+        app.container.scope.launch(Dispatchers.IO) {
+            runCatching {
+                app.container.hub.execOrNull(
+                    "cmd appops set $pkg HIDE_OVERLAY_WINDOWS allow",
+                    4_000
+                )
+                app.container.hub.execOrNull(
+                    "cmd appops set $pkg SYSTEM_ALERT_WINDOW allow",
+                    4_000
+                )
+            }
+        }
+    }
+
     private fun buildOverlay() {
         graphView = null
+        recText = null
+        pillBackground = null
         if (!Settings.canDrawOverlays(this)) return
 
         val app = applicationContext as? FrameScopeApp ?: return
         val settings = app.container.settings
 
+        grantOverlayExemptions(app)
+
         currentStyle = runCatching {
             OverlayStyle.valueOf(settings.overlayStyle.value)
         }.getOrDefault(OverlayStyle.CLASSIC)
         currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
-        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
+        // Android does not let a window that covers more than this much of the
+        // screen pass touches through, so the Settings app and its permission
+        // dialogs would stop working with the overlay on top of them.
+        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, MAX_OVERLAY_OPACITY)
         currentRows = settings.overlayRows.value
         showGraph = settings.overlayShowGraph.value
         graphHeight = settings.overlayGraphHeight.value
@@ -142,6 +185,31 @@ class OverlayService : Service() {
             else -> buildStandard(settings)
         }
         applyExpandedState()
+        updateRecordIndicator(
+            (applicationContext as? FrameScopeApp)?.container?.engine?.recording?.value == true
+        )
+    }
+
+    /**
+     * A fixed width is the whole fix for the "popup covers the game" reports.
+     *
+     * With WRAP_CONTENT the weighted frame-time text asked for all the space the
+     * window could get, so Classic, Detailed and RTSS grew to the screen width.
+     * Each style now gets a small, known width and the window is created with
+     * that exact size.
+     */
+    private fun overlayWidthPx(): Int {
+        val styleWidth = when (currentStyle) {
+            OverlayStyle.PILL -> 132f
+            OverlayStyle.COMPACT -> 108f
+            OverlayStyle.CLASSIC -> 126f
+            OverlayStyle.DETAILED -> 138f
+            OverlayStyle.RTSS -> 116f
+        }
+        val wanted = OverlayViews.dp(this, styleWidth * currentScale)
+        val max = (resources.displayMetrics.widthPixels - OverlayViews.dp(this, 12f))
+            .coerceAtLeast(OverlayViews.dp(this, 80f))
+        return wanted.coerceAtMost(max)
     }
 
     private fun buildPill(settings: AppSettings) {
@@ -151,19 +219,27 @@ class OverlayService : Service() {
             val padH = OverlayViews.dp(this@OverlayService, 12f * currentScale)
             val padV = OverlayViews.dp(this@OverlayService, 6f * currentScale)
             setPadding(padH, padV, padH, padV)
-            background = GradientDrawable().apply {
+            pillBackground = GradientDrawable().apply {
                 cornerRadius = OverlayViews.dp(this@OverlayService, 100f).toFloat()
                 setColor(Color.parseColor("#E60B1020"))
                 setStroke(OverlayViews.dp(this@OverlayService, 1f), Color.parseColor("#44FFFFFF"))
             }
+            background = pillBackground
         }
 
+        recText = OverlayViews.label(this, "●", Color.parseColor("#64748B")).apply {
+            textSize = 9f * currentScale
+        }
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 16f * currentScale)
         unitText = OverlayViews.label(this, "FPS", Color.parseColor("#94A3B8")).apply {
             textSize = 9f * currentScale
         }
         frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 11f * currentScale)
 
+        layout.addView(recText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginEnd = OverlayViews.dp(this@OverlayService, 4f) })
         layout.addView(fpsText)
         layout.addView(unitText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -198,8 +274,17 @@ class OverlayService : Service() {
         val header = OverlayViews.row(this)
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#00FF66"), 20f * currentScale)
         frameText = OverlayViews.value(this, "", Color.parseColor("#FFA500"), 12f * currentScale)
-        header.addView(fpsText)
-        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(
+            fpsText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        header.addView(
+            frameText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
         layout.addView(header)
 
         populateRows(layout, settings, isRtss = true)
@@ -228,8 +313,17 @@ class OverlayService : Service() {
         val header = OverlayViews.row(this)
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 24f * currentScale)
         frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 12f * currentScale)
-        header.addView(fpsText)
-        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(
+            fpsText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        header.addView(
+            frameText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
         layout.addView(header)
 
         if (showGraph && currentStyle != OverlayStyle.COMPACT) {
@@ -265,7 +359,13 @@ class OverlayService : Service() {
             rowView.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
             val value = OverlayViews.value(this, "--", valColor, 12f * currentScale)
-            rowView.addView(value)
+            rowView.addView(
+                value,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
 
             rowViews[row] = value
             rowLabels[row] = label
@@ -283,12 +383,21 @@ class OverlayService : Service() {
         }
 
         var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-        if (settings.overlayClickThrough.value) {
+        // A Pill that records on tap must stay touchable. Other styles, and a
+        // Pill with the feature switched off, still honour pass-through.
+        val pillTapEnabled = currentStyle == OverlayStyle.PILL &&
+            settings.overlayPillTapToRecord.value
+        if (settings.overlayClickThrough.value && !pillTapEnabled) {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
+        layout.isClickable = true
+        layout.setOnClickListener { handleOverlayTap(settings) }
 
+        val windowWidth = if (currentStyle == OverlayStyle.PILL) {
+            WindowManager.LayoutParams.WRAP_CONTENT
+        } else overlayWidthPx()
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            windowWidth,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             flags,
@@ -334,9 +443,9 @@ class OverlayService : Service() {
                         settings.overlayX.value = (lp.x.toFloat() / dm.widthPixels).coerceIn(0f, 1f)
                         settings.overlayY.value = (lp.y.toFloat() / dm.heightPixels).coerceIn(0f, 1f)
                     } else {
+                        // Only a real tap reaches here. A drag has already moved
+                        // the window and must never toggle a recording.
                         v.performClick()
-                        expanded = !expanded
-                        applyExpandedState()
                     }
                     true
                 }
@@ -346,6 +455,52 @@ class OverlayService : Service() {
 
         root = layout
         runCatching { windowManager.addView(layout, lp) }
+    }
+
+    /** A tap on the Pill is the Scene-style manual Record button. */
+    private fun handleOverlayTap(settings: AppSettings) {
+        if (currentStyle == OverlayStyle.PILL) {
+            if (settings.overlayPillTapToRecord.value) toggleRecording()
+            return
+        }
+        expanded = !expanded
+        applyExpandedState()
+    }
+
+    /** Manual only: a tap starts when idle and stops when a run is active. */
+    private fun toggleRecording() {
+        val engine = (applicationContext as? FrameScopeApp)?.container?.engine ?: return
+        if (engine.recording.value) {
+            engine.stopRecordingManually()
+        } else {
+            engine.startRecording()
+        }
+        val nowRecording = engine.recording.value
+        showRecordStatus(
+            nowRecording,
+            if (nowRecording) "● REC STARTED" else "● REC STOPPED"
+        )
+    }
+
+    /** Brief, unmistakable feedback for the tap, then back to the steady state. */
+    private fun showRecordStatus(recording: Boolean, label: String) {
+        recStatusRunnable?.let { recStatusHandler.removeCallbacks(it) }
+        updateRecordIndicator(recording, label)
+        val restore = Runnable {
+            recStatusRunnable = null
+            updateRecordIndicator(recordingNow)
+        }
+        recStatusRunnable = restore
+        recStatusHandler.postDelayed(restore, REC_STATUS_MS)
+    }
+
+    /** Shows the real recording state on the Pill, including runs started elsewhere. */
+    private fun updateRecordIndicator(recording: Boolean, label: String? = null) {
+        recordingNow = recording
+        val color = Color.parseColor(if (recording) "#F87171" else "#4ADE80")
+        recText?.text = label ?: if (recording) "● REC" else "●"
+        recText?.setTextColor(color)
+        pillBackground?.setStroke(OverlayViews.dp(this, 1f), color)
     }
 
     private fun applyExpandedState() {
@@ -374,13 +529,15 @@ class OverlayService : Service() {
             }
         }
 
-        // Rebuild only when structure changes (style, rows)
+        // Rebuild only when structure or text size changes (style, rows, scale).
+        // Scale changes the pixel width of the window, so it cannot be a restyle.
         scope.launch {
             combine(
                 settings.overlayStyle.flow,
-                settings.overlayRows.flow
-            ) { style, rows ->
-                style to rows
+                settings.overlayRows.flow,
+                settings.overlayScale.flow
+            ) { style, rows, scale ->
+                Triple(style, rows, scale)
             }.collect {
                 buildOverlay()
             }
@@ -389,13 +546,21 @@ class OverlayService : Service() {
         // Re-style in place for presentation properties
         scope.launch {
             combine(
-                settings.overlayScale.flow,
                 settings.overlayOpacity.flow,
                 settings.overlayShowGraph.flow,
                 settings.overlayGraphHeight.flow,
-                settings.overlayClickThrough.flow
+                settings.overlayClickThrough.flow,
+                settings.overlayPillTapToRecord.flow
             ) { _, _, _, _, _ -> }.collect {
                 restyleOverlay(settings)
+            }
+        }
+
+        // Runs started from the dashboard must show the same REC state on the Pill.
+        scope.launch {
+            engine.recording.collect {
+                // A just-tapped STARTED/STOPPED label owns the pill briefly.
+                if (recStatusRunnable == null) updateRecordIndicator(it)
             }
         }
     }
@@ -403,13 +568,14 @@ class OverlayService : Service() {
     private fun restyleOverlay(settings: AppSettings) {
         val rootLayout = root ?: return
         val lp = params ?: return
-        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, 1.0f)
-        currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
+        currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, MAX_OVERLAY_OPACITY)
         showGraph = settings.overlayShowGraph.value
         graphHeight = settings.overlayGraphHeight.value
 
         lp.alpha = currentOpacity
-        if (settings.overlayClickThrough.value) {
+        val pillTapEnabled = currentStyle == OverlayStyle.PILL &&
+            settings.overlayPillTapToRecord.value
+        if (settings.overlayClickThrough.value && !pillTapEnabled) {
             lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         } else {
             lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
@@ -418,7 +584,7 @@ class OverlayService : Service() {
         graphView?.let { gv ->
             gv.visibility = if (showGraph && expanded) View.VISIBLE else View.GONE
             val lpGraph = gv.layoutParams
-            lpGraph?.height = OverlayViews.dp(this, graphHeight.toFloat())
+            lpGraph?.height = OverlayViews.dp(this, graphHeight.toFloat() * currentScale)
             gv.layoutParams = lpGraph
         }
 
@@ -426,13 +592,32 @@ class OverlayService : Service() {
     }
 
     private fun updateValues(fpsState: FpsState, system: SystemMetrics, settings: AppSettings) {
-        val target = settings.fpsThreshold.value
+        // The display's own refresh rate is what a frame rate has to be judged
+        // against. A phone that presents 144 frames a second has not drawn a
+        // slow game at 100, and a phone that presents 60 has not drawn a fast
+        // one at 45. The fixed 45 that used to be the target said nothing about
+        // either screen; it only described one old setting.
+        val target = system.refreshHz?.roundToInt()?.takeIf { it > 0 }
+            ?: settings.fpsThreshold.value
         val fpsVal = fpsState.fps
 
-        fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
-        fpsText?.setTextColor(OverlayViews.fpsColor(fpsVal, target))
+        // A reading that is older than a couple of seconds is not a live reading, and
+        // it says so instead of looking like a current number.
+        val stale = fpsState.valid && fpsState.sampleAgeMs > STALE_AFTER_MS
+        val capNote = fpsState.detectedCapFps?.let { cap ->
+            " · $cap cap" + if (fpsState.capCause == "heat") " (heat)" else ""
+        }.orEmpty()
 
-        frameText?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else ""
+        fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
+        fpsText?.setTextColor(
+            if (stale) STALE_COLOR else OverlayViews.fpsColor(fpsVal, target)
+        )
+
+        frameText?.text = when {
+            !fpsState.valid -> ""
+            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs) + capNote
+            else -> "%.1f ms".format(fpsState.frameTimeMs) + capNote
+        }
 
         if (fpsState.history.isNotEmpty()) {
             graphView?.setValues(fpsState.history, target.toFloat())
@@ -445,21 +630,44 @@ class OverlayService : Service() {
             "FRAMESCOPE"
         }
 
-        // Support all 11 rows: FPS, FRAME, CPU, CPUF, GPU, TEMP, BAT, POWER, MEM, REFRESH, APP
+        // Support every selectable row, including the observed cap and heat pair.
         rowViews["FPS"]?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         rowViews["FRAME"]?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else "--"
-        rowViews["CPU"]?.text = system.cpuPercent?.let { "${it.roundToInt()}%" } ?: "--"
+        rowViews["CAP"]?.text = fpsState.detectedCapFps?.let { cap ->
+            "$cap" + if (fpsState.capCause == "heat") " heat" else ""
+        } ?: "--"
+        rowViews["CPU"]?.text = system.cpuPercent.finiteOrNull()?.let { "${it.roundToInt()}%" } ?: "--"
         rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
         rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")
-        rowViews["TEMP"]?.text = system.thermalMaxC?.let { "%.1f°C".format(it) }
-            ?: (system.batteryTempC?.let { "%.1f°C".format(it) } ?: "--")
+        val temperature = system.deviceTemperatureC().finiteOrNull()
+        rowViews["TEMP"]?.text = temperature?.let { "%.1f°C".format(it) } ?: "--"
+        // A warm phone throttles long before it is hot, so the temperature
+        // carries its own warning colour.
+        temperature?.let { rowViews["TEMP"]?.setTextColor(OverlayViews.temperatureColor(it)) }
+        rowViews["HEAT"]?.text = system.tempPeakC.finiteOrNull()?.let { peak ->
+            val cooled = system.tempCooledC.finiteOrNull() ?: 0f
+            "↑%.1f°C ↓%.1f°C".format(peak, cooled)
+        } ?: "--"
         rowViews["BAT"]?.text = system.batteryLevel?.let { "$it%" } ?: "--"
-        rowViews["POWER"]?.text = system.powerWatts?.let { "%.2f W".format(it) } ?: "--"
-        rowViews["MEM"]?.text = if (system.ramUsedGb != null && system.ramTotalGb != null) {
-            "%.1f/%.0fG".format(system.ramUsedGb, system.ramTotalGb)
+        rowViews["POWER"]?.text = system.powerWatts.finiteOrNull()?.let { "%.2f W".format(it) } ?: "--"
+        val ramUsed = system.ramUsedGb.finiteOrNull()
+        val ramTotal = system.ramTotalGb.finiteOrNull()
+        rowViews["MEM"]?.text = if (ramUsed != null && ramTotal != null) {
+            "%.1f/%.0fG".format(ramUsed, ramTotal)
         } else system.ramPercent?.let { "$it%" } ?: "--"
-        rowViews["REFRESH"]?.text = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--"
+        rowViews["REFRESH"]?.text = system.refreshHz.finiteOrNull()?.let { "${it.roundToInt()} Hz" } ?: "--"
         rowViews["APP"]?.text = if (appName.isNotBlank()) appName.substringAfterLast('.') else "--"
+        // Which provider the reading came from, so a number that is not the game's own
+        // frame rate is not mistaken for one.
+        rowViews["SRC"]?.text = sourceLabel(fpsState.sourceKind)
+    }
+
+    /** The short name of the provider a reading came from. */
+    private fun sourceLabel(kind: FpsSourceKind): String = when (kind) {
+        FpsSourceKind.SURFACE_FLAINGER_LATENCY -> "SF"
+        FpsSourceKind.TIMESTATS -> "TS"
+        FpsSourceKind.GFXINFO -> "GFX"
+        FpsSourceKind.NONE -> "--"
     }
 
     private fun createChannel() {
@@ -504,7 +712,23 @@ class OverlayService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.framescope.monitor.overlay.STOP"
+
+        /**
+         * The most the overlay may cover.
+         *
+         * Android refuses to pass touches through a window that hides more than
+         * this much of the screen, so anything above it would block the
+         * Settings app and its permission dialogs.
+         */
+        private const val MAX_OVERLAY_OPACITY = 0.8f
+        private const val REC_STATUS_MS = 1_500L
         private const val CHANNEL_ID = "framescope_overlay_channel"
         private const val NOTIFICATION_ID = 4040
+
+        /** A reading older than this is shown as out of date rather than as live. */
+        private const val STALE_AFTER_MS = 2_000L
+
+        /** The colour of a reading that is too old to be live. */
+        private val STALE_COLOR = Color.parseColor("#94A3B8")
     }
 }

@@ -3,6 +3,7 @@ package com.framescope.monitor.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.os.SystemClock
 
 /**
  * The evidence needed to explain a wrong frame rate reading.
@@ -32,6 +33,61 @@ object Diagnostics {
         "echo '--- privileged identity ---'",
         "id 2>/dev/null || whoami 2>/dev/null"
     ).joinToString("; ")
+
+    /**
+     * The raw evidence of one app's layers.
+     *
+     * This asks SurfaceFlinger the same questions the sampler asks, but it keeps
+     * the answers as they are. The identity shows who is really running the
+     * command, the layer list shows what SurfaceFlinger calls the layers, and
+     * the latency dump of the app's own layers shows whether the frames are
+     * there at all.
+     */
+    fun probeCommand(
+        packageName: String?,
+        measuredLayer: String? = null,
+        debugText: String = ""
+    ): String {
+        val pkg = (packageName ?: "").replace("'", "").replace("\"", "")
+        val app = if (pkg.isBlank()) "" else pkg
+        val layer = (measuredLayer ?: "").replace("'", "")
+        val atMs = SystemClock.uptimeMillis()
+        val safeDebug = debugText.replace("\"", "").replace("`", "")
+        // Keep this command plain. Nested quotes and command substitution made
+        // the shell answer `syntax error: unexpected ';'` on the device, which
+        // left no counters to read. Every line here is a simple command.
+        return listOf(
+            "echo 'captured_from=$app at=$atMs'",
+            if (safeDebug.isNotBlank()) {
+                "echo '--- last 5 polled FPS readings (newest last) ---'; " +
+                    "echo \"$safeDebug\""
+            } else {
+                "echo '--- last 5 polled FPS readings: none ---'"
+            },
+            if (layer.isBlank()) {
+                "echo '--- measured layer: none yet ---'"
+            } else {
+                "echo '--- measured layer ---'; echo 'layer=[$layer]'"
+            },
+            "echo '--- counters of $app ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -B 6 -A 14 -F '$app' | head -50",
+            "echo '--- counter summary ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -E 'layerName = |totalFrames = |renderRate = |displayRefreshRate = ' | head -60",
+            "echo '--- who is running this ---'",
+            "id 2>/dev/null",
+            "sleep 2",
+            "echo '--- counter summary two seconds later ---'",
+            "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+                "grep -E 'layerName = |totalFrames = |renderRate = |displayRefreshRate = ' | head -60",
+            "echo '--- layers of $app ---'",
+            "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$app' | head -8",
+            "echo '--- the window in front ---'",
+            "dumpsys window 2>/dev/null | grep -m2 -E 'mCurrentFocus|mFocusedApp'",
+            "echo 'captured_from=$app at=$atMs'"
+        ).joinToString("; ")
+    }
 
     /** Puts the text on the clipboard so it can be pasted into a chat. */
     fun copy(context: Context, text: String) {

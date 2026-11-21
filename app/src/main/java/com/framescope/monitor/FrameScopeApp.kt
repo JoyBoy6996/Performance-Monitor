@@ -8,6 +8,7 @@ import com.framescope.monitor.metrics.MetricsEngine
 import com.framescope.monitor.metrics.SessionStore
 import com.framescope.monitor.overlay.OverlayController
 import com.framescope.monitor.shell.ShellHub
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -49,7 +50,12 @@ class FrameScopeApp : Application() {
 }
 
 class AppContainer(context: Context) {
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // A failure in any background check is written to the crash log and shown
+    // in diagnostics. It must never take the interface down with it.
+    private val crashHandler = CoroutineExceptionHandler { _, error ->
+        CrashLog.write(context.applicationContext, error)
+    }
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + crashHandler)
     val settings = AppSettings(context)
     val hub = ShellHub(context.applicationContext)
     val store = SessionStore(context)

@@ -6,14 +6,14 @@ plugins {
 
 android {
     namespace = "com.framescope.monitor"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.framescope.monitor"
+        applicationId = "com.qstats.fpsmonitor"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        targetSdk = 36
+        versionCode = 23
+        versionName = "1.2.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -34,6 +34,20 @@ android {
         }
     }
 
+    // One key for every build, so a new APK always updates the installed one
+    // in place instead of asking to uninstall.
+    val stableKeystore = rootProject.file("keystore/framescope.jks")
+    signingConfigs {
+        if (stableKeystore.exists()) {
+            create("stable") {
+                storeFile = stableKeystore
+                storePassword = "framescope"
+                keyAlias = "framescope"
+                keyPassword = "framescope"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -41,9 +55,19 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = if (stableKeystore.exists()) {
+                signingConfigs.getByName("stable")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = if (stableKeystore.exists()) {
+                signingConfigs.getByName("stable")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -67,6 +91,11 @@ android {
         buildConfig = true
         aidl = true
     }
+}
+
+tasks.withType<Test>().configureEach {
+    systemProperty("robolectric.dependency.repo.url", "https://maven-central.storage-download.googleapis.com/maven2")
+    systemProperty("robolectric.dependency.repo.id", "central-mirror")
 }
 
 dependencies {

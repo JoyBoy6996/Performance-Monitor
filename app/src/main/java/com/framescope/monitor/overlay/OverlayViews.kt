@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.text.TextUtils
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -25,6 +26,8 @@ object OverlayViews {
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         includeFontPadding = false
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     fun value(context: Context, text: String, color: Int, sizeSp: Float = 12f): TextView = TextView(context).apply {
@@ -34,6 +37,8 @@ object OverlayViews {
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         includeFontPadding = false
         gravity = Gravity.END
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     fun row(context: Context): LinearLayout = LinearLayout(context).apply {
@@ -52,6 +57,27 @@ object OverlayViews {
         fps > 0 -> Color.parseColor("#F87171")
         else -> Color.parseColor("#94A3B8")
     }
+
+    /** The colour of a temperature. */
+    fun temperatureColor(celsius: Float): Int = when (temperatureLevel(celsius)) {
+        TemperatureLevel.CRITICAL -> Color.parseColor("#EF4444")
+        TemperatureLevel.WARM -> Color.parseColor("#F59E0B")
+        TemperatureLevel.COOL -> Color.parseColor("#E2E8F0")
+    }
+}
+
+/**
+ * How warm the phone is.
+ *
+ * A phone that is already warm throttles long before it is hot, so the warning
+ * starts at 40 degrees and the alarm at 43.
+ */
+enum class TemperatureLevel { COOL, WARM, CRITICAL }
+
+fun temperatureLevel(celsius: Float): TemperatureLevel = when {
+    celsius >= 43f -> TemperatureLevel.CRITICAL
+    celsius >= 40f -> TemperatureLevel.WARM
+    else -> TemperatureLevel.COOL
 }
 
 /** Lightweight line graph used by the overlay and the dashboard preview. */

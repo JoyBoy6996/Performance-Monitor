@@ -3,10 +3,23 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Local ADB bridge connects to 127.0.0.1; Android still needs INTERNET. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Android 14 and later: a service that captures the screen may only be
+         started by an app that holds this permission. Without it the system
+         refuses the foreground service and the app dies. -->
+    <uses-permission android:name="android.permission.PROJECT_MEDIA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+        The right to run dumpsys from the app itself. It is granted once, by
+        hand, and then the app no longer needs Shizuku for the frame rate: the
+        commands run in its own shell, where nothing cuts their output short.
+    -->
+    <uses-permission android:name="android.permission.DUMP"
+        tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"

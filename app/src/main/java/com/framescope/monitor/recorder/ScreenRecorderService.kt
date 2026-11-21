@@ -55,15 +55,25 @@ class ScreenRecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Promote unconditionally first to prevent RemoteServiceException
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            // The system refused the foreground service - the app has no right
+            // to capture the screen, or it is not in the foreground. The
+            // service stops quietly: a crash here takes the whole app down,
+            // and with it the frame rate the user came for.
+            android.util.Log.e(TAG, "The system refused the screen recorder", e)
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         if (intent == null || intent.action == ACTION_STOP) {
@@ -229,6 +239,8 @@ class ScreenRecorderService : Service() {
     }
 
     companion object {
+        private const val TAG = "FrameScopeRecorder"
+
         const val ACTION_START = "com.framescope.monitor.recorder.START"
         const val ACTION_STOP = "com.framescope.monitor.recorder.STOP"
         const val EXTRA_RESULT_CODE = "extra_result_code"

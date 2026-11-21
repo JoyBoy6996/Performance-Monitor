@@ -1,6 +1,5 @@
 package com.framescope.monitor.ui.screens
 
-import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -8,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,15 +24,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
+import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.EmptyState
 import com.framescope.monitor.ui.components.MetricLine
@@ -47,17 +51,24 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/** One formatter for every number here: bad values become "--", never NaN. */
+private fun fmt(value: Float?, decimals: Int): String {
+    val number = value.finiteOrNull() ?: return "--"
+    return String.format(Locale.US, "%.${decimals}f", number)
+}
+
 @Composable
 fun SessionsScreen(
     container: AppContainer,
     onOpenSession: (SessionRecord) -> Unit = {},
     bottomPadding: Dp = 24.dp
 ) {
-    val context = LocalContext.current
     val sessions by container.store.sessions.collectAsState()
     val formatter = remember { SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()) }
     val threshold = container.settings.fpsThreshold.flow.collectAsState().value
+    var shareTarget by remember { mutableStateOf<SessionRecord?>(null) }
 
+    Box(Modifier.fillMaxSize()) {
     FrameScopeScreen(
         title = "Sessions",
         subtitle = if (sessions.isEmpty()) {
@@ -72,7 +83,7 @@ fun SessionsScreen(
                 EmptyState(
                     icon = Icons.Rounded.Timeline,
                     title = "No sessions yet",
-                    message = "Start a recording from the Monitor tab, then come back here for the full breakdown."
+                    message = "Record a run from the Monitor tab, then come back for the breakdown."
                 )
             }
             return@FrameScopeScreen
@@ -87,27 +98,20 @@ fun SessionsScreen(
                     threshold = threshold,
                     formattedDate = formatter.format(Date(session.startedAt)),
                     onOpen = { onOpenSession(session) },
-                    onShare = {
-                        val csv = container.store.toCsv(session)
-                        val exportDir = java.io.File(context.filesDir, "exports").apply { mkdirs() }
-                        val file = java.io.File(exportDir, "session_${session.id}.csv").apply { writeText(csv) }
-                        val uri = androidx.core.content.FileProvider.getUriForFile(
-                            context,
-                            "${context.packageName}.files",
-                            file
-                        )
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/csv"
-                            putExtra(Intent.EXTRA_STREAM, uri)
-                            putExtra(Intent.EXTRA_SUBJECT, "FrameScope session - ${session.appLabel}")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                        context.startActivity(Intent.createChooser(send, "Export session"))
-                    },
+                    onShare = { shareTarget = session },
                     onDelete = { container.store.delete(session.id) }
                 )
             }
         }
+    }
+
+    shareTarget?.let { target ->
+        SessionShareDialog(
+            session = target,
+            threshold = threshold,
+            onDismiss = { shareTarget = null }
+        )
+    }
     }
 }
 
@@ -131,7 +135,7 @@ private fun SummaryPanel(sessions: List<SessionRecord>) {
             )
             StatCell(
                 label = "Best average",
-                value = best?.let { String.format("%.0f", it.avgFps) } ?: "--",
+                value = best?.let { fmt(it.avgFps, 0) } ?: "--",
                 unit = "fps",
                 accent = MaterialTheme.status.good,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
@@ -172,7 +176,7 @@ private fun SessionCard(
                     text = formattedDate,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp)
+                    modifier = Modifier.padding(top = Space.xs)
                 )
             }
             IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
@@ -194,13 +198,14 @@ private fun SessionCard(
         }
 
         Spacer(Modifier.height(Space.sm))
+        val fpsPoints = session.fpsSeries.filter { it.finiteOrNull() != null }
         Box(
             Modifier
                 .fillMaxWidth()
                 .clip(MaterialTheme.shapes.small)
                 .background(MaterialTheme.colorScheme.surfaceContainerLowest)
         ) {
-            if (session.fpsSeries.size < 2) {
+            if (fpsPoints.size < 2) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -216,7 +221,7 @@ private fun SessionCard(
                 }
             } else {
                 Sparkline(
-                    values = session.fpsSeries,
+                    values = fpsPoints,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(84.dp),
@@ -233,42 +238,42 @@ private fun SessionCard(
         Row {
             StatCell(
                 label = "Average",
-                value = String.format("%.1f", session.avgFps),
+                value = fmt(session.avgFps, 1),
                 unit = "fps",
                 accent = stateColor,
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             StatCell(
                 label = "Max / min",
-                value = "${session.maxFps.toInt()} / ${session.minFps.toInt()}",
+                value = "${fmt(session.maxFps, 0)} / ${fmt(session.minFps, 0)}",
                 accent = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             StatCell(
-                label = "Smooth",
-                value = session.smoothness.toInt().toString(),
-                unit = "%",
-                accent = MaterialTheme.status.good,
+                label = "5% low fps",
+                value = fmt(session.low5Percent, 1),
+                accent = MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
         Row(Modifier.padding(top = Space.md)) {
             StatCell(
                 label = "1% low",
-                value = session.low1Percent.toInt().toString(),
+                value = fmt(session.low1Percent, 0),
                 accent = MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             StatCell(
-                label = "5% low",
-                value = session.low5Percent.toInt().toString(),
-                accent = MaterialTheme.status.warn,
+                label = "Variance",
+                value = fmt(session.fpsVariance, 1),
+                accent = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             StatCell(
-                label = "Jank",
-                value = session.jankFrames.toString(),
-                accent = MaterialTheme.colorScheme.onSurface,
+                label = "≥45 smooth",
+                value = fmt(session.sceneSmoothnessPercent, 0),
+                unit = "%",
+                accent = MaterialTheme.status.good,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -290,11 +295,18 @@ private fun SessionCard(
             value = session.totalFrames.toString(),
             accent = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        session.maxTempC?.let {
+        session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let {
             MetricLine(
-                label = "Peak temperature",
+                label = "Max temperature",
                 value = "${it.toInt()}°C",
                 accent = MaterialTheme.status.warn
+            )
+        }
+        session.avgPowerW?.let {
+            MetricLine(
+                label = "Average power",
+                value = "${String.format("%.2f", it)} W",
+                accent = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         session.avgCpu?.let {

@@ -22,6 +22,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,6 +42,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.OverlayStyle
+import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.ChipRow
 import com.framescope.monitor.ui.components.Panel
@@ -54,7 +57,7 @@ import com.framescope.monitor.ui.theme.status
 import java.util.Locale
 
 private val ALL_ROWS = listOf(
-    "FPS", "FRAME", "CPU", "CPUF", "GPU", "TEMP", "BAT", "POWER", "MEM", "REFRESH", "APP"
+    "FPS", "FRAME", "CAP", "SRC", "CPU", "CPUF", "GPU", "TEMP", "HEAT", "BAT", "POWER", "MEM", "REFRESH", "APP"
 )
 
 private val STYLE_LABELS = listOf("Pill", "Compact", "Classic", "Detailed", "RTSS")
@@ -76,9 +79,13 @@ fun OverlayScreen(
     val scale by settings.overlayScale.flow.collectAsState()
     val showGraph by settings.overlayShowGraph.flow.collectAsState()
     val graphHeight by settings.overlayGraphHeight.flow.collectAsState()
+    val pillTapToRecord by settings.overlayPillTapToRecord.flow.collectAsState()
     val threshold = settings.fpsThreshold.flow.collectAsState().value
+    val previewRows = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        .map { it to overlayRowValue(it, fps, system) }
 
     var canDraw by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var showAllPreviews by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) {
         canDraw = Settings.canDrawOverlays(context)
         onPauseOrDispose { }
@@ -89,6 +96,70 @@ fun OverlayScreen(
         subtitle = "Live telemetry on top of any app",
         bottomPadding = bottomPadding
     ) {
+        item {
+            Panel {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "Preview",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (showAllPreviews) {
+                                "All five overlay styles, full width."
+                            } else {
+                                "The selected style, full width."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(Space.md))
+                    OutlinedButton(onClick = { showAllPreviews = !showAllPreviews }) {
+                        Text(if (showAllPreviews) "Selected style" else "All styles")
+                    }
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(Space.md)) {
+                if (showAllPreviews) {
+                    OverlayStyle.entries.forEach { styleOption ->
+                        HudPreview(
+                            fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                            frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                            cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
+                            history = fps.history,
+                            style = styleOption.name,
+                            rows = previewRows,
+                            showGraph = showGraph,
+                            threshold = threshold,
+                            label = styleOption.name,
+                            caption = "$styleOption style preview"
+                        )
+                    }
+                } else {
+                    HudPreview(
+                        fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                        frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                        cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
+                        history = fps.history,
+                        style = style,
+                        rows = previewRows,
+                        showGraph = showGraph,
+                        threshold = threshold,
+                        label = style
+                    )
+                }
+            }
+        }
+
         item {
             Panel {
                 Row(
@@ -104,7 +175,11 @@ fun OverlayScreen(
                         )
                         Text(
                             text = if (running) {
-                                "Drag to reposition, tap to collapse."
+                                if (style.equals("PILL", ignoreCase = true) && pillTapToRecord) {
+                                    "Drag to reposition, tap to start/stop recording."
+                                } else {
+                                    "Drag to reposition, tap to collapse."
+                                }
                             } else {
                                 "Start it, then leave the app you want to measure."
                             },
@@ -115,9 +190,9 @@ fun OverlayScreen(
                     }
                     Spacer(Modifier.width(Space.md))
                     if (running) {
-                        Button(
+                        FilledTonalButton(
                             onClick = { container.overlay.stop() },
-                            colors = ButtonDefaults.buttonColors(
+                            colors = ButtonDefaults.filledTonalButtonColors(
                                 containerColor = MaterialTheme.status.criticalContainer,
                                 contentColor = MaterialTheme.status.onCriticalContainer
                             )
@@ -162,7 +237,7 @@ fun OverlayScreen(
                             modifier = Modifier.size(18.dp)
                         )
                         Text(
-                            text = "The \"Display over other apps\" permission is missing.",
+                            text = "\"Display over other apps\" permission is missing.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.status.onWarnContainer,
                             modifier = Modifier.padding(start = Space.sm)
@@ -170,22 +245,6 @@ fun OverlayScreen(
                     }
                 }
             }
-        }
-
-        item { SectionHeader("Preview") }
-
-        item {
-            HudPreview(
-                fpsText = if (fps.valid) String.format("%.0f", fps.fps) else "--",
-                frameText = if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else "",
-                cpuText = system.cpuPercent?.let { "CPU ${it.toInt()}%" } ?: "",
-                history = fps.history,
-                style = style,
-                rows = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                    .map { it to overlayRowValue(it, fps, system) },
-                showGraph = showGraph,
-                threshold = threshold
-            )
         }
 
         item { SectionHeader("Style") }
@@ -203,13 +262,38 @@ fun OverlayScreen(
                     }
                 )
                 Text(
-                    text = "Pill is the small in-game meter: one number, one unit. " +
-                        "Compact shows only the frame rate, Classic adds frame time, " +
-                        "Detailed shows every row, RTSS uses an Afterburner style block.",
+                    text = "Pill is the small meter with one number. Compact drops the frame time, " +
+                        "Classic keeps it, Detailed shows every row, RTSS uses an Afterburner block.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = Space.md)
                 )
+                if (style.equals("PILL", ignoreCase = true)) {
+                    Spacer(Modifier.height(Space.md))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = "Tap pill to record",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Text(
+                                text = "Scene-style control: tap starts, tap again stops. " +
+                                    "Red while recording, green when stopped. The pill stays " +
+                                    "touchable even if click-through is on.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = pillTapToRecord,
+                            onCheckedChange = { settings.overlayPillTapToRecord.value = it }
+                        )
+                    }
+                }
             }
         }
 
@@ -296,10 +380,17 @@ private fun HudPreview(
     style: String,
     rows: List<Pair<String, String>>,
     showGraph: Boolean,
-    threshold: Int
+    threshold: Int,
+    label: String,
+    caption: String = "Preview of the floating widget"
 ) {
     if (style.uppercase() == "PILL") {
-        PillPreview(fpsText = fpsText, frameText = frameText)
+        PillPreview(
+            fpsText = fpsText,
+            frameText = frameText,
+            label = label,
+            caption = caption
+        )
         return
     }
 
@@ -315,6 +406,12 @@ private fun HudPreview(
                 .padding(Space.md)
         ) {
             Column {
+                Text(
+                    text = label.uppercase(),
+                    style = MonoBlock.copy(fontSize = 9.sp, letterSpacing = 1.sp),
+                    color = HudMuted
+                )
+                Spacer(Modifier.height(Space.xs))
                 if (style.uppercase() == "RTSS" || style.uppercase() == "DETAILED") {
                     Text(
                         text = "FRAMESCOPE",
@@ -383,7 +480,7 @@ private fun HudPreview(
             }
         }
         Text(
-            text = "Preview of the floating widget",
+            text = caption,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = Space.sm)
@@ -396,8 +493,19 @@ private fun HudPreview(
  * frame time once the widget is expanded.
  */
 @Composable
-private fun PillPreview(fpsText: String, frameText: String) {
+private fun PillPreview(
+    fpsText: String,
+    frameText: String,
+    label: String,
+    caption: String
+) {
     Panel {
+        Text(
+            text = label.uppercase(),
+            style = MonoBlock.copy(fontSize = 9.sp, letterSpacing = 1.sp),
+            color = HudMuted
+        )
+        Spacer(Modifier.height(Space.xs))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -444,7 +552,7 @@ private fun PillPreview(fpsText: String, frameText: String) {
             )
         }
         Text(
-            text = "Preview of the floating widget",
+            text = caption,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = Space.sm)
@@ -458,16 +566,22 @@ private fun overlayRowValue(
     fps: com.framescope.monitor.core.FpsState,
     system: com.framescope.monitor.core.SystemMetrics
 ): String = when (key.uppercase()) {
-    "FPS" -> if (fps.valid) String.format("%.0f", fps.fps) else "--"
-    "FRAME" -> if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else "--"
-    "CPU" -> system.cpuPercent?.let { "${it.toInt()}%" } ?: "--"
+    "FPS" -> fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--"
+    "FRAME" -> fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "--"
+    "CAP" -> fps.detectedCapFps?.let { cap ->
+        "$cap" + if (fps.capCause == "heat") " heat" else ""
+    } ?: "--"
+    "CPU" -> system.cpuPercent.finiteOrNull()?.let { "${it.toInt()}%" } ?: "--"
     "CPUF" -> system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
     "GPU" -> system.gpuFreqMHz?.let { "$it MHz" } ?: system.gpuName?.let { it.take(14) } ?: "--"
-    "TEMP" -> system.thermalMaxC?.let { "${it.toInt()}°" } ?: "--"
+    "TEMP" -> system.deviceTemperatureC()?.let { "${it.toInt()}°" } ?: "--"
+    "HEAT" -> system.tempPeakC.finiteOrNull()?.let { peak ->
+        "↑${peak.toInt()}° ↓${(system.tempCooledC.finiteOrNull() ?: 0f).toInt()}°"
+    } ?: "--"
     "BAT" -> system.batteryLevel?.let { "$it%" } ?: "--"
-    "POWER" -> system.powerWatts?.let { "${String.format("%.2f", it)} W" } ?: "--"
+    "POWER" -> system.powerWatts.finiteOrNull()?.let { "${String.format("%.2f", it)} W" } ?: "--"
     "MEM" -> system.ramPercent?.let { "$it%" } ?: "--"
-    "REFRESH" -> system.refreshHz?.let { "${it.toInt()} Hz" } ?: "--"
+    "REFRESH" -> system.refreshHz.finiteOrNull()?.let { "${it.toInt()} Hz" } ?: "--"
     "APP" -> fps.surface?.substringAfterLast('/')?.substringBefore('#') ?: "--"
     else -> "--"
 }

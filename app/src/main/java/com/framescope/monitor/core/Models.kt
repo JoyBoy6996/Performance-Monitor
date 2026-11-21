@@ -11,7 +11,62 @@ data class FpsState(
     val surface: String? = null,
     val valid: Boolean = false,
     /** Why there is no data, in plain words. */
-    val reason: String? = null
+    val reason: String? = null,
+    /** Whether the reading can be shown at all, and why not when it cannot. */
+    val availability: MetricAvailability = MetricAvailability.UNSUPPORTED,
+    /** When the reading was taken, on the monotonic clock. */
+    val measuredAtElapsedNanos: Long = 0L,
+    /** How old the frame behind the number is, in milliseconds. */
+    val sampleAgeMs: Long = 0L,
+    /** The exact span of time the current frame rate was measured over. */
+    val measurementWindowMs: Long = 0L,
+    /** Which provider produced the reading. */
+    val sourceKind: FpsSourceKind = FpsSourceKind.NONE,
+    /**
+     * The frame rate that one percent of the frames were slower than.
+     *
+     * Derived from the frame times of the window, not from an average of frame rates:
+     * an average cannot describe the worst frames of a run.
+     */
+    val low1PercentFps: Float? = null,
+    /** The frame rate that five percent of the frames were slower than. */
+    val low5PercentFps: Float? = null,
+    /** The app the reading belongs to. */
+    val appPackage: String? = null,
+    /**
+     * The rate the game is actually presenting at, confirmed over several polls.
+     *
+     * This is observed from the frames themselves. It is not the display rate and
+     * not the user's target: a phone that heats up and drops 120 to 90 is reported
+     * as 90, and a later in-game change back to 120 is picked up again.
+     */
+    val detectedCapFps: Int? = null,
+    /** Why the cap changed: "heat" when thermal mitigation was active, else "measured". */
+    val capCause: String? = null
+)
+
+/** The provider a frame rate reading came from. */
+enum class FpsSourceKind {
+    NONE,
+    /** Presentation timestamps of a verified foreground layer. */
+    SURFACE_FLAINGER_LATENCY,
+    /** SurfaceFlinger frame counters, used as an interval estimate. */
+    TIMESTATS,
+    /** The app's own graphics pipeline. */
+    GFXINFO
+}
+
+/** One real CPU cluster, named from the core numbers the device reports. */
+data class CpuGroupMetric(
+    val name: String,
+    val percent: Float? = null,
+    val freqMHz: Int? = null
+)
+
+/** One thread of the measured app, with its real CPU share of a single core. */
+data class ThreadLoad(
+    val name: String,
+    val percent: Float? = null
 )
 
 /** Device level metrics, refreshed a couple of times per second. */
@@ -27,9 +82,127 @@ data class SystemMetrics(
     val ramTotalGb: Float? = null,
     val ramPercent: Int? = null,
     val thermalMaxC: Float? = null,
+    /** A CPU/SoC named thermal sensor, when the device exposes one. */
+    val cpuTempC: Float? = null,
+    /** GPU load, only when the device exposes a real busy-time counter. */
+    val gpuPercent: Float? = null,
+    /** Per-cluster readings, grouped by the real core capacities the device reports. */
+    val cpuGroups: List<CpuGroupMetric> = emptyList(),
+    /** Real load of each physical core, ordered by core number; null means no reading. */
+    val cpuCoreLoadPct: List<Float?> = emptyList(),
+    /** Real clock of each physical core, in MHz, ordered like [cpuCoreLoadPct]. */
+    val cpuCoreFreqMHz: List<Int?> = emptyList(),
+    /** Memory controller clock, in MHz, when the kernel publishes a devfreq node. */
+    val ddrFreqMHz: Int? = null,
+    /** Busiest real threads of the measured app, largest first. */
+    val threadLoads: List<ThreadLoad> = emptyList(),
+    /** Instantaneous battery current in mA; negative while charging. */
+    val batteryCurrentMa: Float? = null,
+    /** Instantaneous battery voltage in mV. */
+    val batteryVoltageMv: Int? = null,
+    /** Battery charge cycles when the platform reports a real value. */
+    val batteryCycles: Int? = null,
+    /** Android's thermal mitigation level: 0 = none, 1 = light, 2 = moderate, 3 = severe. */
+    val thermalStatus: Int? = null,
+    /** Warmest temperature seen since monitoring began (or since the current recording). */
+    val tempPeakC: Float? = null,
+    /** How far the phone has cooled from that peak, in °C. */
+    val tempCooledC: Float? = null,
     val refreshHz: Float? = null,
-    val updatedAt: Long = 0L
-)
+    val updatedAt: Long = 0L,
+    /** Why each metric is or is not available. A metric missing here is unavailable. */
+    val availability: Map<SystemMetric, MetricAvailability> = emptyMap(),
+    /** Where each metric was read from. */
+    val sources: Map<SystemMetric, String> = emptyMap(),
+    /** When the snapshot was taken, on the monotonic clock. */
+    val measuredAtElapsedNanos: Long = 0L
+) {
+    /**
+     * The state of one metric.
+     *
+     * A metric with no value and no recorded state was never collected, which is
+     * different from one that was collected and is unavailable.
+     */
+    fun availabilityOf(metric: SystemMetric): MetricAvailability =
+        availability[metric] ?: if (isPresent(metric)) {
+            MetricAvailability.AVAILABLE
+        } else {
+            MetricAvailability.UNSUPPORTED
+        }
+
+    /** The collector that produced this metric, when it is known. */
+    fun sourceOf(metric: SystemMetric): String? = sources[metric]
+
+    private fun isPresent(metric: SystemMetric): Boolean = when (metric) {
+        SystemMetric.CPU_PERCENT -> cpuPercent != null
+        SystemMetric.CPU_FREQ_MHZ -> cpuFreqMHz != null
+        SystemMetric.GPU_NAME -> gpuName != null
+        SystemMetric.GPU_FREQ_MHZ -> gpuFreqMHz != null
+        SystemMetric.BATTERY_LEVEL -> batteryLevel != null
+        SystemMetric.BATTERY_TEMP_C -> batteryTempC != null
+        SystemMetric.POWER_WATTS -> powerWatts != null
+        SystemMetric.RAM_USED_GB -> ramUsedGb != null
+        SystemMetric.RAM_TOTAL_GB -> ramTotalGb != null
+        SystemMetric.RAM_PERCENT -> ramPercent != null
+        SystemMetric.THERMAL_MAX_C -> thermalMaxC != null
+        SystemMetric.CPU_TEMP_C -> cpuTempC != null
+        SystemMetric.GPU_PERCENT -> gpuPercent != null
+        SystemMetric.CPU_CORES -> cpuCoreLoadPct.any { it != null }
+        SystemMetric.DDR_FREQ_MHZ -> ddrFreqMHz != null
+        SystemMetric.THREAD_LOAD -> threadLoads.isNotEmpty()
+        SystemMetric.THERMAL_STATUS -> thermalStatus != null
+        SystemMetric.BATTERY_CURRENT_MA -> batteryCurrentMa != null
+        SystemMetric.BATTERY_VOLTAGE_MV -> batteryVoltageMv != null
+        SystemMetric.BATTERY_CYCLES -> batteryCycles != null
+        SystemMetric.REFRESH_HZ -> refreshHz != null
+    }
+}
+
+/**
+ * Temperatures a phone can actually report.
+ *
+ * Several devices return a near-100 value (99.9 is common) from a thermal or
+ * battery sensor that is absent or uncalibrated. A phone switches off long before
+ * 100 °C, so such a reading is a placeholder, never a real heat reading. These
+ * helpers discard it instead of letting it become a "peak" or a chart maximum.
+ */
+const val MAX_BATTERY_TEMP_C = 70f
+const val MAX_HOTSPOT_TEMP_C = 85f
+
+/**
+ * Null, NaN and infinities are not readings. Every value shown to the user goes
+ * through one of these helpers, so a bad number becomes "--" instead of "NaN".
+ */
+fun Float?.finiteOrNull(): Float? = this?.takeIf { !it.isNaN() && !it.isInfinite() }
+fun Float.finiteOrZero(): Float = finiteOrNull() ?: 0f
+
+/** Zero is the "no reading" sentinel, so only values strictly above it count. */
+fun Float?.plausibleTempC(max: Float): Float? =
+    this?.takeIf { !it.isNaN() && !it.isInfinite() && it > 0f && it <= max }
+
+/**
+ * The phone temperature shown to the user.
+ *
+ * The battery sensor is the one every phone exposes in a known unit. The maximum
+ * of every thermal sensor can name a hotspot deep inside the chip, which is not
+ * the temperature of the phone in the hand, so it is only a fallback. Placeholder
+ * values are rejected before either source is used.
+ */
+fun SystemMetrics.deviceTemperatureC(): Float? =
+    batteryTempC.plausibleTempC(MAX_BATTERY_TEMP_C)
+        ?: thermalMaxC.plausibleTempC(MAX_HOTSPOT_TEMP_C)
+
+/** Plain name of Android's thermal mitigation level, or "--" when the device reports none. */
+fun thermalStatusLabel(status: Int?): String = when (status) {
+    null -> "--"
+    0 -> "None"
+    1 -> "Light"
+    2 -> "Moderate"
+    3 -> "Severe"
+    4 -> "Critical"
+    5 -> "Emergency"
+    else -> "Shutdown"
+}
 
 /** A recorded gameplay / app session. */
 data class SessionRecord(
@@ -60,7 +233,115 @@ data class SessionRecord(
     /** Longest frame of the run, in milliseconds. */
     val longestFrameMs: Float = 0f,
     /** Seconds in which the frame rate fell below the target. */
-    val dropSeconds: Int = 0
+    val dropSeconds: Int = 0,
+    /**
+     * The parts of the run that were measured from different apps or different sources.
+     *
+     * The frame rate of two providers is not the same kind of number, so the run is
+     * split where the app or the provider changed instead of one series being drawn
+     * across the boundary.
+     */
+    val segments: List<SessionSegment> = emptyList(),
+    /** Seconds of the run that had no reading at all. */
+    val gapSeconds: Int = 0,
+    /** Highest thermal mitigation level seen in the run (0 = none). */
+    val peakThermalStatus: Int? = null,
+    /** Seconds in which the device reported thermal mitigation. */
+    val throttledSeconds: Int = 0,
+    /** Thermal mitigation level per second, for the chart. */
+    val thermalStatusSeries: List<Float> = emptyList(),
+    /** Mean change between consecutive frame times, in milliseconds. */
+    val jitterMs: Float? = null,
+    /** Spread of the per-second frame rate, in fps². */
+    val fpsVariance: Float? = null,
+    /** Mean battery power draw during the run, in watts. */
+    val avgPowerW: Float? = null,
+    /** The observed frame-rate cap per second; zero means no confirmed cap yet. */
+    val capSeries: List<Float> = emptyList(),
+    /** Every confirmed change of the game's frame-rate cap. */
+    val capChanges: List<CapChange> = emptyList(),
+    /** Seconds in which the cap was lowered while thermal mitigation was active. */
+    val thermalCapSeconds: Int = 0,
+    /** Scene's ≥45 FPS smoothness: share of the steady run at or above 45 fps. */
+    val sceneSmoothnessPercent: Float? = null,
+    /** Device facts captured when Record was pressed; older runs leave these blank. */
+    val device: SessionDeviceInfo = SessionDeviceInfo(),
+    /** Power in watts per second, when the device reports a battery current. */
+    val powerSeries: List<Float> = emptyList(),
+    /** Fastest CPU core clock per second, in MHz. */
+    val cpuFreqSeries: List<Float> = emptyList(),
+    /** GPU clock per second, in MHz. */
+    val gpuFreqSeries: List<Float> = emptyList(),
+    /** Named CPU/SoC sensor temperature per second, in °C, when the device names one. */
+    val cpuTempSeries: List<Float> = emptyList(),
+    /** Max of the real thermal sensors per second; the honest hotspot fallback. */
+    val socTempSeries: List<Float> = emptyList(),
+    /** Real GPU busy time per second, in percent, on devices that expose it. */
+    val gpuPercentSeries: List<Float> = emptyList(),
+    /** Names of the CPU clusters found on this device, in a fixed order. */
+    val cpuGroupNames: List<String> = emptyList(),
+    /** Load per cluster, in the same order as [cpuGroupNames]; null means no reading. */
+    val cpuGroupSeries: List<List<Float?>> = emptyList(),
+    /** Clock per cluster, in the same order as [cpuGroupNames]; null means no reading. */
+    val cpuGroupFreqSeries: List<List<Float?>> = emptyList(),
+    /** Real load of every physical core, one list per core, aligned with the seconds. */
+    val perCoreLoadSeries: List<List<Float?>> = emptyList(),
+    /** Real clock of every physical core, one list per core, aligned with the seconds. */
+    val perCoreFreqSeries: List<List<Int?>> = emptyList(),
+    /** Memory controller clock per second, in MHz. */
+    val ddrFreqSeries: List<Int> = emptyList(),
+    /** Busiest thread names of the measured app, in a fixed order. */
+    val threadNames: List<String> = emptyList(),
+    /** Mean CPU share of each thread, in the same order as [threadNames]. */
+    val threadAvgLoads: List<Float> = emptyList(),
+    /** Peak CPU share of each thread, in the same order as [threadNames]. */
+    val threadMaxLoads: List<Float> = emptyList(),
+    /** Mean battery current in mA during the run, when the device reports it. */
+    val avgCurrentMa: Float? = null,
+    /** Battery voltage in mV during the run, when the device reports it. */
+    val voltageMv: Int? = null,
+    /** Battery charge cycles at the time of the run, when the platform reports them. */
+    val batteryCycles: Int? = null,
+    /** A short raw collector snapshot captured when the run was stopped. */
+    val shellLogs: String = "",
+    /** A note the user writes for this run. */
+    val note: String = ""
+)
+
+/** Device facts stored with a run so an old session still shows the right test setup. */
+data class SessionDeviceInfo(
+    val model: String? = null,
+    val platform: String? = null,
+    val resolution: String? = null,
+    val osVersion: String? = null
+)
+
+/** A confirmed change of the rate the game was presenting at. */
+data class CapChange(
+    /** Seconds from the start of the run. */
+    val second: Int,
+    val fromFps: Int?,
+    val toFps: Int,
+    /** Android's thermal level at that moment, when the device reported one. */
+    val thermalStatus: Int? = null,
+    /** "heat" when mitigation was active and the rate went down, else "measured". */
+    val cause: String = "measured"
+)
+
+/**
+ * One continuous stretch of a session that was measured from one app with one source.
+ */
+data class SessionSegment(
+    val appPackage: String,
+    val source: String,
+    /** Where the segment starts, measured from the beginning of the session. */
+    val startOffsetMs: Long,
+    /** Where the segment ends, measured from the beginning of the session. */
+    val endOffsetMs: Long,
+    /** The frames that were counted in this segment. */
+    val frames: Int,
+    /** The average frame rate of this segment. */
+    val averageFps: Float
 )
 
 /** Aggregated numbers for the session that is currently being recorded. */
@@ -77,7 +358,9 @@ data class LiveStats(
     val maxFrameTimeMs: Float = 0f,
     val durationMs: Long = 0L,
     val maxTempC: Float? = null,
-    val avgCpu: Float? = null
+    val avgCpu: Float? = null,
+    val peakThermalStatus: Int? = null,
+    val throttledSeconds: Int = 0
 )
 
 

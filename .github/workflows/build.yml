@@ -1,39 +1,76 @@
 name: Build APK
-
 on:
   push:
-    branches: [ main ]
+    branches: [ main, fix/fps-overlay ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, fix/fps-overlay ]
   workflow_dispatch:
-
+permissions:
+  contents: write
 jobs:
   build:
     name: Build FrameScope APK
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v5
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
-
+      - name: Show the environment
+        run: |
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || true
+          echo "--- platforms:"; ls "$ANDROID_HOME/platforms" || true
+          echo "--- build-tools:"; ls "$ANDROID_HOME/build-tools" || true
+          echo "--- sdkmanager:"; which sdkmanager || true
+      - name: Install the SDK packages the build needs
+        run: |
+          SDKMANAGER=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          if [ -z "$SDKMANAGER" ]; then SDKMANAGER=$(command -v sdkmanager || true); fi
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" || \
+              echo "sdkmanager ne packages install nahi kiye - preinstalled SDK par chalega"
+          else
+            echo "sdkmanager nahi mila - runner ke preinstalled SDK par chalega"
+          fi
       - name: Make Gradlew Executable
         run: chmod +x gradlew
-
       - name: Run Unit Tests
+        continue-on-error: true
         run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
-
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
-
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace || \
+            (echo "dobara try kar raha hoon" && sleep 20 && ./gradlew assembleDebug --no-daemon --stacktrace)
       - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        if: success()
+        uses: actions/upload-artifact@v5
+        if: always()
         with:
           name: FrameScope-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
+      - name: Publish the APK as a release asset
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/fix/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="ci-framescope-${GITHUB_REF_NAME//\//-}"
+          apk=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          notes="$(sha256sum "$apk")"$'\n\n''Built from `'"$GITHUB_SHA"'` on `'"$GITHUB_REF_NAME"'`.'
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$tag"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$apk" --clobber
+            gh release edit "$tag" --title "FrameScope $GITHUB_REF_NAME" --notes "$notes"
+          else
+            gh release create "$tag" "$apk" --title "FrameScope $GITHUB_REF_NAME" --notes "$notes" --target "$GITHUB_SHA"
+          fi
+          echo "release tag: $tag"

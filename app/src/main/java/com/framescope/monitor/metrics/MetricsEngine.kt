@@ -4,9 +4,13 @@ import android.content.Context
 import com.framescope.monitor.core.AppSettings
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
+import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.ProtectedApps
+import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.CoroutineScope
@@ -20,7 +24,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-/** Drives the sampling loop, keeps live telemetry, and coordinates session logging. */
+/**
+ * Drives the sampling, keeps live telemetry and coordinates session logging.
+ *
+ * The three kinds of measurement run on three separate schedules:
+ *
+ * - The frame rate is sampled on its own clock, because it is the only reading that has
+ *   to be fast, and a slow shell command must never delay it.
+ * - The native device metrics are read on their own clock and do not need Shizuku.
+ * - The privileged metrics are read on a slower clock and only while Shizuku is there.
+ *
+ * A privileged command that takes two seconds therefore cannot hold up the frame rate,
+ * and a phone without Shizuku still shows its battery, its memory and its refresh rate.
+ */
 class MetricsEngine(
     private val hub: ShellHub,
     private val settings: AppSettings,
@@ -29,6 +45,21 @@ class MetricsEngine(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fpsSampler = FpsSampler(hub)
+
+    /** The last app that was measured, for the diagnostics. */
+    val lastMeasuredPackage: StateFlow<String?> get() = fpsSampler.lastMeasuredPackage
+
+    /** The counters the device printed the last time it was asked. */
+    fun lastCounterDump(): String = fpsSampler.lastCounterDump
+
+    /** The text the foreground query answered with the last time it ran. */
+    fun lastForegroundOutput(): String = fpsSampler.lastForegroundOutput
+
+    /** The last five polled readings, newest last. */
+    fun debugFrameLog(): List<Pair<Long, Float>> = fpsSampler.debugFrameLog()
+
+    /** The last five polled readings as text, for the raw probe. */
+    fun debugFrameLogText(): String = fpsSampler.debugFrameLogText()
     private val systemSampler = SystemSampler(hub)
     private val sessionLogger = SessionLogger(store)
 
@@ -36,12 +67,21 @@ class MetricsEngine(
         set(value) {
             field = value
             fpsSampler.context = value
+            nativeCollectors = value?.let { NativeCollectors(it) }
         }
+
+    private var nativeCollectors: NativeCollectors? = null
 
     val fps: StateFlow<FpsState> = fpsSampler.state
 
     private val _system = MutableStateFlow(SystemMetrics())
     val system: StateFlow<SystemMetrics> = _system.asStateFlow()
+
+    /** The metrics that do not need a privileged shell. */
+    private val _native = MutableStateFlow(SystemMetrics())
+
+    /** The metrics that do need one. */
+    private val _privileged = MutableStateFlow(SystemMetrics())
 
     private val _foregroundApp = MutableStateFlow<String?>(null)
     val foregroundApp: StateFlow<String?> = _foregroundApp.asStateFlow()
@@ -66,129 +106,352 @@ class MetricsEngine(
 
     val probeReport: StateFlow<String> = MutableStateFlow("")
 
-    private var loop: Job? = null
-    private var lastAutoApp: String? = null
-    private var autoAppSince = 0L
+    private var fpsJob: Job? = null
+    private var nativeJob: Job? = null
+    private var privilegedJob: Job? = null
 
     fun start() {
-        if (loop?.isActive == true) return
-        loop = scope.launch {
-            var slowCounter = 0
-            while (isActive) {
-                val started = System.currentTimeMillis()
-                val enabled = settings.measurementEnabled.value
-
-                val privilegedReady = hub.status.value.state == AccessState.READY
-                val fpsState = if (enabled && privilegedReady) {
-                    try {
-                        kotlinx.coroutines.withTimeoutOrNull(3000L) {
-                            fpsSampler.sample(settings.fpsThreshold.value)
-                        } ?: run {
-                            _diagnostic.value = "Frame sampler timed out"
-                            null
-                        }
-                    } catch (e: Exception) {
-                        null
-                    }
-                } else if (!enabled) {
-                    fpsSampler.reset()
-                    null
-                } else {
-                    null
-                }
-
-                val currentApp = fpsSampler.foregroundApp
-                _foregroundApp.value = currentApp
-                _measuredLayer.value = fpsSampler.measuredLayer
-
-                _diagnostic.value = when {
-                    !enabled -> null
-                    !privilegedReady -> hub.status.value.detail.ifBlank {
-                        "Shizuku is unavailable. Cached metrics and sessions are preserved."
-                    }
-                    else -> hub.lastError.value
-                        ?: fpsState?.reason
-                        ?: if (fpsState?.valid == false) "Waiting for frame presentation" else null
-                }
-
-                if (hub.status.value.state == AccessState.READY && !settings.setupCompleted.value) {
-                    settings.setupCompleted.value = true
-                }
-
-                updateProtectedFlag()
-                handleAutoRecord(currentApp)
-
-                slowCounter++
-                if (privilegedReady && slowCounter % SLOW_EVERY == 0) {
-                    val metrics = try {
-                        kotlinx.coroutines.withTimeoutOrNull(2500L) {
-                            systemSampler.sample()
-                        }
-                    } catch (e: Exception) {
-                        null
-                    }
-                    if (metrics != null) _system.value = metrics
-                }
-
-                if (fpsState != null && fpsState.valid) {
-                    if (sessionLogger.isRecording) {
-                        sessionLogger.onSample(fpsState, _system.value, settings.fpsThreshold.value)
-                        _live.value = sessionLogger.currentLiveStats()
-                    }
-
-                    // Update live series for chart
-                    val currentList = _liveSeries.value.toMutableList()
-                    currentList.add(fpsState.fps)
-                    if (currentList.size > 60) currentList.removeAt(0)
-                    _liveSeries.value = currentList
-                }
-
-                val elapsed = System.currentTimeMillis() - started
-                val wait = (settings.sampleIntervalMs.value - elapsed).coerceAtLeast(60L)
-                delay(wait)
-            }
-        }
+        if (fpsJob?.isActive == true) return
+        fpsJob = scope.launch { fpsLoop() }
+        nativeJob = scope.launch { nativeLoop() }
+        privilegedJob = scope.launch { privilegedLoop() }
     }
 
     fun stop() {
-        loop?.cancel()
-        loop = null
+        fpsJob?.cancel()
+        nativeJob?.cancel()
+        privilegedJob?.cancel()
+        fpsJob = null
+        nativeJob = null
+        privilegedJob = null
+    }
+
+    /**
+     * The frame rate loop.
+     *
+     * One sample at a time: the next sample only starts after the previous one has
+     * finished, so a slow command cannot pile up.
+     */
+    private suspend fun fpsLoop() {
+        while (scope.isActive) {
+            val started = System.nanoTime()
+            val enabled = settings.measurementEnabled.value
+
+            // The sampler decides for itself what it can read. When Shizuku is gone it
+            // still finds out which app is in front and says that the frame rate needs
+            // a privileged shell, instead of the whole interface going quiet.
+            val fpsState = if (!enabled) {
+                fpsSampler.reset()
+                null
+            } else {
+                try {
+                    // The budget is the sum of what the sources inside need, not
+                    // less: the counters get four seconds, the layer sweep three,
+                    // and a sample cancelled halfway through never reaches the
+                    // source that would have answered.
+                    kotlinx.coroutines.withTimeoutOrNull(SAMPLE_TIMEOUT_MS) {
+                        fpsSampler.sample(
+                            targetFps = settings.fpsThreshold.value,
+                            thermalStatus = _system.value.thermalStatus
+                        )
+                    } ?: run {
+                        _diagnostic.value = "Frame sampler timed out"
+                        null
+                    }
+                } catch (e: Exception) {
+                    null
+                }
+            }
+
+            _foregroundApp.value = fpsSampler.foregroundApp
+            _measuredLayer.value = fpsSampler.measuredLayer
+
+            if (fpsState != null) {
+                _diagnostic.value = when {
+                    fpsState.valid -> null
+                    else -> fpsState.reason ?: "Waiting for frame presentation"
+                }
+            } else if (!enabled) {
+                _diagnostic.value = null
+            }
+
+            if (hub.status.value.state == AccessState.READY && !settings.setupCompleted.value) {
+                settings.setupCompleted.value = true
+            }
+
+            updateProtectedFlag()
+
+            if (fpsState != null && fpsState.valid) {
+                if (sessionLogger.isRecording) {
+                    sessionLogger.onSample(fpsState, _system.value, settings.fpsThreshold.value)
+                    _live.value = sessionLogger.currentLiveStats()
+                }
+
+                val currentList = _liveSeries.value.toMutableList()
+                currentList.add(fpsState.fps)
+                if (currentList.size > 60) currentList.removeAt(0)
+                _liveSeries.value = currentList
+            }
+
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            val wait = (settings.sampleIntervalMs.value - elapsedMs).coerceAtLeast(60L)
+            delay(wait)
+        }
+    }
+
+    /**
+     * The native device metrics.
+     *
+     * These never need Shizuku, so they never stop.
+     */
+    private suspend fun nativeLoop() {
+        while (scope.isActive) {
+            val started = System.nanoTime()
+            try {
+                collectNative()
+            } catch (e: Exception) {
+                // A collector that throws must not take the others with it.
+            }
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            delay((NATIVE_INTERVAL_MS - elapsedMs).coerceAtLeast(100L))
+        }
+    }
+
+    /**
+     * The privileged device metrics.
+     *
+     * They are only read while Shizuku is connected. When it is not, the metrics that
+     * need it are marked as needing it instead of keeping a stale value on screen.
+     */
+    private suspend fun privilegedLoop() {
+        while (scope.isActive) {
+            val started = System.nanoTime()
+            if (hub.status.value.state == AccessState.READY) {
+                try {
+                    val measured = _foregroundApp.value ?: lastMeasuredPackage.value.orEmpty()
+                    kotlinx.coroutines.withTimeoutOrNull(2_500L) {
+                        systemSampler.sample(measured)
+                    }?.let { _privileged.value = it }
+                } catch (e: Exception) {
+                    // Keep the last reading; it is marked stale below.
+                }
+            } else {
+                _privileged.value = SystemMetrics(
+                    availability = PRIVILEGED_METRICS.associateWith {
+                        MetricAvailability.SHIZUKU_REQUIRED
+                    },
+                    sources = PRIVILEGED_METRICS.associateWith { "privileged shell" }
+                )
+            }
+            publishSystem()
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            delay((PRIVILEGED_INTERVAL_MS - elapsedMs).coerceAtLeast(200L))
+        }
+    }
+
+    /** Reads every native metric, each on its own. */
+    private fun collectNative() {
+        val collectors = nativeCollectors ?: return
+        val availability = mutableMapOf<SystemMetric, MetricAvailability>()
+        val sources = mutableMapOf<SystemMetric, String>()
+
+        val battery = collectors.battery()
+        availability[SystemMetric.BATTERY_LEVEL] = battery.availability
+        availability[SystemMetric.BATTERY_TEMP_C] = battery.availability
+        availability[SystemMetric.POWER_WATTS] = battery.availability
+        availability[SystemMetric.BATTERY_CURRENT_MA] = battery.availability
+        availability[SystemMetric.BATTERY_VOLTAGE_MV] = battery.availability
+        availability[SystemMetric.BATTERY_CYCLES] = battery.availability
+        sources[SystemMetric.BATTERY_LEVEL] = battery.source
+        sources[SystemMetric.BATTERY_TEMP_C] = battery.source
+        sources[SystemMetric.POWER_WATTS] = battery.source
+        sources[SystemMetric.BATTERY_CURRENT_MA] = battery.source
+        sources[SystemMetric.BATTERY_VOLTAGE_MV] = battery.source
+        sources[SystemMetric.BATTERY_CYCLES] = battery.source
+
+        val memory = collectors.memory()
+        availability[SystemMetric.RAM_USED_GB] = memory.availability
+        availability[SystemMetric.RAM_TOTAL_GB] = memory.availability
+        availability[SystemMetric.RAM_PERCENT] = memory.availability
+        sources[SystemMetric.RAM_USED_GB] = memory.source
+        sources[SystemMetric.RAM_TOTAL_GB] = memory.source
+        sources[SystemMetric.RAM_PERCENT] = memory.source
+
+        val refresh = collectors.refreshRate()
+        availability[SystemMetric.REFRESH_HZ] = refresh.availability
+        sources[SystemMetric.REFRESH_HZ] = refresh.source
+
+        val batteryValue = battery.value
+        val memoryValue = memory.value
+
+        _native.value = SystemMetrics(
+            batteryLevel = batteryValue?.levelPercent,
+            batteryTempC = batteryValue?.temperatureC,
+            powerWatts = batteryValue?.watts,
+            batteryCurrentMa = batteryValue?.currentMicroAmps?.let { it / 1_000f },
+            batteryVoltageMv = batteryValue?.voltageMilliVolts,
+            batteryCycles = batteryValue?.cycleCount,
+            ramUsedGb = memoryValue?.usedBytes?.let { it / 1_073_741_824f },
+            ramTotalGb = memoryValue?.totalBytes?.let { it / 1_073_741_824f },
+            ramPercent = memoryValue?.let {
+                if (it.totalBytes > 0L) (it.usedBytes * 100 / it.totalBytes).toInt() else null
+            },
+            refreshHz = refresh.value,
+            updatedAt = System.currentTimeMillis(),
+            availability = availability,
+            sources = sources,
+            measuredAtElapsedNanos = android.os.SystemClock.elapsedRealtimeNanos()
+        )
+        publishSystem()
+    }
+
+    /** Puts the native and the privileged readings into one snapshot. */
+    private fun publishSystem() {
+        val native = _native.value
+        val privileged = _privileged.value
+        val merged = SystemMetrics(
+            cpuPercent = privileged.cpuPercent,
+            cpuFreqMHz = privileged.cpuFreqMHz,
+            gpuName = privileged.gpuName,
+            gpuFreqMHz = privileged.gpuFreqMHz,
+            batteryLevel = native.batteryLevel,
+            batteryTempC = native.batteryTempC,
+            powerWatts = native.powerWatts,
+            ramUsedGb = native.ramUsedGb,
+            ramTotalGb = native.ramTotalGb,
+            ramPercent = native.ramPercent,
+            batteryCurrentMa = native.batteryCurrentMa,
+            batteryVoltageMv = native.batteryVoltageMv,
+            batteryCycles = native.batteryCycles,
+            thermalMaxC = privileged.thermalMaxC,
+            cpuTempC = privileged.cpuTempC,
+            gpuPercent = privileged.gpuPercent,
+            cpuGroups = privileged.cpuGroups,
+            cpuCoreLoadPct = privileged.cpuCoreLoadPct,
+            cpuCoreFreqMHz = privileged.cpuCoreFreqMHz,
+            ddrFreqMHz = privileged.ddrFreqMHz,
+            threadLoads = privileged.threadLoads,
+            thermalStatus = privileged.thermalStatus,
+            refreshHz = native.refreshHz,
+            updatedAt = maxOf(native.updatedAt, privileged.updatedAt),
+            availability = native.availability + privileged.availability,
+            sources = native.sources + privileged.sources,
+            measuredAtElapsedNanos = maxOf(
+                native.measuredAtElapsedNanos,
+                privileged.measuredAtElapsedNanos
+            )
+        )
+
+        // Keep the hottest value until the phone actually drops below it. A dip
+        // between two readings must not erase the peak, or "cooled down" lies.
+        val previous = _system.value
+        val now = merged.deviceTemperatureC()
+        val peak = when {
+            now == null -> previous.tempPeakC
+            previous.tempPeakC == null || now > previous.tempPeakC -> now
+            else -> previous.tempPeakC
+        }
+        val cooled = if (now != null && peak != null) {
+            (peak - now).coerceAtLeast(0f)
+        } else null
+        _system.value = merged.copy(tempPeakC = peak, tempCooledC = cooled)
+    }
+
+    /** Where the foreground answer came from, in words a user can read. */
+    fun foregroundSourceName(): String = when (fpsSampler.foregroundSource) {
+        ForegroundDetector.Source.PRIVILEGED -> "privileged window manager"
+        ForegroundDetector.Source.USAGE_STATS -> "usage access (approximate)"
+        ForegroundDetector.Source.NONE -> "unknown"
+    }
+
+    /** Whether the foreground answer is known to be exact. */
+    fun foregroundIsExact(): Boolean = fpsSampler.foregroundConfident
+
+    /** Why the current target was chosen, or why there is none. */
+    fun measuredLayerReason(): String = fpsSampler.targetReason
+
+    /** Captures the test setup once, so an old session still shows its real device. */
+    private fun deviceSnapshot(): SessionDeviceInfo {
+        val ctx = androidContext ?: return SessionDeviceInfo()
+        val model = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" ")
+            .takeIf { it.isNotBlank() }
+        val platform = android.os.Build.HARDWARE
+            .takeIf { it.isNotBlank() && !it.equals("unknown", true) }
+        val metrics = android.util.DisplayMetrics()
+        runCatching {
+            val manager = ctx.getSystemService(Context.WINDOW_SERVICE)
+                as? android.view.WindowManager
+            @Suppress("DEPRECATION")
+            manager?.defaultDisplay?.getRealMetrics(metrics)
+        }
+        val resolution = if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+            "${metrics.widthPixels} x ${metrics.heightPixels}"
+        } else null
+        return SessionDeviceInfo(
+            model = model,
+            platform = platform,
+            resolution = resolution,
+            osVersion = "Android ${android.os.Build.VERSION.RELEASE} " +
+                "(SDK ${android.os.Build.VERSION.SDK_INT})"
+        )
     }
 
     fun startRecording() {
         if (_recording.value) return
+        // The Record button is tapped inside FrameScope, so the foreground app at
+        // that moment is FrameScope, not the game the run belongs to. The sampler
+        // remembers the last real game while FrameScope is in front; use it for
+        // the session name and let the samples switch app if the player moves.
         val current = _foregroundApp.value.orEmpty()
-        val label = appLabel(current)
-        sessionLogger.start(current, label, _system.value.batteryLevel)
+        val own = com.framescope.monitor.BuildConfig.APPLICATION_ID
+        val remembered = lastMeasuredPackage.value.orEmpty()
+        val target = if (current.isBlank() || current == own ||
+            current.contains("launcher") || current == "com.android.systemui"
+        ) {
+            remembered.takeIf { it.isNotBlank() && it != own } ?: current
+        } else current
+        val label = appLabel(target)
+        // Per-core and per-thread loads are differences between two reads. Starting a
+        // new run with the old counters would report the idle time before Record.
+        systemSampler.resetDeltas()
+        sessionLogger.start(target, label, _system.value.batteryLevel, deviceSnapshot())
+        // A recording is its own heat story: start the peak from the temperature at
+        // the moment Record was pressed, not from a hot session earlier today.
+        val atStart = _system.value.deviceTemperatureC()
+        _system.value = _system.value.copy(tempPeakC = atStart, tempCooledC = 0f.takeIf { atStart != null })
         _recording.value = true
         _live.value = LiveStats()
     }
 
+    /** Stop pressed by the user. Nothing starts a recording except the button. */
+    fun stopRecordingManually(): SessionRecord? = stopRecording()
+
     fun stopRecording(): SessionRecord? {
         if (!_recording.value) return null
         _recording.value = false
-        val record = sessionLogger.stop(settings.fpsThreshold.value)
+        val record = sessionLogger.stop(settings.fpsThreshold.value, sessionShellLogs())
         _live.value = LiveStats()
         return record
     }
 
-    private fun handleAutoRecord(currentApp: String?) {
-        if (!settings.autoRecord.value) {
-            if (_recording.value) stopRecording()
-            lastAutoApp = null
-            return
+    /** A short, real collector snapshot stored with the run for its Shell Logs card. */
+    private fun sessionShellLogs(): String = buildString {
+        appendLine("captured_from=${lastMeasuredPackage.value ?: "(none)"} " +
+            "at=${android.os.SystemClock.uptimeMillis()}")
+        appendLine("active shell: ${hub.status.value.shellSource}")
+        appendLine("--- window manager ---")
+        appendLine(lastForegroundOutput().take(3_000).trim().ifBlank { "--" })
+        appendLine("--- frame counters ---")
+        appendLine(lastCounterDump().take(6_000).trim().ifBlank { "--" })
+        hub.lastError.value?.takeIf { it.isNotBlank() }?.let {
+            appendLine("--- last collector error ---")
+            appendLine(it.trim())
         }
-        if (currentApp.isNullOrBlank()) return
-        if (currentApp != lastAutoApp) {
-            if (_recording.value) stopRecording()
-            lastAutoApp = currentApp
-            autoAppSince = System.currentTimeMillis()
-            return
-        }
-        if (_recording.value) return
-        if (System.currentTimeMillis() - autoAppSince < MIN_AUTO_RECORD_MS) return
-        startRecording()
-    }
+    }.trimEnd()
 
     private fun updateProtectedFlag() {
         val current = _foregroundApp.value
@@ -212,7 +475,34 @@ class MetricsEngine(
     }
 
     companion object {
-        private const val SLOW_EVERY = 3
-        private const val MIN_AUTO_RECORD_MS = 3_000L
+        /**
+         * The longest one frame-rate sample may take.
+         *
+         * It has to cover the slowest source inside it - the counters wait up to
+         * four seconds for SurfaceFlinger - or the sample is cancelled before the
+         * source that works for a game gets its turn.
+         */
+        private const val SAMPLE_TIMEOUT_MS = 12_000L
+
+        /** How often the native device metrics are read. */
+        private const val NATIVE_INTERVAL_MS = 1_000L
+
+        /** How often the privileged device metrics are read. */
+        private const val PRIVILEGED_INTERVAL_MS = 3_000L
+
+        /** The metrics that need a privileged shell. */
+        private val PRIVILEGED_METRICS = listOf(
+            SystemMetric.CPU_PERCENT,
+            SystemMetric.CPU_FREQ_MHZ,
+            SystemMetric.GPU_NAME,
+            SystemMetric.GPU_FREQ_MHZ,
+            SystemMetric.GPU_PERCENT,
+            SystemMetric.THERMAL_MAX_C,
+            SystemMetric.CPU_TEMP_C,
+            SystemMetric.CPU_CORES,
+            SystemMetric.DDR_FREQ_MHZ,
+            SystemMetric.THREAD_LOAD,
+            SystemMetric.THERMAL_STATUS
+        )
     }
 }

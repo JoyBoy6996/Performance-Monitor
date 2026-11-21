@@ -108,10 +108,13 @@ private val DarkScheme = darkColorScheme(
     onPrimary = Color(0xFF003547),
     primaryContainer = Color(0xFF0B3E55),
     onPrimaryContainer = Color(0xFFC4E9FF),
-    secondary = Color(0xFF6FE0C0),
-    onSecondary = Color(0xFF00382B),
-    secondaryContainer = Color(0xFF0C4A3B),
-    onSecondaryContainer = Color(0xFFB9F5E0),
+    // The secondary role is a quiet slate blue. It used to be green, which put green on every
+    // tonal button, slider track and navigation indicator and made a healthy frame rate
+    // indistinguishable from the chrome around it.
+    secondary = Color(0xFF8FB3C9),
+    onSecondary = Color(0xFF0E2029),
+    secondaryContainer = Color(0xFF16303D),
+    onSecondaryContainer = Color(0xFFBBD9E8),
     tertiary = Color(0xFFFFB877),
     onTertiary = Color(0xFF442200),
     tertiaryContainer = Color(0xFF5E3200),
@@ -144,10 +147,10 @@ private val LightScheme = lightColorScheme(
     onPrimary = Color(0xFFFFFFFF),
     primaryContainer = Color(0xFFC8E6FF),
     onPrimaryContainer = Color(0xFF001E2C),
-    secondary = Color(0xFF006B57),
+    secondary = Color(0xFF4A6577),
     onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFB8F0E0),
-    onSecondaryContainer = Color(0xFF002018),
+    secondaryContainer = Color(0xFFDDE9F1),
+    onSecondaryContainer = Color(0xFF10242F),
     tertiary = Color(0xFF8A5000),
     onTertiary = Color(0xFFFFFFFF),
     tertiaryContainer = Color(0xFFFFDDB8),
@@ -203,7 +206,7 @@ fun FrameScopeTheme(
             // depend on the wallpaper the user picked, so only light/dark is swapped.
             androidx.compose.runtime.CompositionLocalProvider(
                 LocalStatusColors provides if (dark) DarkStatus else LightStatus,
-                LocalGlassColors provides glassColors(dark, colors.surface),
+                LocalSurfaceColors provides surfaceColors(colors),
                 LocalMotionEnabled provides motionEnabled,
                 content = content
             )

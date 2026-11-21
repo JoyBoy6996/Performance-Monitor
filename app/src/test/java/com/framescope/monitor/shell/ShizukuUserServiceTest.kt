@@ -31,7 +31,7 @@ class ShizukuUserServiceTest {
     fun truncatesBothOutputStreamsBeforeReturningBinderResult() {
         val result = ShizukuUserService().execute(
             "large-output",
-            "head -c 100000 /dev/zero | tr '\\0' x; head -c 100000 /dev/zero | tr '\\0' y >&2",
+            "head -c 400000 /dev/zero | tr '\\0' x; head -c 400000 /dev/zero | tr '\\0' y >&2",
             5_000
         )
         val stdout = result.getString(ShizukuUserService.KEY_STDOUT).orEmpty()
@@ -44,7 +44,9 @@ class ShizukuUserServiceTest {
         val parcel = Parcel.obtain()
         try {
             parcel.writeBundle(result)
-            assertTrue(parcel.dataSize() < 256 * 1024)
+            // The result carries one capped stream per side and stays inside what a
+            // binder transaction can hold.
+            assertTrue(parcel.dataSize() < 600 * 1024)
         } finally {
             parcel.recycle()
         }

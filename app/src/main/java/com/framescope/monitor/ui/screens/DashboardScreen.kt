@@ -2,6 +2,8 @@ package com.framescope.monitor.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import com.framescope.monitor.ui.Diagnostics
@@ -49,7 +51,11 @@ import com.framescope.monitor.AppContainer
 import com.framescope.monitor.BuildConfig
 import com.framescope.monitor.core.CrashLog
 import com.framescope.monitor.core.FpsState
+import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.deviceTemperatureC
+import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.BarMeter
@@ -60,6 +66,7 @@ import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.Sparkline
 import com.framescope.monitor.ui.components.StatCell
 import com.framescope.monitor.ui.components.StatusPill
+import com.framescope.monitor.ui.components.TerminalBlock
 import com.framescope.monitor.ui.components.fpsStateColor
 import com.framescope.monitor.ui.components.rememberPulseAlpha
 import com.framescope.monitor.ui.theme.MonoInline
@@ -91,6 +98,7 @@ fun DashboardScreen(
     LaunchedEffect(Unit) { crash = CrashLog.last(context) }
     val measuring by container.settings.measurementEnabled.flow.collectAsState()
     val setupDone by container.settings.setupCompleted.flow.collectAsState()
+    val probeReport by container.engine.probeReport.collectAsState()
 
     val accessColor = if (status.state == AccessState.READY) {
         MaterialTheme.status.good
@@ -122,13 +130,22 @@ fun DashboardScreen(
         }
 
         if (status.state != AccessState.READY) {
+            // Shizuku only gates the readings that genuinely need a privileged shell.
+            // The native ones - battery, memory, refresh rate - keep working, so this
+            // is a note about what is missing rather than a blocker for everything.
             item {
                 AccessBanner(
-                    title = if (setupDone) "Not connected right now" else "Privileged access needed",
+                    title = if (setupDone) "Frame timing needs Shizuku" else "Privileged access needed",
                     detail = if (setupDone) {
-                        status.detail.ifBlank { "Shizuku is not answering. Open Settings to check the connection." }
+                        status.detail.ifBlank {
+                            "Shizuku is not answering, so the frame rate and the CPU and GPU " +
+                                "readings are paused. Battery, memory and refresh rate keep working."
+                        }
                     } else {
-                        status.detail.ifBlank { "Run the one-time setup to unlock real frame rate data." }
+                        status.detail.ifBlank {
+                            "Run the one-time setup to unlock the frame rate. Battery, memory " +
+                                "and refresh rate work without it."
+                        }
                     },
                     onOpenSettings = onOpenSettings
                 )
@@ -143,26 +160,19 @@ fun DashboardScreen(
             }
         }
 
+        // The reading comes first. Everything below it explains the reading.
         item {
-            ProbePanel(container = container)
-        }
-
-        item {
-            DiagnosticsRow(container = container)
+            HeroPanel(
+                fps = if (measuring) fps else FpsState(),
+                layer = if (measuring) layer else null,
+                threshold = threshold
+            )
         }
 
         item {
             MeasurementPanel(
                 measuring = measuring,
                 onToggle = { container.settings.measurementEnabled.value = !measuring }
-            )
-        }
-
-        item {
-            HeroPanel(
-                fps = if (measuring) fps else FpsState(),
-                layer = if (measuring) layer else null,
-                threshold = threshold
             )
         }
 
@@ -196,10 +206,12 @@ fun DashboardScreen(
                 durationMs = live.durationMs,
                 maxTempC = live.maxTempC,
                 avgCpu = live.avgCpu,
+                peakThermalStatus = live.peakThermalStatus,
+                throttledSeconds = live.throttledSeconds,
                 threshold = threshold,
                 onToggleRecording = {
                     if (recording) {
-                        container.engine.stopRecording()
+                        container.engine.stopRecordingManually()
                         val stopIntent = android.content.Intent(context, com.framescope.monitor.recorder.ScreenRecorderService::class.java).apply {
                             action = com.framescope.monitor.recorder.ScreenRecorderService.ACTION_STOP
                         }
@@ -214,6 +226,14 @@ fun DashboardScreen(
         item { SectionHeader("Device") }
 
         item { DevicePanel(system) }
+
+        if (probeReport.isNotBlank()) {
+            item { SectionHeader("Diagnostics") }
+
+            item { ProbePanel(container = container) }
+        }
+
+        item { DiagnosticsRow(container = container) }
     }
 }
 
@@ -271,16 +291,18 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
     }
 
     Panel {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            FpsGauge(
-                value = fps.fps,
-                target = threshold,
-                maxValue = ceiling,
-                diameter = 148.dp
-            )
-            Spacer(Modifier.width(Space.lg))
-            Column(Modifier.weight(1f)) {
-                StatusPill(text = stateText, color = stateColor)
+        BoxWithConstraints {
+            // The gauge and the numbers only sit side by side when there is room for both.
+            // On a narrow phone the reading stays square and the numbers go under it.
+            val stacked = maxWidth < 320.dp
+
+            val details: @Composable ColumnScope.() -> Unit = {
+                // The gauge already carries the colour. The chip is a label next to it.
+                StatusPill(
+                    text = stateText,
+                    color = stateColor,
+                    textColor = MaterialTheme.colorScheme.onSurface
+                )
                 Spacer(Modifier.height(Space.md))
                 MetricLine(
                     label = "Frame time",
@@ -311,6 +333,26 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
                     value = fps.source,
                     accent = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                // How old the frame behind the number is, and how long the number was
+                // measured over. Without them a number cannot be judged.
+                MetricLine(
+                    label = "Sample age",
+                    value = if (fps.valid) "${fps.sampleAgeMs} ms" else "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "Measured over",
+                    value = if (fps.valid) "${fps.measurementWindowMs} ms" else "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!fps.valid && !fps.reason.isNullOrBlank()) {
+                    Text(
+                        text = fps.reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = Space.xs)
+                    )
+                }
                 if (layer != null && fps.source.startsWith("SurfaceFlinger")) {
                     Text(
                         text = layer,
@@ -320,6 +362,33 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 2.dp)
                     )
+                }
+            }
+
+            if (stacked) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    FpsGauge(
+                        value = fps.fps,
+                        target = threshold,
+                        maxValue = ceiling,
+                        diameter = 168.dp
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    Column(Modifier.fillMaxWidth()) { details() }
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FpsGauge(
+                        value = fps.fps,
+                        target = threshold,
+                        maxValue = ceiling,
+                        diameter = 148.dp
+                    )
+                    Spacer(Modifier.width(Space.lg))
+                    Column(Modifier.weight(1f)) { details() }
                 }
             }
         }
@@ -342,8 +411,8 @@ private fun SelfMeasureNotice() {
             color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-            text = "Open the app or game you want to measure. The overlay keeps the " +
-                "numbers visible while you play.",
+            text = "Open the app or game you want to measure. The overlay keeps the numbers " +
+                "visible while you play.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 2.dp)
@@ -374,9 +443,9 @@ private fun MeasurementPanel(measuring: Boolean, onToggle: () -> Unit) {
                 )
                 Text(
                     text = if (measuring) {
-                        "The frame rate is sampled and the overlay follows. Turn it off to stop both."
+                        "The frame rate is sampled and the overlay follows."
                     } else {
-                        "Nothing is sampled and the overlay is hidden. Turn it on to measure again."
+                        "Nothing is sampled and the overlay is hidden."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -385,9 +454,9 @@ private fun MeasurementPanel(measuring: Boolean, onToggle: () -> Unit) {
             }
             Spacer(Modifier.width(Space.md))
             if (measuring) {
-                Button(
+                FilledTonalButton(
                     onClick = onToggle,
-                    colors = ButtonDefaults.buttonColors(
+                    colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = MaterialTheme.status.criticalContainer,
                         contentColor = MaterialTheme.status.onCriticalContainer
                     )
@@ -500,6 +569,10 @@ private fun ProbePanel(container: AppContainer) {
     }
 }
 
+/** Makes copied evidence harmless if it is pasted into a shell by mistake. */
+private fun shellSafeText(text: String): String =
+    text.lines().joinToString("\n") { line -> if (line.isBlank()) "#" else "# $line" }
+
 /**
  * One button that copies the evidence for a wrong reading.
  *
@@ -511,13 +584,17 @@ private fun DiagnosticsRow(container: AppContainer) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val status by container.hub.status.collectAsState()
+    val lastMeasured by container.engine.lastMeasuredPackage.collectAsState()
+    val layer by container.engine.measuredLayer.collectAsState()
     var message by remember { mutableStateOf<String?>(null) }
     var running by remember { mutableStateOf(false) }
+    var probeOutput by remember { mutableStateOf("") }
+    var probing by remember { mutableStateOf(false) }
 
     Panel {
         Text(
-            text = "Something looks wrong with the numbers? Copy the diagnostics and send " +
-                "them over - it shows exactly what FrameScope saw.",
+            text = "Wrong numbers? Copy the diagnostics and send them over. It shows exactly " +
+                "what FrameScope saw.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -528,32 +605,71 @@ private fun DiagnosticsRow(container: AppContainer) {
             horizontalArrangement = Arrangement.spacedBy(Space.sm)
         ) {
             FilledTonalButton(
+                enabled = !probing,
+                onClick = {
+                    probing = true
+                    probeOutput = "Reading the layers..."
+                    scope.launch {
+                        val pkg = lastMeasured
+                        val result = container.hub.execOrNull(
+                            Diagnostics.probeCommand(pkg, layer, container.engine.debugFrameLogText()),
+                            20_000
+                        )
+                        probeOutput = if (result == null) {
+                            "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
+                        } else {
+                            (result.out + "\n" + result.err).trim()
+                        }
+                        probing = false
+                    }
+                }
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Text(
+                    if (lastMeasured.isNullOrBlank()) "Raw probe" else "Raw probe (${lastMeasured})",
+                    modifier = Modifier.padding(start = 6.dp)
+                )
+            }
+            FilledTonalButton(
                 enabled = !running,
                 onClick = {
                     running = true
                     message = null
                     scope.launch {
+                        // One button means one clipboard: the report and the raw
+                        // probe for the last measured game are copied together.
+                        val pkg = lastMeasured
+                        val probe = container.hub.execOrNull(
+                            Diagnostics.probeCommand(
+                                pkg,
+                                layer,
+                                container.engine.debugFrameLogText()
+                            ),
+                            20_000
+                        )
+                        val probeText = probe?.let { (it.out + "\n" + it.err).trim() }
+                            ?.takeIf { it.isNotEmpty() }
+                            ?: "The raw probe could not run."
+                        probeOutput = probeText
                         val result = container.hub.execOrNull(Diagnostics.command, 20_000)
                         val shell = result?.let { (it.out + "\n" + it.err).trim() }
                             ?.takeIf { it.isNotEmpty() }
                             ?: "Shizuku is unavailable. Start it and complete setup first."
-                        val probe = container.engine.probeReport.value.trim()
-                        val text = buildString {
-                            append("--- status ---")
-                            append('\n')
-                            append("state: ")
-                            append(status.state.name.lowercase())
-                            append('\n')
-                            append("privileged service: Shizuku UserService")
-                            append('\n')
-                            append("--- frame source ---")
-                            append('\n')
-                            append(if (probe.isBlank()) "(none)" else probe)
-                            append('\n')
-                            append(shell)
-                        }
-                        Diagnostics.copy(context, text)
-                        message = "Copied to the clipboard - paste it in the chat."
+                        val report = com.framescope.monitor.metrics.DiagnosticsReport.build(
+                            context = context,
+                            hub = container.hub,
+                            engine = container.engine,
+                            settings = container.settings,
+                            shellOutput = shell
+                        )
+                        val text = report + "\n\n--- raw probe for " +
+                            (pkg ?: "the last app") + " ---\n" + probeText
+                        Diagnostics.copy(context, shellSafeText(text))
+                        message = "Copied report + raw probe - paste it in the chat."
                         running = false
                     }
                 }
@@ -563,7 +679,7 @@ private fun DiagnosticsRow(container: AppContainer) {
                     contentDescription = null,
                     modifier = Modifier.size(16.dp)
                 )
-                Text("Copy diagnostics", modifier = Modifier.padding(start = 6.dp))
+                Text("Copy all", modifier = Modifier.padding(start = 6.dp))
             }
         }
         if (message != null) {
@@ -574,13 +690,51 @@ private fun DiagnosticsRow(container: AppContainer) {
                 modifier = Modifier.padding(top = Space.sm)
             )
         }
+        // The probe runs by itself when the screen opens so the answer is ready to
+        // read, but it never touches the clipboard. Copy all already includes the
+        // raw probe, and an automatic copy here would overwrite the full report the
+        // user just copied as soon as this screen opens again.
+        LaunchedEffect(Unit) {
+            val pkg = lastMeasured
+            val result = container.hub.execOrNull(
+                Diagnostics.probeCommand(pkg, layer, container.engine.debugFrameLogText()),
+                20_000
+            )
+            probeOutput = if (result == null) {
+                "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
+            } else {
+                (result.out + "\n" + result.err).trim()
+            }
+        }
+
+        if (probeOutput.isNotEmpty()) {
+            Spacer(Modifier.height(Space.md))
+            Text(
+                text = "What SurfaceFlinger answers for " +
+                    (lastMeasured ?: "the last app") + " - a screenshot of this is enough to fix it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(Space.sm))
+            // The same marker is printed by the probe, but it is easy to miss in
+            // a long terminal block. Showing it here means the capture is always
+            // identifiable by eye, even before the text is copied anywhere.
+            Text(
+                text = "captured_from=${lastMeasured ?: "none"} at=" +
+                    (container.engine.debugFrameLog().lastOrNull()?.first?.toString() ?: "0"),
+                style = MonoInline.copy(fontSize = 10.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(Space.xs))
+            TerminalBlock(text = probeOutput, maxLines = 40)
+        }
     }
 }
 
 @Composable
 private fun SystemPanel(system: SystemMetrics) {
     val cpu = system.cpuPercent
-    val temp = system.thermalMaxC
+    val temp = system.deviceTemperatureC()
     val tempColor = when {
         temp == null -> MaterialTheme.colorScheme.onSurface
         temp >= 45 -> MaterialTheme.status.critical
@@ -598,6 +752,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "%",
                 accent = MaterialTheme.colorScheme.onSurface,
                 meter = cpu?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.CPU_PERCENT),
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -606,6 +761,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 value = system.gpuFreqMHz?.toString() ?: "--",
                 unit = system.gpuFreqMHz?.let { "MHz" } ?: "",
                 accent = MaterialTheme.colorScheme.onSurface,
+                availability = system.availabilityOf(SystemMetric.GPU_FREQ_MHZ),
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -615,6 +771,11 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "°C",
                 accent = tempColor,
                 meter = temp?.let { (it / 60f).coerceIn(0f, 1f) },
+                availability = if (system.batteryTempC != null) {
+                    system.availabilityOf(SystemMetric.BATTERY_TEMP_C)
+                } else {
+                    system.availabilityOf(SystemMetric.THERMAL_MAX_C)
+                },
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -629,6 +790,7 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "%",
                 accent = good,
                 meter = system.batteryLevel?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.BATTERY_LEVEL),
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -638,26 +800,66 @@ private fun SystemPanel(system: SystemMetrics) {
                 unit = "%",
                 accent = MaterialTheme.colorScheme.onSurface,
                 meter = system.ramPercent?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.RAM_PERCENT),
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             StatCell(
                 label = "Power",
-                value = system.powerWatts?.let { String.format("%.1f", it) } ?: "--",
+                value = system.powerWatts.finiteOrNull()?.let { String.format("%.1f", it) } ?: "--",
                 unit = "W",
                 accent = warn,
+                availability = system.availabilityOf(SystemMetric.POWER_WATTS),
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
+        system.thermalStatus?.let { status ->
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = Space.md),
+                color = MaterialTheme.colorScheme.outlineVariant
+            )
+            MetricLine(
+                label = "Thermal state",
+                value = thermalStatusLabel(status),
+                accent = if (status > 0) MaterialTheme.status.warn else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(vertical = Space.md),
+            color = MaterialTheme.colorScheme.outlineVariant
+        )
+        Text(
+            text = "Live temperature",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        MetricLine(
+            label = "Now",
+            value = temp?.let { String.format("%.1f°C", it) } ?: "--",
+            accent = tempColor
+        )
+        MetricLine(
+            label = "Peak",
+            value = system.tempPeakC?.let { String.format("%.1f°C", it) } ?: "--",
+            accent = MaterialTheme.status.warn
+        )
+        MetricLine(
+            label = "Cooled from peak",
+            value = system.tempCooledC?.let { String.format("%.1f°C", it) } ?: "--",
+            accent = if ((system.tempCooledC ?: 0f) >= 0.1f) {
+                MaterialTheme.status.good
+            } else MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
 @Composable
 private fun HistoryPanel(fps: FpsState, series: List<Float>, layer: String?, threshold: Int) {
-    val history = series.ifEmpty { fps.history }
+    val history = series.ifEmpty { fps.history }.filter { it.finiteOrNull() != null }
     val stateColor = fpsStateColor(fps.fps, threshold)
     val min = history.minOrNull()
-    val avg = if (history.isEmpty()) null else history.average().toFloat()
+    val avg = if (history.isEmpty()) null else history.average().toFloat().finiteOrNull()
     val max = history.maxOrNull()
 
     Panel {
@@ -703,7 +905,7 @@ private fun HistoryPanel(fps: FpsState, series: List<Float>, layer: String?, thr
 private fun HistoryStat(label: String, value: String) {
     Column(horizontalAlignment = Alignment.Start) {
         Text(
-            text = label.uppercase(),
+            text = label,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -729,6 +931,8 @@ private fun SessionPanel(
     durationMs: Long,
     maxTempC: Float?,
     avgCpu: Float?,
+    peakThermalStatus: Int?,
+    throttledSeconds: Int,
     threshold: Int,
     onToggleRecording: () -> Unit
 ) {
@@ -758,9 +962,9 @@ private fun SessionPanel(
             }
 
             if (recording) {
-                Button(
+                FilledTonalButton(
                     onClick = onToggleRecording,
-                    colors = ButtonDefaults.buttonColors(
+                    colors = ButtonDefaults.filledTonalButtonColors(
                         containerColor = MaterialTheme.status.criticalContainer,
                         contentColor = MaterialTheme.status.onCriticalContainer
                     )
@@ -789,7 +993,7 @@ private fun SessionPanel(
 
         if (totalFrames == 0) {
             Text(
-                text = "Averages, lows and jank counts appear here once a recording has samples.",
+                text = "Averages, lows and jank appear once the recording has samples.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = Space.md)
@@ -854,6 +1058,22 @@ private fun SessionPanel(
                 accent = MaterialTheme.status.warn
             )
         }
+        if (peakThermalStatus != null) {
+            MetricLine(
+                label = "Thermal state",
+                value = thermalStatusLabel(peakThermalStatus),
+                accent = if (peakThermalStatus > 0) {
+                    MaterialTheme.status.warn
+                } else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (throttledSeconds > 0) {
+            MetricLine(
+                label = "Throttled time",
+                value = String.format("%d:%02d", throttledSeconds / 60, throttledSeconds % 60),
+                accent = MaterialTheme.status.warn
+            )
+        }
         if (avgCpu != null) {
             MetricLine(
                 label = "Average CPU",
@@ -872,34 +1092,28 @@ private fun SessionPanel(
 @Composable
 private fun DevicePanel(system: SystemMetrics) {
     Panel {
-        system.gpuName?.let {
-            MetricLine(
-                label = "GPU",
-                value = it.take(34),
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
-        system.refreshHz?.let {
-            MetricLine(
-                label = "Refresh rate",
-                value = "${it.roundToInt()} Hz",
-                accent = MaterialTheme.status.good
-            )
-        }
-        system.cpuFreqMHz?.let {
-            MetricLine(
-                label = "CPU clock",
-                value = "$it MHz",
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
-        system.ramTotalGb?.let { total ->
-            MetricLine(
-                label = "Memory",
-                value = "${String.format("%.1f", system.ramUsedGb ?: 0f)} / ${String.format("%.1f", total)} GB",
-                accent = MaterialTheme.colorScheme.onSurface
-            )
-        }
+        MetricLine(
+            label = "GPU",
+            value = system.gpuName?.take(34) ?: "--",
+            accent = MaterialTheme.colorScheme.onSurface
+        )
+        MetricLine(
+            label = "Refresh rate",
+            value = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--",
+            accent = MaterialTheme.status.good
+        )
+        MetricLine(
+            label = "CPU clock",
+            value = system.cpuFreqMHz?.let { "$it MHz" } ?: "--",
+            accent = MaterialTheme.colorScheme.onSurface
+        )
+        MetricLine(
+            label = "Memory",
+            value = system.ramTotalGb?.let { total ->
+                "${String.format("%.1f", system.ramUsedGb ?: 0f)} / ${String.format("%.1f", total)} GB"
+            } ?: "--",
+            accent = MaterialTheme.colorScheme.onSurface
+        )
         system.cpuPercent?.let { cpu ->
             Spacer(Modifier.height(Space.sm))
             BarMeter(

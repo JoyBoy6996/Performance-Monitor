@@ -57,11 +57,11 @@ fun FirstRunSetupDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Set up FrameScope") },
+        title = { Text("Set up Qstats") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "FrameScope needs one-time access to read your game's FPS. " +
+                    "Qstats needs one-time access to read your game's FPS. " +
                         "ShizukuNext starts without Wi-Fi (USB debugging). Install it, tap " +
                         "Grant access, then choose Allow in its popup. The app does the rest."
                 )
@@ -70,14 +70,14 @@ fun FirstRunSetupDialog(
                     if (usageGranted) {
                         "Usage access: On. No action needed."
                     } else {
-                        "Usage access: Off. Tap Usage access → find FrameScope → turn it on."
+                        "Usage access: Off. Tap Usage access → find Qstats → turn it on."
                     }
                 )
                 Text(
                     "No Wi-Fi? Two ways, both offline after one setup. " +
                         "1) PC + USB cable once: run 'adb tcpip 5555' on the PC, then tap Set up ADB " +
                         "bridge here and check “Always allow” on the prompt. " +
-                        "2) No PC: start ShizukuNext from USB debugging and grant FrameScope permission. " +
+                        "2) No PC: start ShizukuNext from USB debugging and grant Qstats permission. " +
                         "Afterwards it reconnects on 127.0.0.1 by itself — no PC and no Wi-Fi."
                 )
                 Column {

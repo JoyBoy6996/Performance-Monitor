@@ -150,6 +150,14 @@ class ShellHub(
         adbSetupMutex.withLock {
             adb.retarget(LOOPBACK, adbPort)
 
+            // A prompt that was offered but never approved leaves the runner with
+            // no way to offer the key again. An explicit setup must show a fresh
+            // "Allow USB debugging?" dialog so the user can tick Always allow.
+            if (adb.authState.value == AdbAuthState.PROMPT_SENT && !adb.authorisationStored) {
+                adb.resetAuthorisation()
+                publishAdbState(false)
+            }
+
             // Give Shizuku one fresh chance first. Without a privileged shell the
             // app cannot install its key or open an ADB port on a stock ROM.
             if (shizukuHelper() == null) {
@@ -165,6 +173,7 @@ class ShellHub(
                 finishAdbSetup(keyInstalled)
             } else {
                 publishAdbState(false)
+                watchForPromptApproval()
                 adbSetupFailureMessage()
             }
         }
@@ -225,15 +234,37 @@ class ShellHub(
                 "Shizuku is running but could not start adbd on $LOOPBACK:$adbPort."
             ShizukuRunner.ConnectionState.NOT_RUNNING ->
                 "Start Shizuku and grant permission. With USB debugging ON, " +
-                    "FrameScope can then open the bridge by itself."
+                    "Qstats can then open the bridge by itself."
             ShizukuRunner.ConnectionState.PERMISSION_DENIED ->
-                "Grant FrameScope the Shizuku permission so it can open the bridge."
+                "Grant Qstats the Shizuku permission so it can open the bridge."
             else -> "Shizuku is not ready yet."
         }
         return "Could not open the local ADB bridge. $reason $shellHint " +
-            "No Wi-Fi and no PC option: connect USB to a PC once, run 'adb tcpip 5555', " +
-            "unplug, then tap Set up bridge here and check “Always allow”. " +
+            "Watch the phone for the “Allow USB debugging?” dialog, tick “Always allow” " +
+            "and tap Allow, then tap Reconnect. If no dialog appears, connect USB to a PC " +
+            "once, run 'adb tcpip 5555', unplug, then tap Set up bridge here. " +
             "Or turn on Wireless debugging and tap Set up bridge again."
+    }
+
+    /**
+     * The phone prompt is often approved a moment after the socket timed out.
+     * Keep checking briefly instead of stranding the user on a permanent
+     * "waiting for the prompt" screen.
+     */
+    private fun watchForPromptApproval() {
+        statusScope.launch {
+            repeat(PROMPT_WATCH_ATTEMPTS) {
+                delay(PROMPT_WATCH_INTERVAL_MS)
+                if (_adbReady.value) return@launch
+                if (adb.authState.value != AdbAuthState.PROMPT_SENT &&
+                    !adb.authorisationStored
+                ) return@launch
+                if (runCatching { adb.isAvailable() }.getOrDefault(false)) {
+                    publishAdbState(true)
+                    return@launch
+                }
+            }
+        }
     }
 
     /**
@@ -259,7 +290,7 @@ class ShellHub(
             adbSuccessMessage()
         } else {
             "Local ADB bridge is live on $LOOPBACK:$adbPort — live FPS and telemetry work " +
-                "right now. This phone did not save FrameScope's key, so after a reboot or " +
+                "right now. This phone did not save Qstats' key, so after a reboot or " +
                 "USB debugging toggle repeat once: PC + USB cable, 'adb tcpip 5555', then " +
                 "Set up bridge here and tick “Always allow”. No Shizuku needed."
         }
@@ -552,7 +583,7 @@ class ShellHub(
             ShizukuRunner.ConnectionState.NOT_RUNNING ->
                 "Shizuku is not running. Cached data remains available."
             ShizukuRunner.ConnectionState.PERMISSION_DENIED ->
-                "Grant FrameScope Shizuku permission to enable privileged operations."
+                "Grant Qstats Shizuku permission to enable privileged operations."
             ShizukuRunner.ConnectionState.CONNECTING ->
                 "Connecting to Shizuku UserService. Cached data remains available."
             ShizukuRunner.ConnectionState.ERROR -> "Shizuku UserService connection error."
@@ -581,5 +612,7 @@ class ShellHub(
     companion object {
         const val DEFAULT_ADB_PORT = 5555
         private const val LOOPBACK = "127.0.0.1"
+        private const val PROMPT_WATCH_ATTEMPTS = 30
+        private const val PROMPT_WATCH_INTERVAL_MS = 2_000L
     }
 }

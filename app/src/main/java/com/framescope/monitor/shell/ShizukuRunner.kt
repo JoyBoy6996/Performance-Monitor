@@ -178,7 +178,7 @@ class ShizukuRunner private constructor(
             if (context != null) checkAndBind(allowExhaustedRetry = true, forceAttempt = true)
         } else {
             handlePermissionDenied(
-                "Shizuku permission was denied. Grant FrameScope access in Shizuku to continue."
+                "Shizuku permission was denied. Grant Qstats access in Shizuku to continue."
             )
         }
     }
@@ -314,7 +314,7 @@ class ShizukuRunner private constructor(
             )
         }
         if (!hasPermission) {
-            handlePermissionDenied("Grant FrameScope Shizuku permission to enable privileged operations.")
+            handlePermissionDenied("Grant Qstats Shizuku permission to enable privileged operations.")
             return
         }
         synchronized(lifecycleLock) {
@@ -637,7 +637,7 @@ class ShizukuRunner private constructor(
         ConnectionState.NOT_RUNNING ->
             "Shizuku is not running. Start Shizuku to restore privileged operations."
         ConnectionState.PERMISSION_DENIED ->
-            "Shizuku permission is not granted to FrameScope."
+            "Shizuku permission is not granted to Qstats."
         ConnectionState.CONNECTING ->
             "Connecting to Shizuku UserService. Cached data remains available."
         ConnectionState.ERROR ->

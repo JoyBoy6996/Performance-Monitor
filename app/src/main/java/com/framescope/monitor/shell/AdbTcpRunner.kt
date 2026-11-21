@@ -308,7 +308,7 @@ class AdbTcpRunner(
             } else {
                 _authState.value = if (session.offeredKey) AdbAuthState.PROMPT_SENT
                 else AdbAuthState.UNKNOWN
-                lastError = "The phone accepted this connection but did not save FrameScope's key. " +
+                lastError = "The phone accepted this connection but did not save Qstats' key. " +
                     "Keep Shizuku ON with permission granted, then tap Set up bridge again."
             }
 

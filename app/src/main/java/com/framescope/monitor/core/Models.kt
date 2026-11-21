@@ -63,6 +63,12 @@ data class CpuGroupMetric(
     val freqMHz: Int? = null
 )
 
+/** One thread of the measured app, with its real CPU share of a single core. */
+data class ThreadLoad(
+    val name: String,
+    val percent: Float? = null
+)
+
 /** Device level metrics, refreshed a couple of times per second. */
 data class SystemMetrics(
     val cpuPercent: Float? = null,
@@ -82,6 +88,20 @@ data class SystemMetrics(
     val gpuPercent: Float? = null,
     /** Per-cluster readings, grouped by the real core capacities the device reports. */
     val cpuGroups: List<CpuGroupMetric> = emptyList(),
+    /** Real load of each physical core, ordered by core number; null means no reading. */
+    val cpuCoreLoadPct: List<Float?> = emptyList(),
+    /** Real clock of each physical core, in MHz, ordered like [cpuCoreLoadPct]. */
+    val cpuCoreFreqMHz: List<Int?> = emptyList(),
+    /** Memory controller clock, in MHz, when the kernel publishes a devfreq node. */
+    val ddrFreqMHz: Int? = null,
+    /** Busiest real threads of the measured app, largest first. */
+    val threadLoads: List<ThreadLoad> = emptyList(),
+    /** Instantaneous battery current in mA; negative while charging. */
+    val batteryCurrentMa: Float? = null,
+    /** Instantaneous battery voltage in mV. */
+    val batteryVoltageMv: Int? = null,
+    /** Battery charge cycles when the platform reports a real value. */
+    val batteryCycles: Int? = null,
     /** Android's thermal mitigation level: 0 = none, 1 = light, 2 = moderate, 3 = severe. */
     val thermalStatus: Int? = null,
     /** Warmest temperature seen since monitoring began (or since the current recording). */
@@ -125,7 +145,15 @@ data class SystemMetrics(
         SystemMetric.RAM_TOTAL_GB -> ramTotalGb != null
         SystemMetric.RAM_PERCENT -> ramPercent != null
         SystemMetric.THERMAL_MAX_C -> thermalMaxC != null
+        SystemMetric.CPU_TEMP_C -> cpuTempC != null
+        SystemMetric.GPU_PERCENT -> gpuPercent != null
+        SystemMetric.CPU_CORES -> cpuCoreLoadPct.any { it != null }
+        SystemMetric.DDR_FREQ_MHZ -> ddrFreqMHz != null
+        SystemMetric.THREAD_LOAD -> threadLoads.isNotEmpty()
         SystemMetric.THERMAL_STATUS -> thermalStatus != null
+        SystemMetric.BATTERY_CURRENT_MA -> batteryCurrentMa != null
+        SystemMetric.BATTERY_VOLTAGE_MV -> batteryVoltageMv != null
+        SystemMetric.BATTERY_CYCLES -> batteryCycles != null
         SystemMetric.REFRESH_HZ -> refreshHz != null
     }
 }
@@ -256,6 +284,24 @@ data class SessionRecord(
     val cpuGroupSeries: List<List<Float?>> = emptyList(),
     /** Clock per cluster, in the same order as [cpuGroupNames]; null means no reading. */
     val cpuGroupFreqSeries: List<List<Float?>> = emptyList(),
+    /** Real load of every physical core, one list per core, aligned with the seconds. */
+    val perCoreLoadSeries: List<List<Float?>> = emptyList(),
+    /** Real clock of every physical core, one list per core, aligned with the seconds. */
+    val perCoreFreqSeries: List<List<Int?>> = emptyList(),
+    /** Memory controller clock per second, in MHz. */
+    val ddrFreqSeries: List<Int> = emptyList(),
+    /** Busiest thread names of the measured app, in a fixed order. */
+    val threadNames: List<String> = emptyList(),
+    /** Mean CPU share of each thread, in the same order as [threadNames]. */
+    val threadAvgLoads: List<Float> = emptyList(),
+    /** Peak CPU share of each thread, in the same order as [threadNames]. */
+    val threadMaxLoads: List<Float> = emptyList(),
+    /** Mean battery current in mA during the run, when the device reports it. */
+    val avgCurrentMa: Float? = null,
+    /** Battery voltage in mV during the run, when the device reports it. */
+    val voltageMv: Int? = null,
+    /** Battery charge cycles at the time of the run, when the platform reports them. */
+    val batteryCycles: Int? = null,
     /** A short raw collector snapshot captured when the run was stopped. */
     val shellLogs: String = "",
     /** A note the user writes for this run. */

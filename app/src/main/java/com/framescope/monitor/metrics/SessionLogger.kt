@@ -49,6 +49,18 @@ data class SecondBucket(
     val socTempC: Float = 0f,
     val gpuPercent: Float = 0f,
     val cpuGroups: List<CpuGroupMetric> = emptyList(),
+    /** One load per real core, ordered by core number. */
+    val coreLoads: List<Float?> = emptyList(),
+    /** One clock per real core, in MHz, in the same order as [coreLoads]. */
+    val coreFreqs: List<Int?> = emptyList(),
+    /** Memory controller clock in MHz; zero means the device did not report one. */
+    val ddrFreqMHz: Int = 0,
+    /** Busiest threads at the end of this second. */
+    val threads: List<com.framescope.monitor.core.ThreadLoad> = emptyList(),
+    /** Mean battery current in mA; null when the platform does not report it. */
+    val currentMa: Float? = null,
+    val voltageMv: Int? = null,
+    val cycles: Int? = null,
     /** The observed cap at the end of this second; zero means not confirmed yet. */
     val capFps: Float = 0f,
     /** "heat" only while thermal mitigation was active and the rate had dropped. */
@@ -102,6 +114,13 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketSocTemp = ArrayList<Float>()
     private val bucketGpuPercent = ArrayList<Float>()
     private val bucketCpuGroups = ArrayList<List<CpuGroupMetric>>()
+    private val bucketCoreLoads = ArrayList<List<Float?>>()
+    private val bucketCoreFreqs = ArrayList<List<Int?>>()
+    private val bucketDdrFreq = ArrayList<Int>()
+    private val bucketThreads = ArrayList<List<com.framescope.monitor.core.ThreadLoad>>()
+    private val bucketCurrent = ArrayList<Float>()
+    private var lastVoltageMv: Int? = null
+    private var lastCycles: Int? = null
     private val bucketCap = ArrayList<Int>()
     private val bucketCapCause = ArrayList<String>()
     private val capChanges = ArrayList<CapChange>()
@@ -166,6 +185,13 @@ class SessionLogger(private val store: SessionStore) {
         bucketSocTemp.clear()
         bucketGpuPercent.clear()
         bucketCpuGroups.clear()
+        bucketCoreLoads.clear()
+        bucketCoreFreqs.clear()
+        bucketDdrFreq.clear()
+        bucketThreads.clear()
+        bucketCurrent.clear()
+        lastVoltageMv = null
+        lastCycles = null
         bucketCap.clear()
         bucketCapCause.clear()
         capChanges.clear()
@@ -303,6 +329,13 @@ class SessionLogger(private val store: SessionStore) {
         metrics.thermalMaxC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { bucketSocTemp.add(it) }
         metrics.gpuPercent?.finiteOrNull()?.let { bucketGpuPercent.add(it) }
         if (metrics.cpuGroups.isNotEmpty()) bucketCpuGroups.add(metrics.cpuGroups)
+        if (metrics.cpuCoreLoadPct.any { it != null }) bucketCoreLoads.add(metrics.cpuCoreLoadPct)
+        if (metrics.cpuCoreFreqMHz.any { it != null }) bucketCoreFreqs.add(metrics.cpuCoreFreqMHz)
+        metrics.ddrFreqMHz?.takeIf { it > 0 }?.let { bucketDdrFreq.add(it) }
+        if (metrics.threadLoads.isNotEmpty()) bucketThreads.add(metrics.threadLoads)
+        metrics.batteryCurrentMa?.finiteOrNull()?.let { bucketCurrent.add(it) }
+        metrics.batteryVoltageMv?.takeIf { it > 0 }?.let { lastVoltageMv = it }
+        metrics.batteryCycles?.takeIf { it >= 0 }?.let { lastCycles = it }
         if (capFps != null) bucketCap.add(capFps)
         if (capFps != null && capCause != null) bucketCapCause.add(capCause)
 
@@ -367,6 +400,11 @@ class SessionLogger(private val store: SessionStore) {
         val thermalStatus = bucketThermalStatus.maxOrNull()
         val power = if (bucketPower.isNotEmpty()) bucketPower.average().toFloat() else null
         val averageCpuGroups = averageCpuGroups(bucketCpuGroups)
+        val coreLoads = averageNullableFloats(bucketCoreLoads)
+        val coreFreqs = averageNullableInts(bucketCoreFreqs)
+        val ddr = if (bucketDdrFreq.isEmpty()) 0 else bucketDdrFreq.average().toInt()
+        val currentMa = if (bucketCurrent.isEmpty()) null else bucketCurrent.average().toFloat()
+        val threads = averageThreads(bucketThreads)
         // The last known cap is carried forward: a poll that said nothing does not
         // mean the game stopped being capped. Zero is kept only until one is known.
         val cap = bucketCap.lastOrNull() ?: lastCapFps ?: 0
@@ -387,6 +425,13 @@ class SessionLogger(private val store: SessionStore) {
                 socTempC = if (bucketSocTemp.isEmpty()) 0f else bucketSocTemp.average().toFloat(),
                 gpuPercent = if (bucketGpuPercent.isEmpty()) 0f else bucketGpuPercent.average().toFloat(),
                 cpuGroups = averageCpuGroups,
+                coreLoads = coreLoads,
+                coreFreqs = coreFreqs,
+                ddrFreqMHz = ddr,
+                threads = threads,
+                currentMa = currentMa,
+                voltageMv = lastVoltageMv,
+                cycles = lastCycles,
                 capFps = cap.toFloat(),
                 capCause = capCause
             )
@@ -405,8 +450,49 @@ class SessionLogger(private val store: SessionStore) {
         bucketSocTemp.clear()
         bucketGpuPercent.clear()
         bucketCpuGroups.clear()
+        bucketCoreLoads.clear()
+        bucketCoreFreqs.clear()
+        bucketDdrFreq.clear()
+        bucketThreads.clear()
+        bucketCurrent.clear()
         bucketCap.clear()
         bucketCapCause.clear()
+    }
+
+    /** Averages one value per core across all polls in a second. */
+    private fun averageNullableFloats(rows: List<List<Float?>>): List<Float?> {
+        if (rows.isEmpty()) return emptyList()
+        val size = rows.maxOf { it.size }
+        return (0 until size).map { i ->
+            val values = rows.mapNotNull { it.getOrNull(i)?.finiteOrNull() }
+            if (values.isEmpty()) null else values.average().toFloat()
+        }
+    }
+
+    /** Same as [averageNullableFloats] for the integer clock counters. */
+    private fun averageNullableInts(rows: List<List<Int?>>): List<Int?> {
+        if (rows.isEmpty()) return emptyList()
+        val size = rows.maxOf { it.size }
+        return (0 until size).map { i ->
+            val values = rows.mapNotNull { it.getOrNull(i)?.takeIf { value -> value > 0 } }
+            if (values.isEmpty()) null else values.average().toInt()
+        }
+    }
+
+    /** Keeps the busiest threads in a stable order so their colours do not jump. */
+    private fun averageThreads(rows: List<List<com.framescope.monitor.core.ThreadLoad>>):
+        List<com.framescope.monitor.core.ThreadLoad> {
+        if (rows.isEmpty()) return emptyList()
+        return rows.first().mapNotNull { first ->
+            val values = rows.mapNotNull { row ->
+                row.firstOrNull { it.name == first.name }?.percent?.finiteOrNull()
+            }
+            if (values.isEmpty()) {
+                null
+            } else {
+                com.framescope.monitor.core.ThreadLoad(first.name, values.average().toFloat())
+            }
+        }
     }
 
     /** Averages the per-cluster readings of one second into one stable row. */
@@ -554,6 +640,33 @@ class SessionLogger(private val store: SessionStore) {
             }
         }
 
+        // One series per physical core; a device that only publishes some cores
+        // simply leaves the others null instead of copying a neighbour's value.
+        val coreCount = secondBuckets.maxOfOrNull { it.coreLoads.size } ?: 0
+        val perCoreLoadSeries = (0 until coreCount).map { core ->
+            secondBuckets.map { it.coreLoads.getOrNull(core) }
+        }
+        val perCoreFreqSeries = (0 until coreCount).map { core ->
+            secondBuckets.map { it.coreFreqs.getOrNull(core) }
+        }
+        val ddrFreqSeries = secondBuckets.map { it.ddrFreqMHz }
+        val threadNames = secondBuckets.firstOrNull { it.threads.isNotEmpty() }
+            ?.threads?.map { it.name }.orEmpty()
+        val threadAvgLoads = threadNames.map { name ->
+            secondBuckets.mapNotNull { bucket ->
+                bucket.threads.firstOrNull { it.name == name }?.percent?.finiteOrNull()
+            }.takeIf { it.isNotEmpty() }?.average()?.toFloat() ?: 0f
+        }
+        val threadMaxLoads = threadNames.map { name ->
+            secondBuckets.mapNotNull { bucket ->
+                bucket.threads.firstOrNull { it.name == name }?.percent?.finiteOrNull()
+            }.maxOrNull() ?: 0f
+        }
+        val avgCurrent = secondBuckets.mapNotNull { it.currentMa?.finiteOrNull() }
+            .takeIf { it.isNotEmpty() }?.average()?.toFloat()
+        val voltage = secondBuckets.firstNotNullOfOrNull { it.voltageMv }
+        val cycles = secondBuckets.firstNotNullOfOrNull { it.cycles }
+
         val record = SessionRecord(
             id = currentSessionId,
             appPackage = currentPackage,
@@ -601,6 +714,15 @@ class SessionLogger(private val store: SessionStore) {
             cpuGroupNames = cpuGroupNames,
             cpuGroupSeries = cpuGroupSeries,
             cpuGroupFreqSeries = cpuGroupFreqSeries,
+            perCoreLoadSeries = perCoreLoadSeries,
+            perCoreFreqSeries = perCoreFreqSeries,
+            ddrFreqSeries = ddrFreqSeries,
+            threadNames = threadNames,
+            threadAvgLoads = threadAvgLoads,
+            threadMaxLoads = threadMaxLoads,
+            avgCurrentMa = avgCurrent,
+            voltageMv = voltage,
+            batteryCycles = cycles,
             shellLogs = shellLogs
         )
 

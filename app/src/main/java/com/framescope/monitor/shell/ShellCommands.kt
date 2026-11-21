@@ -213,6 +213,50 @@ object ShellCommands {
             "echo \"CPUFREQ=\$n:\$(cat \"\$f\")\"; " +
             "done"
 
+    /**
+     * Memory controller clock. Only real devfreq nodes are read; a device without
+     * one answers nothing, which becomes "--" instead of a guessed number.
+     */
+    fun ddrFreq(): String =
+        "for f in /sys/class/devfreq/*ddr*/cur_freq /sys/class/devfreq/*mem*/cur_freq " +
+            "/sys/class/devfreq/*mc*/cur_freq /sys/kernel/debug/memfreq/current_freq; do " +
+            "[ -r \"\$f\" ] && echo \"DDRFREQ=\$(cat \"\$f\")\" && break; done"
+
+    /** The jiffy clock the kernel uses for `/proc` CPU time counters. */
+    fun clockTicks(): String = "echo HZ=\$(getconf CLK_TCK 2>/dev/null || echo 100)"
+
+    /**
+     * CPU time of every thread of the measured app, in one shell round trip.
+     *
+     * `pidof` covers most devices; the cmdline scan covers games whose launcher
+     * process is a different name. Thread names are kept exactly as the kernel
+     * prints them so the report matches what the device actually runs.
+     */
+    fun threadStat(packageName: String): String {
+        val pkg = packageName.replace("'", "").replace("\\", "").replace("$", "")
+        if (pkg.isBlank()) return "true"
+        return """
+            p=\$(pidof '$pkg' 2>/dev/null | awk '{print \$1}')
+            if [ -z "\$p" ]; then
+              for d in /proc/[0-9]*; do
+                grep -aqF '$pkg' "\$d/cmdline" 2>/dev/null || continue
+                p=\${d##*/}; break
+              done
+            fi
+            if [ -n "\$p" ]; then
+              for t in /proc/\$p/task/[0-9]*; do
+                [ -r "\$t/stat" ] || continue
+                line=\$(cat "\$t/stat" 2>/dev/null) || continue
+                tmp=\${line#*(}; comm=\${tmp%%)*}
+                rest=\${line#*) }
+                set -- \$rest
+                [ \$# -ge 13 ] || continue
+                echo "THREAD=\${t##*/}|\$comm|\$(( \$12 + \$13 ))"
+              done
+            fi
+        """.trimIndent()
+    }
+
     /** GPU busy time, only when the device publishes both counters. */
     fun gpuBusy(): String =
         "for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-3d0/devfreq " +

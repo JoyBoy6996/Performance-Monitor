@@ -228,8 +228,9 @@ class MetricsEngine(
             val started = System.nanoTime()
             if (hub.status.value.state == AccessState.READY) {
                 try {
+                    val measured = _foregroundApp.value ?: lastMeasuredPackage.value.orEmpty()
                     kotlinx.coroutines.withTimeoutOrNull(2_500L) {
-                        systemSampler.sample()
+                        systemSampler.sample(measured)
                     }?.let { _privileged.value = it }
                 } catch (e: Exception) {
                     // Keep the last reading; it is marked stale below.
@@ -258,9 +259,15 @@ class MetricsEngine(
         availability[SystemMetric.BATTERY_LEVEL] = battery.availability
         availability[SystemMetric.BATTERY_TEMP_C] = battery.availability
         availability[SystemMetric.POWER_WATTS] = battery.availability
+        availability[SystemMetric.BATTERY_CURRENT_MA] = battery.availability
+        availability[SystemMetric.BATTERY_VOLTAGE_MV] = battery.availability
+        availability[SystemMetric.BATTERY_CYCLES] = battery.availability
         sources[SystemMetric.BATTERY_LEVEL] = battery.source
         sources[SystemMetric.BATTERY_TEMP_C] = battery.source
         sources[SystemMetric.POWER_WATTS] = battery.source
+        sources[SystemMetric.BATTERY_CURRENT_MA] = battery.source
+        sources[SystemMetric.BATTERY_VOLTAGE_MV] = battery.source
+        sources[SystemMetric.BATTERY_CYCLES] = battery.source
 
         val memory = collectors.memory()
         availability[SystemMetric.RAM_USED_GB] = memory.availability
@@ -281,6 +288,9 @@ class MetricsEngine(
             batteryLevel = batteryValue?.levelPercent,
             batteryTempC = batteryValue?.temperatureC,
             powerWatts = batteryValue?.watts,
+            batteryCurrentMa = batteryValue?.currentMicroAmps?.let { it / 1_000f },
+            batteryVoltageMv = batteryValue?.voltageMilliVolts,
+            batteryCycles = batteryValue?.cycleCount,
             ramUsedGb = memoryValue?.usedBytes?.let { it / 1_073_741_824f },
             ramTotalGb = memoryValue?.totalBytes?.let { it / 1_073_741_824f },
             ramPercent = memoryValue?.let {
@@ -310,7 +320,17 @@ class MetricsEngine(
             ramUsedGb = native.ramUsedGb,
             ramTotalGb = native.ramTotalGb,
             ramPercent = native.ramPercent,
+            batteryCurrentMa = native.batteryCurrentMa,
+            batteryVoltageMv = native.batteryVoltageMv,
+            batteryCycles = native.batteryCycles,
             thermalMaxC = privileged.thermalMaxC,
+            cpuTempC = privileged.cpuTempC,
+            gpuPercent = privileged.gpuPercent,
+            cpuGroups = privileged.cpuGroups,
+            cpuCoreLoadPct = privileged.cpuCoreLoadPct,
+            cpuCoreFreqMHz = privileged.cpuCoreFreqMHz,
+            ddrFreqMHz = privileged.ddrFreqMHz,
+            threadLoads = privileged.threadLoads,
             thermalStatus = privileged.thermalStatus,
             refreshHz = native.refreshHz,
             updatedAt = maxOf(native.updatedAt, privileged.updatedAt),
@@ -395,6 +415,9 @@ class MetricsEngine(
             remembered.takeIf { it.isNotBlank() && it != own } ?: current
         } else current
         val label = appLabel(target)
+        // Per-core and per-thread loads are differences between two reads. Starting a
+        // new run with the old counters would report the idle time before Record.
+        systemSampler.resetDeltas()
         sessionLogger.start(target, label, _system.value.batteryLevel, deviceSnapshot())
         // A recording is its own heat story: start the peak from the temperature at
         // the moment Record was pressed, not from a hot session earlier today.
@@ -473,7 +496,12 @@ class MetricsEngine(
             SystemMetric.CPU_FREQ_MHZ,
             SystemMetric.GPU_NAME,
             SystemMetric.GPU_FREQ_MHZ,
+            SystemMetric.GPU_PERCENT,
             SystemMetric.THERMAL_MAX_C,
+            SystemMetric.CPU_TEMP_C,
+            SystemMetric.CPU_CORES,
+            SystemMetric.DDR_FREQ_MHZ,
+            SystemMetric.THREAD_LOAD,
             SystemMetric.THERMAL_STATUS
         )
     }

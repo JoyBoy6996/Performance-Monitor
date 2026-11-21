@@ -32,6 +32,31 @@ private fun List<List<Float?>>.toNullableJsonArrays(): JSONArray = JSONArray().a
     }
 }
 
+/** Integer clocks keep a null per core, never a zero that looks measured. */
+private fun List<List<Int?>>.toNullableJsonArrays(): JSONArray = JSONArray().apply {
+    forEach { row ->
+        put(JSONArray().apply {
+            row.forEach { value ->
+                put(value?.takeIf { it > 0 } ?: JSONObject.NULL)
+            }
+        })
+    }
+}
+
+private fun JSONArray?.toNullableIntLists(): List<List<Int?>> {
+    if (this == null) return emptyList()
+    val out = ArrayList<List<Int?>>(length())
+    for (i in 0 until length()) {
+        val row = optJSONArray(i) ?: continue
+        val values = ArrayList<Int?>(row.length())
+        for (j in 0 until row.length()) {
+            values.add(if (row.isNull(j)) null else row.optInt(j, 0).takeIf { it > 0 })
+        }
+        out.add(values)
+    }
+    return out
+}
+
 private fun JSONArray?.toNullableFloatLists(): List<List<Float?>> {
     if (this == null) return emptyList()
     val out = ArrayList<List<Float?>>(length())
@@ -261,6 +286,15 @@ class SessionStore(context: Context) {
         put("cpuGroupNames", JSONArray(record.cpuGroupNames))
         put("cpuGroupSeries", record.cpuGroupSeries.toNullableJsonArrays())
         put("cpuGroupFreqSeries", record.cpuGroupFreqSeries.toNullableJsonArrays())
+        put("perCoreLoadSeries", record.perCoreLoadSeries.toNullableJsonArrays())
+        put("perCoreFreqSeries", record.perCoreFreqSeries.toNullableJsonArrays())
+        put("ddrFreqSeries", JSONArray(record.ddrFreqSeries))
+        put("threadNames", JSONArray(record.threadNames))
+        put("threadAvgLoads", JSONArray(record.threadAvgLoads.finiteDoubles()))
+        put("threadMaxLoads", JSONArray(record.threadMaxLoads.finiteDoubles()))
+        put("avgCurrentMa", record.avgCurrentMa.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("voltageMv", record.voltageMv ?: JSONObject.NULL)
+        put("batteryCycles", record.batteryCycles ?: JSONObject.NULL)
         put("shellLogs", record.shellLogs)
         put("note", record.note)
         put("device", JSONObject().apply {
@@ -327,6 +361,23 @@ class SessionStore(context: Context) {
             }.orEmpty(),
             cpuGroupSeries = o.optJSONArray("cpuGroupSeries").toNullableFloatLists(),
             cpuGroupFreqSeries = o.optJSONArray("cpuGroupFreqSeries").toNullableFloatLists(),
+            perCoreLoadSeries = o.optJSONArray("perCoreLoadSeries").toNullableFloatLists(),
+            perCoreFreqSeries = o.optJSONArray("perCoreFreqSeries").toNullableIntLists(),
+            ddrFreqSeries = o.optJSONArray("ddrFreqSeries")?.let { arr ->
+                (0 until arr.length()).map { arr.optInt(it, 0) }
+            }.orEmpty(),
+            threadNames = o.optJSONArray("threadNames")?.let { arr ->
+                (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }
+            }.orEmpty(),
+            threadAvgLoads = o.optJSONArray("threadAvgLoads").toFloatList(),
+            threadMaxLoads = o.optJSONArray("threadMaxLoads").toFloatList(),
+            avgCurrentMa = if (o.isNull("avgCurrentMa")) null else {
+                o.optDouble("avgCurrentMa").toFloat().finiteOrNull()
+            },
+            voltageMv = if (o.isNull("voltageMv")) null else o.optInt("voltageMv").takeIf { it > 0 },
+            batteryCycles = if (o.isNull("batteryCycles")) null else {
+                o.optInt("batteryCycles").takeIf { it >= 0 }
+            },
             shellLogs = o.optString("shellLogs"),
             note = o.optString("note"),
             device = o.optJSONObject("device").toDeviceInfo()
@@ -336,7 +387,13 @@ class SessionStore(context: Context) {
     fun toCsv(record: SessionRecord): String {
         val sb = StringBuilder()
         sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status,cap_fps,")
-        sb.append("power_w,cpu_freq_mhz,gpu_freq_mhz,cpu_temp_c,soc_temp_c,gpu_percent\n")
+        sb.append("power_w,cpu_freq_mhz,gpu_freq_mhz,cpu_temp_c,soc_temp_c,gpu_percent")
+        sb.append(",ddr_freq_mhz")
+        val coreCount = maxOf(record.perCoreLoadSeries.size, record.perCoreFreqSeries.size)
+        repeat(coreCount) { core ->
+            sb.append(",core${core}_load_pct,core${core}_freq_mhz")
+        }
+        sb.append('\n')
         val size = maxOf(
             record.fpsSeries.size,
             record.cpuSeries.size,
@@ -371,6 +428,14 @@ class SessionStore(context: Context) {
             sb.append(record.socTempSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
             sb.append(',')
             sb.append(record.gpuPercentSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
+            sb.append(',')
+            sb.append(record.ddrFreqSeries.getOrNull(i)?.takeIf { it > 0 }?.toString().orEmpty())
+            repeat(coreCount) { core ->
+                sb.append(',')
+                sb.append(record.perCoreLoadSeries.getOrNull(core)?.getOrNull(i)?.toString().orEmpty())
+                sb.append(',')
+                sb.append(record.perCoreFreqSeries.getOrNull(core)?.getOrNull(i)?.toString().orEmpty())
+            }
             sb.append('\n')
         }
         return sb.toString()
@@ -460,6 +525,15 @@ class SessionStore(context: Context) {
                     cpu_group_names TEXT,
                     cpu_group_series TEXT,
                     cpu_group_freq_series TEXT,
+                    per_core_load_series TEXT,
+                    per_core_freq_series TEXT,
+                    ddr_freq_series TEXT,
+                    thread_names TEXT,
+                    thread_avg_loads TEXT,
+                    thread_max_loads TEXT,
+                    avg_current_ma REAL,
+                    voltage_mv INTEGER,
+                    battery_cycles INTEGER,
                     shell_logs TEXT,
                     note TEXT
                 )
@@ -526,6 +600,17 @@ class SessionStore(context: Context) {
             }
             if (oldVersion < 7) {
                 addColumnIfMissing(db, TABLE_RECORDS, "soc_temp_series", "TEXT")
+            }
+            if (oldVersion < 8) {
+                addColumnIfMissing(db, TABLE_RECORDS, "per_core_load_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "per_core_freq_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "ddr_freq_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "thread_names", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "thread_avg_loads", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "thread_max_loads", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "avg_current_ma", "REAL")
+                addColumnIfMissing(db, TABLE_RECORDS, "voltage_mv", "INTEGER")
+                addColumnIfMissing(db, TABLE_RECORDS, "battery_cycles", "INTEGER")
             }
         }
 
@@ -632,6 +717,15 @@ class SessionStore(context: Context) {
                 put("cpu_group_names", JSONArray(record.cpuGroupNames).toString())
                 put("cpu_group_series", record.cpuGroupSeries.toNullableJsonArrays().toString())
                 put("cpu_group_freq_series", record.cpuGroupFreqSeries.toNullableJsonArrays().toString())
+                put("per_core_load_series", record.perCoreLoadSeries.toNullableJsonArrays().toString())
+                put("per_core_freq_series", record.perCoreFreqSeries.toNullableJsonArrays().toString())
+                put("ddr_freq_series", JSONArray(record.ddrFreqSeries).toString())
+                put("thread_names", JSONArray(record.threadNames).toString())
+                put("thread_avg_loads", JSONArray(record.threadAvgLoads.finiteDoubles()).toString())
+                put("thread_max_loads", JSONArray(record.threadMaxLoads.finiteDoubles()).toString())
+                put("avg_current_ma", record.avgCurrentMa.finiteOrNull())
+                put("voltage_mv", record.voltageMv)
+                put("battery_cycles", record.batteryCycles)
                 put("shell_logs", record.shellLogs)
                 put("note", record.note)
             }
@@ -704,6 +798,15 @@ class SessionStore(context: Context) {
                     val cpuGroupNamesIdx = c.getColumnIndex("cpu_group_names")
                     val cpuGroupSeriesIdx = c.getColumnIndex("cpu_group_series")
                     val cpuGroupFreqSeriesIdx = c.getColumnIndex("cpu_group_freq_series")
+                    val perCoreLoadIdx = c.getColumnIndex("per_core_load_series")
+                    val perCoreFreqIdx = c.getColumnIndex("per_core_freq_series")
+                    val ddrFreqIdx = c.getColumnIndex("ddr_freq_series")
+                    val threadNamesIdx = c.getColumnIndex("thread_names")
+                    val threadAvgIdx = c.getColumnIndex("thread_avg_loads")
+                    val threadMaxIdx = c.getColumnIndex("thread_max_loads")
+                    val currentIdx = c.getColumnIndex("avg_current_ma")
+                    val voltageIdx = c.getColumnIndex("voltage_mv")
+                    val cyclesIdx = c.getColumnIndex("battery_cycles")
                     val shellLogsIdx = c.getColumnIndex("shell_logs")
                     val noteIdx = c.getColumnIndex("note")
                     list.add(
@@ -796,6 +899,42 @@ class SessionStore(context: Context) {
                                     JSONArray(c.getString(cpuGroupFreqSeriesIdx)).toNullableFloatLists()
                                 }.getOrDefault(emptyList())
                             } else emptyList(),
+                            perCoreLoadSeries = if (perCoreLoadIdx >= 0) {
+                                runCatching {
+                                    JSONArray(c.getString(perCoreLoadIdx)).toNullableFloatLists()
+                                }.getOrDefault(emptyList())
+                            } else emptyList(),
+                            perCoreFreqSeries = if (perCoreFreqIdx >= 0) {
+                                runCatching {
+                                    JSONArray(c.getString(perCoreFreqIdx)).toNullableIntLists()
+                                }.getOrDefault(emptyList())
+                            } else emptyList(),
+                            ddrFreqSeries = if (ddrFreqIdx >= 0) {
+                                jsonToFloatList(c.getString(ddrFreqIdx)).map { it.toInt() }
+                            } else emptyList(),
+                            threadNames = if (threadNamesIdx >= 0) {
+                                runCatching {
+                                    val arr = JSONArray(c.getString(threadNamesIdx))
+                                    (0 until arr.length()).mapNotNull { i ->
+                                        arr.optString(i).takeIf { it.isNotBlank() }
+                                    }
+                                }.getOrDefault(emptyList())
+                            } else emptyList(),
+                            threadAvgLoads = if (threadAvgIdx >= 0) {
+                                jsonToFloatList(c.getString(threadAvgIdx))
+                            } else emptyList(),
+                            threadMaxLoads = if (threadMaxIdx >= 0) {
+                                jsonToFloatList(c.getString(threadMaxIdx))
+                            } else emptyList(),
+                            avgCurrentMa = if (currentIdx >= 0 && !c.isNull(currentIdx)) {
+                                c.getFloat(currentIdx).finiteOrNull()
+                            } else null,
+                            voltageMv = if (voltageIdx >= 0 && !c.isNull(voltageIdx)) {
+                                c.getInt(voltageIdx).takeIf { it > 0 }
+                            } else null,
+                            batteryCycles = if (cyclesIdx >= 0 && !c.isNull(cyclesIdx)) {
+                                c.getInt(cyclesIdx).takeIf { it >= 0 }
+                            } else null,
                             shellLogs = if (shellLogsIdx >= 0) c.getString(shellLogsIdx).orEmpty() else "",
                             note = if (noteIdx >= 0) c.getString(noteIdx).orEmpty() else ""
                         )
@@ -828,7 +967,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 7
+            private const val DB_VERSION = 8
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

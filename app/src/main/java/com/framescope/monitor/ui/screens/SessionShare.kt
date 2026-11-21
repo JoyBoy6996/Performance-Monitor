@@ -35,6 +35,10 @@ private fun fmt(value: Float?, decimals: Int): String {
     return String.format(Locale.US, "%.${decimals}f", number)
 }
 
+/** Mean of a real series, or null when nothing was recorded. */
+private fun <T : Number> List<T>.averageOrNull(): Float? =
+    if (isEmpty()) null else map { it.toFloat() }.average().toFloat().finiteOrNull()
+
 private const val PAGE_W = 1240
 private const val PAGE_H = 1754
 private const val MARGIN = 60
@@ -387,6 +391,37 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
             "Battery",
             "${fmt(session.batterySeries.first(), 0)} → ${fmt(session.batterySeries.last(), 0)} %",
             GREEN
+        )
+    }
+
+    painter.section("Scene detail")
+    val gpuLoad = session.gpuPercentSeries.mapNotNull { it.finiteOrNull()?.takeIf { v -> v > 0f } }
+    val gpuClock = session.gpuFreqSeries.mapNotNull { it.finiteOrNull()?.takeIf { v -> v > 0f } }
+    val ddr = session.ddrFreqSeries.filter { it > 0 }
+    val chipTemps = session.cpuTempSeries.ifEmpty { session.socTempSeries }
+        .mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+    painter.metricRow("GPU load avg", fmt(gpuLoad.averageOrNull(), 1) + " %", CYAN)
+    painter.metricRow("GPU clock max", fmt(gpuClock.maxOrNull(), 0) + " MHz", CYAN)
+    painter.metricRow("DDR clock max", fmt(ddr.maxOrNull()?.toFloat(), 0) + " MHz", CYAN)
+    painter.metricRow("DDR clock avg", fmt(ddr.averageOrNull(), 0) + " MHz", CYAN)
+    painter.metricRow("CPU temp avg", fmt(chipTemps.averageOrNull(), 1) + " °C", AMBER)
+    painter.metricRow("CPU temp max", fmt(chipTemps.maxOrNull(), 1) + " °C", RED)
+    painter.metricRow("Battery current", fmt(session.avgCurrentMa, 1) + " mA")
+    painter.metricRow(
+        "Battery voltage",
+        session.voltageMv?.takeIf { it > 0 }?.toString() ?: "--"
+    )
+    painter.metricRow("Charge cycles", session.batteryCycles?.toString() ?: "--")
+    if (session.perCoreLoadSeries.isNotEmpty()) {
+        painter.metricRow(
+            "CPU cores reported", session.perCoreLoadSeries.size.toString()
+        )
+    }
+    session.threadNames.forEachIndexed { index, name ->
+        painter.metricRow(
+            "Thread: $name",
+            "avg " + fmt(session.threadAvgLoads.getOrNull(index), 1) +
+                " % · max " + fmt(session.threadMaxLoads.getOrNull(index), 1) + " %"
         )
     }
 

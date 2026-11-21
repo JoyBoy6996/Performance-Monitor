@@ -24,6 +24,10 @@ class SystemSampler(private val hub: ShellHub) {
     private var lastCpuCores: Map<Int, LongArray>? = null
     private var lastGpuBusy: Pair<Long, Long>? = null
     private var lastGroupNames: List<String> = emptyList()
+    private val sceneCollectors = SceneCollectors()
+
+    /** Forgets the per-core and per-thread deltas when a new run begins. */
+    fun resetDeltas() = sceneCollectors.reset()
 
     /**
      * Reads the privileged metrics.
@@ -33,7 +37,7 @@ class SystemSampler(private val hub: ShellHub) {
      * collectors produced and keeps the native values for everything that is missing
      * here.
      */
-    suspend fun sample(): SystemMetrics {
+    suspend fun sample(packageName: String = ""): SystemMetrics {
         val now = android.os.SystemClock.elapsedRealtimeNanos()
         val availability = mutableMapOf<SystemMetric, MetricAvailability>()
         val sources = mutableMapOf<SystemMetric, String>()
@@ -45,7 +49,10 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.thermal(),
             ShellCommands.cpuCoreDump(),
             ShellCommands.cpuCoreFreq(),
-            ShellCommands.gpuBusy()
+            ShellCommands.gpuBusy(),
+            ShellCommands.ddrFreq(),
+            ShellCommands.threadStat(packageName),
+            ShellCommands.clockTicks()
         )
         val result = hub.execOrNull(script)
 
@@ -58,6 +65,14 @@ class SystemSampler(private val hub: ShellHub) {
         val thermals = Parsers.parseThermals(part(3))
         val cpuGroups = cpuGroups(part(4), part(5))
         val gpuPercent = gpuPercent(part(6))
+        val scene = sceneCollectors.parse(
+            coreDump = part(4),
+            coreFreqDump = part(5),
+            ddrDump = part(7),
+            threadDump = part(8),
+            clockDump = part(9),
+            nowWallMs = System.currentTimeMillis()
+        )
 
         val gpuName = Parsers.parseGpuName(gpu)
         val gpuFreq = Parsers.parseGpuFreq(gpu)
@@ -79,6 +94,11 @@ class SystemSampler(private val hub: ShellHub) {
         record(availability, sources, SystemMetric.GPU_NAME, gpuName != null, "GPU_NAME", "privileged SurfaceFlinger")
         record(availability, sources, SystemMetric.GPU_FREQ_MHZ, gpuFreq != null, "GPU_FREQ_MHZ", "privileged GPU frequency node")
         record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "privileged thermalservice")
+        record(availability, sources, SystemMetric.CPU_TEMP_C, cpuTemp != null, "CPU_TEMP_C", "named CPU/SoC thermal sensor")
+        record(availability, sources, SystemMetric.GPU_PERCENT, gpuPercent != null, "GPU_PERCENT", "GPU busy/total counters")
+        record(availability, sources, SystemMetric.CPU_CORES, scene.cpuCoreLoadPct.any { it != null }, "CPU_CORES", "per-core /proc/stat")
+        record(availability, sources, SystemMetric.DDR_FREQ_MHZ, scene.ddrFreqMHz != null, "DDR_FREQ_MHZ", "memory devfreq")
+        record(availability, sources, SystemMetric.THREAD_LOAD, scene.threadLoads.isNotEmpty(), "THREAD_LOAD", "per-thread /proc/<pid>/task")
         record(availability, sources, SystemMetric.THERMAL_STATUS, thermalStatus != null, "THERMAL_STATUS", "thermalservice status")
 
         return SystemMetrics(
@@ -88,6 +108,10 @@ class SystemSampler(private val hub: ShellHub) {
             gpuFreqMHz = gpuFreq?.let { it / 1000 },
             gpuPercent = gpuPercent,
             cpuGroups = cpuGroups,
+            cpuCoreLoadPct = scene.cpuCoreLoadPct,
+            cpuCoreFreqMHz = scene.cpuCoreFreqMHz,
+            ddrFreqMHz = scene.ddrFreqMHz,
+            threadLoads = scene.threadLoads,
             thermalMaxC = maxThermal,
             cpuTempC = cpuTemp,
             thermalStatus = thermalStatus,
@@ -97,6 +121,13 @@ class SystemSampler(private val hub: ShellHub) {
             measuredAtElapsedNanos = now
         )
     }
+
+    /** Source label for the extra Scene-style collectors, for the diagnostics report. */
+    fun sceneSourceText(): String = buildString {
+        appendLine("per-core CPU: /proc/stat + cpufreq scaling_cur_freq")
+        appendLine("memory clock: devfreq cur_freq")
+        appendLine("thread CPU: /proc/<pid>/task/<tid>/stat")
+    }.trimEnd()
 
     /**
      * Real CPU clusters: cores are grouped by the maximum clock the kernel reports.

@@ -411,6 +411,11 @@ fun SessionDetailScreen(
         item { CpuUsageCard(session) }
         item { CpuFrequencyCard(session) }
 
+        item { SectionHeader("Scene detail") }
+        item { SceneDetailCard(session) }
+        item { PerCoreCard(session) }
+        item { ThreadsCard(session) }
+
         item { SectionHeader("Before & after") }
         item { BeforeAfterCard(session) }
 
@@ -1064,6 +1069,191 @@ private fun FpsTemperatureCard(session: SessionRecord, threshold: Int) {
         TimeAxis(session.durationMs, maxCount(fps, temps))
         Text(
             text = "FPS and temperature use their own ranges shown above.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = Space.sm)
+        )
+    }
+}
+
+/** A tiny text bar keeps the per-core and per-thread tables compact. */
+private fun loadBar(value: Float?, max: Float, width: Int = 12): String {
+    val number = value?.finiteOrNull() ?: return "--"
+    val filled = if (max <= 0f) 0 else (number / max * width).toInt().coerceIn(0, width)
+    return "█".repeat(filled) + "░".repeat(width - filled)
+}
+
+/** The numbers a Scene performance report keeps besides the five main graphs. */
+@Composable
+private fun SceneDetailCard(session: SessionRecord) {
+    val gpuLoad = positiveValues(session.gpuPercentSeries)
+    val gpuClock = positiveValues(session.gpuFreqSeries)
+    val ddr = session.ddrFreqSeries.filter { it > 0 }
+    val chipTemps = positiveValues(
+        session.cpuTempSeries.ifEmpty { session.socTempSeries }
+    ).mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+
+    Panel {
+        SectionHeader("Clocks & load")
+        Row(Modifier.fillMaxWidth()) {
+            StatCell(
+                "GPU LOAD AVG", fmt(gpuLoad.averageOrNull(), 1), "%",
+                MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f).padding(end = Space.sm)
+            )
+            StatCell(
+                "GPU CLOCK MAX", fmt(gpuClock.maxOrNull(), 0), "MHz",
+                MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(Space.sm))
+        Row(Modifier.fillMaxWidth()) {
+            StatCell(
+                "DDR MAX", fmt(ddr.maxOrNull()?.toFloat(), 0), "MHz",
+                MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f).padding(end = Space.sm)
+            )
+            StatCell(
+                "DDR AVG", fmt(ddr.averageOrNull()?.toFloat(), 0), "MHz",
+                MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(Space.md))
+
+        SectionHeader("Chip temperature")
+        Row(Modifier.fillMaxWidth()) {
+            StatCell(
+                "CPU TEMP AVG", fmt(chipTemps.averageOrNull(), 1), "°C",
+                MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f).padding(end = Space.sm)
+            )
+            StatCell(
+                "CPU TEMP MAX", fmt(chipTemps.maxOrNull(), 1), "°C",
+                MaterialTheme.status.critical,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Spacer(Modifier.height(Space.md))
+
+        SectionHeader("Battery electrical")
+        MetricLine(
+            "Current (avg)", fmt(session.avgCurrentMa, 1, " mA"),
+            MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        MetricLine(
+            "Voltage", session.voltageMv?.takeIf { it > 0 }?.toString() ?: "--",
+            MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        MetricLine(
+            "Charge cycles", session.batteryCycles?.toString() ?: "--",
+            MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** Real per-core readings as a compact table, so the graph count stays at five. */
+@Composable
+private fun PerCoreCard(session: SessionRecord) {
+    val loads = session.perCoreLoadSeries
+    val clocks = session.perCoreFreqSeries
+    val count = maxOf(loads.size, clocks.size)
+    Panel {
+        Text(
+            "Per-core CPU",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(Space.sm))
+        if (count == 0) {
+            Text(
+                "Per-core counters: -- (this device does not publish them)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            return@Panel
+        }
+        val peakLoad = loads.maxOfOrNull { row ->
+            row.mapNotNull { it?.finiteOrNull() }.maxOrNull() ?: 0f
+        }?.takeIf { it > 0f } ?: 100f
+        repeat(count) { core ->
+            val averages = loads.getOrNull(core).orEmpty().mapNotNull { it?.finiteOrNull() }
+            val avg = averages.averageOrNull()
+            val clock = clocks.getOrNull(core).orEmpty().mapNotNull { it?.takeIf { v -> v > 0 } }
+                .maxOrNull()
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = Space.xs),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("CPU$core", style = MonoInline,
+                    color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    loadBar(avg, peakLoad) + "  " + fmt(avg, 0) + "%",
+                    style = MonoInline,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    fmt(clock?.toFloat(), 0) + " MHz",
+                    style = MonoInline,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Text(
+            "Average load and peak clock from real /proc counters.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = Space.sm)
+        )
+    }
+}
+
+/** Busiest real threads of the measured game, with average and peak load. */
+@Composable
+private fun ThreadsCard(session: SessionRecord) {
+    val names = session.threadNames
+    Panel {
+        Text(
+            "Top threads",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(Space.sm))
+        if (names.isEmpty()) {
+            Text(
+                "Thread counters: -- (the game process was not readable)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            return@Panel
+        }
+        val peak = session.threadMaxLoads.maxOrNull()?.takeIf { it > 0f } ?: 100f
+        names.forEachIndexed { index, name ->
+            val avg = session.threadAvgLoads.getOrNull(index)
+            val max = session.threadMaxLoads.getOrNull(index)
+            Column(Modifier.padding(vertical = Space.xs)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(name, style = MonoInline,
+                        color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "avg ${fmt(avg, 1)}% · max ${fmt(max, 1)}%",
+                        style = MonoInline,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    loadBar(avg, peak, 18),
+                    style = MonoInline,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+        Text(
+            "One thread cannot use more than one CPU core (100%).",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = Space.sm)

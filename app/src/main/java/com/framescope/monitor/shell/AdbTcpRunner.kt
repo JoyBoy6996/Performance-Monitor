@@ -200,6 +200,25 @@ class AdbTcpRunner(
         true
     }
 
+    /**
+     * Installs our public key through a privileged shell that is already
+     * available (Shizuku, or the app's own shell with DUMP). Doing this before
+     * any ADB socket exists means the phone trusts the key in advance: the
+     * prompt is a one-time event and a port reset never asks again.
+     */
+    suspend fun trustKeyWith(
+        exec: suspend (String, Long) -> ShellResult
+    ): Boolean {
+        val result = runCatching { exec(storeKeyCommand(), STORE_KEY_TIMEOUT_MS) }.getOrNull()
+            ?: return false
+        val ok = result.ok && result.out.contains(KEYS_OK_MARKER)
+        if (ok) {
+            keys.markAuthorisationStored()
+            _authState.value = AdbAuthState.STORED
+        }
+        return ok
+    }
+
     fun fingerprint(): String = keys.publicKeyFingerprint()
 
     override suspend fun unavailableReason(): String = lastError

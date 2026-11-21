@@ -128,6 +128,17 @@ class ShellHub(
     suspend fun setupAdbBridge(): String = withContext(Dispatchers.IO) {
         adb.retarget(LOOPBACK, adbPort)
 
+        // Give Shizuku one fresh chance first. Without a privileged shell the
+        // app cannot install its key or open an ADB port on a stock ROM.
+        if (shizukuHelper() == null) {
+            runCatching { shizukuRunner.refresh(forceReconnect = true) }
+        }
+
+        // The USB debugging prompt the user sees while starting Shizuku is for
+        // Shizuku's key, not ours. Install our own key with the already-available
+        // privileged shell first, so FrameScope never needs a second prompt.
+        trustKeyWithShell(shizukuHelper())
+
         if (runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false)) {
             return@withContext finishAdbSetup()
         }
@@ -172,6 +183,17 @@ class ShellHub(
     private fun shizukuHelper(): ShellRunner? = shizukuRunner
         .takeIf { it.connectionState.value == ShizukuRunner.ConnectionState.READY }
 
+    /** Uses Shizuku (or DUMP) to place our key on the phone before ADB starts. */
+    private suspend fun trustKeyWithShell(helper: ShellRunner?): Boolean {
+        if (helper == null && !hasDumpPermission()) return false
+        return adb.trustKeyWith { command, timeout ->
+            when {
+                helper != null -> helper.exec(command, timeout)
+                else -> execLocalShell(command, timeout)
+            }
+        }
+    }
+
     /** Tells the truth about which prerequisite is actually missing. */
     private suspend fun adbSetupFailureMessage(): String {
         val reason = adb.unavailableReason()
@@ -206,30 +228,36 @@ class ShellHub(
     }
 
     private suspend fun bootstrapAdbPort(helper: ShellRunner?): Boolean {
-        val command = "setprop service.adb.tcp.port $adbPort; " +
+        // ROMs differ in which property they honour. Try the known variants
+        // instead of giving up after one rejected command.
+        val commands = listOf(
+            "setprop service.adb.tcp.port $adbPort; " +
+                "setprop persist.adb.tcp.port $adbPort; stop adbd; start adbd",
+            "setprop service.adb.tcp.port $adbPort; setprop ctl.restart adbd",
             "setprop persist.adb.tcp.port $adbPort; stop adbd; start adbd"
-        val accepted = runCatching {
-            when {
-                helper != null -> helper.exec(command, 8_000).ok
-                hasDumpPermission() -> execLocalShell(command, 8_000).ok
-                else -> false
-            }
-        }.getOrDefault(false)
-        if (!accepted) {
-            // A rejected restart must not leave adbd stopped. Bring it back
-            // before reporting failure, so Wireless debugging still works.
-            runCatching {
+        )
+        for (command in commands) {
+            val accepted = runCatching {
                 when {
-                    helper != null -> helper.exec("start adbd", 3_000)
-                    hasDumpPermission() -> execLocalShell("start adbd", 3_000)
-                    else -> null
+                    helper != null -> helper.exec(command, 8_000).ok
+                    hasDumpPermission() -> execLocalShell(command, 8_000).ok
+                    else -> false
                 }
+            }.getOrDefault(false)
+            if (!accepted) continue
+            repeat(6) {
+                delay(700)
+                if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
             }
-            return false
         }
-        repeat(6) {
-            delay(700)
-            if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
+        // A rejected restart must not leave adbd stopped. Bring it back before
+        // reporting failure, so Wireless debugging still works.
+        runCatching {
+            when {
+                helper != null -> helper.exec("start adbd", 3_000)
+                hasDumpPermission() -> execLocalShell("start adbd", 3_000)
+                else -> null
+            }
         }
         return false
     }

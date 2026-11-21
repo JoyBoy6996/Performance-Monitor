@@ -314,7 +314,8 @@ fun SettingsScreen(
                         adbAuth == AdbAuthState.PROMPT_SENT ->
                             "Bridge: waiting for the “Allow USB debugging?” prompt on your phone."
                         adbAuth == AdbAuthState.STORED ->
-                            "Bridge: key is trusted. It will reconnect when the bridge is available."
+                            "Bridge: key is trusted. Keep Shizuku running (or Wireless debugging ON); " +
+                                "the port opens and reconnects by itself."
                         else -> "Bridge: not set up yet. Start Shizuku, or tap Set up bridge."
                     }
                     Text(

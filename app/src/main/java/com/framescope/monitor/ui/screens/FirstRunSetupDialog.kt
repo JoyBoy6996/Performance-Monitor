@@ -28,6 +28,10 @@ import kotlinx.coroutines.launch
 
 private const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
 
+// ShizukuNext keeps the same package and API, and can start without Wi-Fi.
+// Send users here when no Shizuku app is installed yet.
+private const val SHIZUKU_NEXT_RELEASES = "https://github.com/rushiranpise/Shizuku-Next/releases"
+
 /**
  * A one-screen setup for first-time users.
  *
@@ -58,8 +62,8 @@ fun FirstRunSetupDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     "FrameScope needs one-time access to read your game's FPS. " +
-                        "Tap Grant access, then choose Allow in the Shizuku popup. " +
-                        "The app will do the rest."
+                        "ShizukuNext starts without Wi-Fi (USB debugging). Install it, tap " +
+                        "Grant access, then choose Allow in its popup. The app does the rest."
                 )
                 Text(message ?: adbMessage ?: status.detail.orEmptyIfBlank())
                 Text(
@@ -70,14 +74,14 @@ fun FirstRunSetupDialog(
                     }
                 )
                 Text(
-                    "Prefer Shizuku. With USB debugging ON and FrameScope permission granted in " +
-                        "Shizuku, the local bridge opens by itself — no Wi-Fi or PC needed. If it " +
-                        "does not appear, tap Set up ADB bridge once. Wireless debugging is only " +
-                        "a fallback."
+                    "No Wi-Fi? Use ShizukuNext — start it from USB debugging, no PC needed. " +
+                        "After FrameScope permission is granted, the local bridge opens by itself. " +
+                        "If it does not appear, tap Set up ADB bridge once. Official Shizuku or " +
+                        "wireless debugging work too."
                 )
                 Column {
                     TextButton(onClick = { openShizuku(context) }) {
-                        Text("Open Shizuku")
+                        Text("Open Shizuku / Get Next")
                     }
                     TextButton(onClick = onRequestOverlayPermission) {
                         Text("Overlay permission")
@@ -156,7 +160,7 @@ fun FirstRunSetupDialog(
 }
 
 private fun String.orEmptyIfBlank(): String = if (isBlank()) {
-    "If Shizuku is missing, use Open Shizuku first."
+    "If Shizuku is missing, tap Open Shizuku to get ShizukuNext (no Wi-Fi needed)."
 } else {
     this
 }
@@ -169,7 +173,7 @@ private fun openShizuku(context: Context) {
     val launchIntent = context.packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
     val intent = launchIntent ?: Intent(
         Intent.ACTION_VIEW,
-        Uri.parse("https://play.google.com/store/apps/details?id=$SHIZUKU_PACKAGE")
+        Uri.parse(SHIZUKU_NEXT_RELEASES)
     )
     runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
 }

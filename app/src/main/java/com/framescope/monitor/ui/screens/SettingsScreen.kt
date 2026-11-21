@@ -283,7 +283,7 @@ fun SettingsScreen(
                 SetupOption(
                     title = "Start Shizuku",
                     badge = "Required",
-                    description = "Install and start Shizuku with the official guide for your device, then grant FrameScope permission above. FrameScope checks a real UserService command before it reports Connected. Shell access lasts only as long as Shizuku runs.",
+                    description = "For phones without Wi-Fi, use ShizukuNext: start it from USB debugging, no PC needed. Grant FrameScope permission above. Official Shizuku and wireless debugging work too. FrameScope checks a real UserService command before it reports Connected.",
                     context = context
                 )
             }

@@ -231,7 +231,9 @@ class ShellHub(
             else -> "Shizuku is not ready yet."
         }
         return "Could not open the local ADB bridge. $reason $shellHint " +
-            "Alternative: turn on Wireless debugging and tap Set up bridge again."
+            "No Wi-Fi and no PC option: connect USB to a PC once, run 'adb tcpip 5555', " +
+            "unplug, then tap Set up bridge here and check “Always allow”. " +
+            "Or turn on Wireless debugging and tap Set up bridge again."
     }
 
     /** Confirms that the phone kept the key, not just this one session. */

@@ -74,10 +74,11 @@ fun FirstRunSetupDialog(
                     }
                 )
                 Text(
-                    "No Wi-Fi? Use ShizukuNext — start it from USB debugging, no PC needed. " +
-                        "After FrameScope permission is granted, the local bridge opens by itself. " +
-                        "If it does not appear, tap Set up ADB bridge once. Official Shizuku or " +
-                        "wireless debugging work too."
+                    "No Wi-Fi? Two ways, both offline after one setup. " +
+                        "1) PC + USB cable once: run 'adb tcpip 5555' on the PC, then tap Set up ADB " +
+                        "bridge here and check “Always allow” on the prompt. " +
+                        "2) No PC: start ShizukuNext from USB debugging and grant FrameScope permission. " +
+                        "Afterwards it reconnects on 127.0.0.1 by itself — no PC and no Wi-Fi."
                 )
                 Column {
                     TextButton(onClick = { openShizuku(context) }) {

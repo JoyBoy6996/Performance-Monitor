@@ -222,8 +222,8 @@ class AdbTcpRunner(
     fun fingerprint(): String = keys.publicKeyFingerprint()
 
     override suspend fun unavailableReason(): String = lastError
-        ?: "No ADB bridge on $host:$port. Start Shizuku so the app can open it, " +
-            "or turn on Wireless debugging."
+        ?: "No ADB bridge on $host:$port. Open it one way: PC + USB once with 'adb tcpip 5555', " +
+            "start ShizukuNext, or turn on Wireless debugging."
 
     override suspend fun exec(command: String, timeoutMs: Long): ShellResult = mutex.withLock {
         val active = session?.takeIf { it.isAlive } ?: try {

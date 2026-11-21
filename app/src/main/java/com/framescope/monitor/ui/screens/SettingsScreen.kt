@@ -301,10 +301,11 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(Space.sm))
                     Text(
-                        text = "Shizuku stays first. With USB debugging ON, Shizuku can open this bridge " +
-                            "for the app — no PC and no Wi-Fi needed. Wireless debugging is an alternative " +
-                            "if your phone blocks that. One ADB key is trusted once, then reconnects on " +
-                            "127.0.0.1 by itself.",
+                        text = "No Wi-Fi and no Shizuku? Connect the phone to a PC with a USB cable once and " +
+                            "run 'adb tcpip 5555' on the PC, then unplug. Tap Set up bridge here, approve the " +
+                            "“Allow USB debugging?” prompt, and the key is saved. After that it reconnects on " +
+                            "127.0.0.1 by itself — no PC, no Wi-Fi, no Shizuku. Shizuku and wireless debugging " +
+                            "are other ways to open the same port.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -407,12 +408,19 @@ fun SettingsScreen(
                             onClick = {
                                 Diagnostics.copy(
                                     context,
-                                    "FrameScope local ADB setup\n" +
-                                        "1. Start Shizuku and grant FrameScope permission.\n" +
-                                        "2. Keep USB debugging ON in Developer options.\n" +
-                                        "3. Tap Set up bridge in FrameScope. It installs its own key through Shizuku.\n" +
-                                        "4. If a prompt still appears, check “Always allow” and match: ${status.adbFingerprint}\n" +
-                                        "Wireless debugging is only a fallback. After the key is saved, FrameScope reconnects by itself on 127.0.0.1."
+                                    "FrameScope local ADB setup - pick ONE way to open port 5555\n" +
+                                        "\n" +
+                                        "A) NO Wi-Fi, NO Shizuku (PC + USB cable, one time):\n" +
+                                        "   1. Developer options -> USB debugging ON.\n" +
+                                        "   2. Connect phone to PC with USB cable.\n" +
+                                        "   3. On the PC run: adb tcpip 5555\n" +
+                                        "   4. Unplug the cable.\n" +
+                                        "   5. In FrameScope tap Set up bridge.\n" +
+                                        "   6. On the phone prompt tick “Always allow” and match: ${status.adbFingerprint}\n" +
+                                        "\n" +
+                                        "B) NO PC: install ShizukuNext, start it from USB debugging, grant FrameScope permission, then tap Set up bridge.\n" +
+                                        "\n" +
+                                        "After the key is saved once, FrameScope reconnects by itself on 127.0.0.1 - offline, no PC and no Wi-Fi needed."
                                 )
                                 adbMessage = "Setup steps copied - paste them where needed."
                             }

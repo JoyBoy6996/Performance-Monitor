@@ -119,7 +119,7 @@ fun TelemetryChart(
     usable.forEach { line ->
         val valid = line.values.mapNotNull { it.finiteOrNull() }
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = Space.xs),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(

@@ -181,7 +181,7 @@ private fun SessionCard(
                     text = formattedDate,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp)
+                    modifier = Modifier.padding(top = Space.xs)
                 )
             }
             IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {

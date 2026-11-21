@@ -41,6 +41,7 @@ import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.Panel
+import com.framescope.monitor.ui.components.PanelDivider
 import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.Sparkline
 import com.framescope.monitor.ui.components.SpikeChart
@@ -219,6 +220,8 @@ fun SessionDetailScreen(
                     )
                 }
                 Spacer(Modifier.height(Space.md))
+
+                SectionHeader("Frame pacing")
                 MetricLine(
                     label = "Frames",
                     value = session.totalFrames.toString(),
@@ -236,11 +239,6 @@ fun SessionDetailScreen(
                 MetricLine(
                     label = "Jank-free frames",
                     value = fmt(session.smoothness, 1, "%"),
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                MetricLine(
-                    label = "Held $threshold fps target",
-                    value = fmt(targetHold(session, threshold), 1, "%"),
                     accent = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 MetricLine(
@@ -267,6 +265,23 @@ fun SessionDetailScreen(
                     value = "${fmt(session.minFps, 0)}–${fmt(session.maxFps, 0)} fps",
                     accent = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                val jitter = session.jitterMs ?: frameTimeJitterMs(session.frameTimeSeries)
+                jitter?.let {
+                    MetricLine(
+                        label = "Jitter",
+                        value = fmt(it, 2, " ms"),
+                        accent = if (it > 3f) MaterialTheme.status.warn
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                PanelDivider()
+                SectionHeader("Target & cap")
+                MetricLine(
+                    label = "Held $threshold fps target",
+                    value = fmt(targetHold(session, threshold), 1, "%"),
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 val capNow = session.capSeries.lastOrNull()?.takeIf { it > 0f }
                 MetricLine(
                     label = "Detected FPS cap",
@@ -285,15 +300,9 @@ fun SessionDetailScreen(
                         accent = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                val jitter = session.jitterMs ?: frameTimeJitterMs(session.frameTimeSeries)
-                jitter?.let {
-                    MetricLine(
-                        label = "Jitter",
-                        value = fmt(it, 2, " ms"),
-                        accent = if (it > 3f) MaterialTheme.status.warn
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+
+                PanelDivider()
+                SectionHeader("Heat & power")
                 session.avgPowerW?.let {
                     MetricLine(
                         label = "Average power",
@@ -333,6 +342,9 @@ fun SessionDetailScreen(
                         accent = MaterialTheme.status.warn
                     )
                 }
+
+                PanelDivider()
+                SectionHeader("Device load")
                 session.avgCpu?.let {
                     MetricLine(
                         label = "Average CPU",
@@ -349,6 +361,7 @@ fun SessionDetailScreen(
                         accent = MaterialTheme.status.good
                     )
                 }
+
                 Spacer(Modifier.height(Space.sm))
                 StatusPill(
                     text = when {
@@ -448,16 +461,23 @@ fun SessionDetailScreen(
 
         item { SectionHeader("Graph details") }
 
+        item { SectionHeader("Overview") }
         item { ThermalWarningCard(session) }
         item { DeviceProfileCard(session) }
         item { SessionNoteCard(session, onUpdateNote) }
         item { AppMetricsCard(session) }
+
+        item { SectionHeader("Frame rate & pacing") }
         item { FpsTemperatureCard(session, threshold) }
         item { FrameTimeCard(session) }
+
+        item { SectionHeader("Device load") }
         item { CpuUsageCard(session) }
         item { CpuFrequencyCard(session) }
         item { PowerCapacityCard(session) }
         item { CpuTemperatureCard(session) }
+
+        item { SectionHeader("Diagnostics") }
         item { ShellLogsCard(session.shellLogs) }
     }
 }
@@ -582,11 +602,12 @@ private fun LinkedTimelinePanel(session: SessionRecord, threshold: Int) {
             style = MaterialTheme.typography.labelSmall,
             color = muted
         )
+        Spacer(Modifier.height(Space.xs))
         moments.forEach { moment ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 3.dp),
+                    .padding(vertical = Space.xs),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
@@ -630,7 +651,7 @@ private fun CapChangesPanel(session: SessionRecord) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 3.dp),
+                    .padding(vertical = Space.xs),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
@@ -821,7 +842,7 @@ private fun DropsPanel(session: SessionRecord, threshold: Int) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 3.dp),
+                    .padding(vertical = Space.xs),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text(
@@ -893,6 +914,7 @@ private fun ThermalWarningCard(session: SessionRecord) {
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurface
             )
+            Spacer(Modifier.height(Space.xs))
             Text(
                 text = "Peak temperature ${fmt(peak, 1, "°C")}",
                 style = MaterialTheme.typography.bodySmall,
@@ -936,22 +958,31 @@ private fun DeviceProfileCard(session: SessionRecord) {
         "Profile" to thermalStatusLabel(session.peakThermalStatus)
     )
     Panel {
-        Row(Modifier.fillMaxWidth()) {
-            entries.forEach { (label, value) ->
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(3.dp))
-                    Text(
-                        text = value,
-                        style = MonoInline,
-                        color = if (value == "--") {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else MaterialTheme.colorScheme.onSurface
-                    )
+        // Two per row instead of four: model names and OS strings need room,
+        // and the eye can pair a label with its value without scanning sideways.
+        entries.chunked(2).forEachIndexed { rowIndex, row ->
+            if (rowIndex > 0) Spacer(Modifier.height(Space.md))
+            Row(Modifier.fillMaxWidth()) {
+                row.forEachIndexed { index, (label, value) ->
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .padding(end = if (index == 0) Space.sm else 0.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(Space.xs))
+                        Text(
+                            text = value,
+                            style = MonoInline,
+                            color = if (value == "--") {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
             }
         }
@@ -976,6 +1007,7 @@ private fun SessionNoteCard(session: SessionRecord, onUpdateNote: (String) -> Un
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(Modifier.height(Space.xs))
                 Text(
                     text = note.ifBlank { "Note not set, click here to enter" },
                     style = MaterialTheme.typography.bodyMedium,
@@ -1026,25 +1058,35 @@ private fun AppMetricsCard(session: SessionRecord) {
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
     }.format(Date(session.startedAt))
     Panel {
+        // Four columns squeeze the value and its unit together on a phone.
+        // Two per row keeps every reading readable without guessing.
+        SectionHeader("Frame rate")
         Row(Modifier.fillMaxWidth()) {
             StatCell("MAX", fmt(session.maxFps, 1), "FPS", MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f))
+                modifier = Modifier.weight(1f).padding(end = Space.sm))
             StatCell("MIN", fmt(session.minFps, 1), "FPS", MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(Space.sm))
+        Row(Modifier.fillMaxWidth()) {
             StatCell("AVG", fmt(session.avgFps, 1), "FPS", MaterialTheme.colorScheme.primary,
-                modifier = Modifier.weight(1f))
-            StatCell("JITTER", fmt(jitterPct, 1), "%", MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f).padding(end = Space.sm))
+            StatCell("5% LOW", fmt(session.low5Percent, 1), "FPS", MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f))
         }
         Spacer(Modifier.height(Space.md))
+        SectionHeader("Device averages")
         Row(Modifier.fillMaxWidth()) {
-            StatCell("5% LOW", fmt(session.low5Percent, 1), "FPS", MaterialTheme.status.warn,
+            StatCell("JITTER", fmt(jitterPct, 1), "%", MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f).padding(end = Space.sm))
+            StatCell("POWER", fmt(session.avgPowerW, 2), "W", MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1f))
-            StatCell("AVG", fmt(avgTemp, 1), "SOC(°C)", MaterialTheme.status.critical,
-                modifier = Modifier.weight(1f))
-            StatCell("MAX", fmt(maxBatteryTemp, 1), "Battery(°C)", MaterialTheme.status.critical,
-                modifier = Modifier.weight(1f))
-            StatCell("AVG", fmt(session.avgPowerW, 2), "Power(W)", MaterialTheme.colorScheme.primary,
+        }
+        Spacer(Modifier.height(Space.sm))
+        Row(Modifier.fillMaxWidth()) {
+            StatCell("BATT AVG", fmt(avgTemp, 1), "°C", MaterialTheme.status.critical,
+                modifier = Modifier.weight(1f).padding(end = Space.sm))
+            StatCell("BATT MAX", fmt(maxBatteryTemp, 1), "°C", MaterialTheme.status.critical,
                 modifier = Modifier.weight(1f))
         }
         Spacer(Modifier.height(Space.md))
@@ -1081,7 +1123,8 @@ private fun FpsTemperatureCard(session: SessionRecord, threshold: Int) {
         Text(
             text = "Each line uses its own range shown above; GPU appears only when the device reports load.",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = Space.sm)
         )
     }
 }
@@ -1124,7 +1167,8 @@ private fun CpuUsageCard(session: SessionRecord) {
         if (groups.isEmpty()) {
             Text("Per-cluster CPU load is not reported on this device.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = Space.sm))
         }
     }
 }
@@ -1160,7 +1204,8 @@ private fun CpuFrequencyCard(session: SessionRecord) {
         if (groups.isEmpty()) {
             Text("Per-cluster clocks are not reported on this device.",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = Space.sm))
         }
     }
 }

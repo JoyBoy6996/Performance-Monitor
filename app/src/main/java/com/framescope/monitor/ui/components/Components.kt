@@ -123,7 +123,11 @@ fun SectionHeader(
     trailing: (@Composable RowScope.() -> Unit)? = null
 ) {
     Row(
-        modifier = modifier.fillMaxWidth(),
+        // A section is a new thought, not another row. The small top gap keeps it
+        // from gluing itself to the panel above on dense screens.
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = Space.xs, bottom = Space.xs),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -214,7 +218,7 @@ fun MetricLine(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = Space.xs),
+            .padding(vertical = Space.sm),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {

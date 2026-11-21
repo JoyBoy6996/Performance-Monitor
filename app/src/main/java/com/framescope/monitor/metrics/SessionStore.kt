@@ -21,6 +21,33 @@ import java.io.File
 /** Never write NaN or infinity into an export; it makes the backup invalid. */
 private fun List<Float>.finiteDoubles(): List<Double> = mapNotNull { it.finiteOrNull()?.toDouble() }
 
+/** A missing per-second reading stays null in a backup, never a made-up zero. */
+private fun List<List<Float?>>.toNullableJsonArrays(): JSONArray = JSONArray().apply {
+    forEach { row ->
+        put(JSONArray().apply {
+            row.forEach { value ->
+                put(value?.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+            }
+        })
+    }
+}
+
+private fun JSONArray?.toNullableFloatLists(): List<List<Float?>> {
+    if (this == null) return emptyList()
+    val out = ArrayList<List<Float?>>(length())
+    for (i in 0 until length()) {
+        val row = optJSONArray(i) ?: continue
+        val values = ArrayList<Float?>(row.length())
+        for (j in 0 until row.length()) {
+            values.add(
+                if (row.isNull(j)) null else row.optDouble(j, 0.0).toFloat().finiteOrNull()
+            )
+        }
+        out.add(values)
+    }
+    return out
+}
+
 /** Reads the device facts stored with a run; a missing block is simply unknown. */
 private fun JSONObject?.toDeviceInfo(): SessionDeviceInfo {
     if (this == null) return SessionDeviceInfo()
@@ -127,6 +154,18 @@ class SessionStore(context: Context) {
         }
     }
 
+    /** Saves a user's note without touching any measured value. */
+    @Synchronized
+    fun updateNote(id: String, note: String) {
+        val current = _sessions.value.firstOrNull { it.id == id } ?: return
+        val updated = current.copy(note = note.take(2_000))
+        _sessions.value = _sessions.value.map { if (it.id == id) updated else it }
+        ioScope.launch {
+            runCatching { dbHelper.updateNote(id, updated.note) }
+            runCatching { File(dir, "$id.json").writeText(toJson(updated)) }
+        }
+    }
+
     @Synchronized
     fun importRecords(records: List<SessionRecord>) {
         _sessions.value = (records + _sessions.value).distinctBy { it.id }.take(MAX_RECORDS)
@@ -213,6 +252,16 @@ class SessionStore(context: Context) {
         }))
         put("thermalCapSeconds", record.thermalCapSeconds)
         put("sceneSmoothnessPercent", record.sceneSmoothnessPercent.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("powerSeries", JSONArray(record.powerSeries.finiteDoubles()))
+        put("cpuFreqSeries", JSONArray(record.cpuFreqSeries.finiteDoubles()))
+        put("gpuFreqSeries", JSONArray(record.gpuFreqSeries.finiteDoubles()))
+        put("cpuTempSeries", JSONArray(record.cpuTempSeries.finiteDoubles()))
+        put("gpuPercentSeries", JSONArray(record.gpuPercentSeries.finiteDoubles()))
+        put("cpuGroupNames", JSONArray(record.cpuGroupNames))
+        put("cpuGroupSeries", record.cpuGroupSeries.toNullableJsonArrays())
+        put("cpuGroupFreqSeries", record.cpuGroupFreqSeries.toNullableJsonArrays())
+        put("shellLogs", record.shellLogs)
+        put("note", record.note)
         put("device", JSONObject().apply {
             put("model", record.device.model ?: JSONObject.NULL)
             put("platform", record.device.platform ?: JSONObject.NULL)
@@ -264,19 +313,37 @@ class SessionStore(context: Context) {
             sceneSmoothnessPercent = if (o.isNull("sceneSmoothnessPercent")) null else {
                 o.optDouble("sceneSmoothnessPercent").toFloat().finiteOrNull()
             },
+            powerSeries = o.optJSONArray("powerSeries").toFloatList(),
+            cpuFreqSeries = o.optJSONArray("cpuFreqSeries").toFloatList(),
+            gpuFreqSeries = o.optJSONArray("gpuFreqSeries").toFloatList(),
+            cpuTempSeries = o.optJSONArray("cpuTempSeries").toFloatList(),
+            gpuPercentSeries = o.optJSONArray("gpuPercentSeries").toFloatList(),
+            cpuGroupNames = o.optJSONArray("cpuGroupNames")?.let { names ->
+                (0 until names.length()).mapNotNull { i ->
+                    names.optString(i).takeIf { it.isNotBlank() }
+                }
+            }.orEmpty(),
+            cpuGroupSeries = o.optJSONArray("cpuGroupSeries").toNullableFloatLists(),
+            cpuGroupFreqSeries = o.optJSONArray("cpuGroupFreqSeries").toNullableFloatLists(),
+            shellLogs = o.optString("shellLogs"),
+            note = o.optString("note"),
             device = o.optJSONObject("device").toDeviceInfo()
         )
     }
 
     fun toCsv(record: SessionRecord): String {
         val sb = StringBuilder()
-        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status,cap_fps\n")
+        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status,cap_fps,")
+        sb.append("power_w,cpu_freq_mhz,gpu_freq_mhz,cpu_temp_c,gpu_percent\n")
         val size = maxOf(
             record.fpsSeries.size,
             record.cpuSeries.size,
             record.tempSeries.size,
             record.frameTimeSeries.size,
-            record.batterySeries.size
+            record.batterySeries.size,
+            record.powerSeries.size,
+            record.cpuFreqSeries.size,
+            record.cpuTempSeries.size
         )
         for (i in 0 until size) {
             sb.append(i).append(',')
@@ -289,6 +356,16 @@ class SessionStore(context: Context) {
             sb.append(record.thermalStatusSeries.getOrElse(i) { "" })
             sb.append(',')
             sb.append(record.capSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
+            sb.append(',')
+            sb.append(record.powerSeries.getOrElse(i) { "" })
+            sb.append(',')
+            sb.append(record.cpuFreqSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
+            sb.append(',')
+            sb.append(record.gpuFreqSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
+            sb.append(',')
+            sb.append(record.cpuTempSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
+            sb.append(',')
+            sb.append(record.gpuPercentSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
             sb.append('\n')
         }
         return sb.toString()
@@ -368,7 +445,17 @@ class SessionStore(context: Context) {
                     device_model TEXT,
                     device_platform TEXT,
                     device_resolution TEXT,
-                    device_os TEXT
+                    device_os TEXT,
+                    power_series TEXT,
+                    cpu_freq_series TEXT,
+                    gpu_freq_series TEXT,
+                    cpu_temp_series TEXT,
+                    gpu_percent_series TEXT,
+                    cpu_group_names TEXT,
+                    cpu_group_series TEXT,
+                    cpu_group_freq_series TEXT,
+                    shell_logs TEXT,
+                    note TEXT
                 )
                 """.trimIndent()
             )
@@ -418,6 +505,18 @@ class SessionStore(context: Context) {
                 addColumnIfMissing(db, TABLE_RECORDS, "device_platform", "TEXT")
                 addColumnIfMissing(db, TABLE_RECORDS, "device_resolution", "TEXT")
                 addColumnIfMissing(db, TABLE_RECORDS, "device_os", "TEXT")
+            }
+            if (oldVersion < 6) {
+                addColumnIfMissing(db, TABLE_RECORDS, "power_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "cpu_freq_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "gpu_freq_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "cpu_temp_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "gpu_percent_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "cpu_group_names", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "cpu_group_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "cpu_group_freq_series", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "shell_logs", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "note", "TEXT")
             }
         }
 
@@ -515,6 +614,16 @@ class SessionStore(context: Context) {
                 put("device_platform", record.device.platform)
                 put("device_resolution", record.device.resolution)
                 put("device_os", record.device.osVersion)
+                put("power_series", JSONArray(record.powerSeries.finiteDoubles()).toString())
+                put("cpu_freq_series", JSONArray(record.cpuFreqSeries.finiteDoubles()).toString())
+                put("gpu_freq_series", JSONArray(record.gpuFreqSeries.finiteDoubles()).toString())
+                put("cpu_temp_series", JSONArray(record.cpuTempSeries.finiteDoubles()).toString())
+                put("gpu_percent_series", JSONArray(record.gpuPercentSeries.finiteDoubles()).toString())
+                put("cpu_group_names", JSONArray(record.cpuGroupNames).toString())
+                put("cpu_group_series", record.cpuGroupSeries.toNullableJsonArrays().toString())
+                put("cpu_group_freq_series", record.cpuGroupFreqSeries.toNullableJsonArrays().toString())
+                put("shell_logs", record.shellLogs)
+                put("note", record.note)
             }
             writableDatabase.insertWithOnConflict(
                 TABLE_RECORDS,
@@ -522,6 +631,11 @@ class SessionStore(context: Context) {
                 cv,
                 SQLiteDatabase.CONFLICT_REPLACE
             )
+        }
+
+        fun updateNote(id: String, note: String) {
+            val cv = ContentValues().apply { put("note", note) }
+            writableDatabase.update(TABLE_RECORDS, cv, "id = ?", arrayOf(id))
         }
 
         fun insertSample(sample: SessionSample) {
@@ -571,6 +685,16 @@ class SessionStore(context: Context) {
                     val devicePlatformIdx = c.getColumnIndex("device_platform")
                     val deviceResolutionIdx = c.getColumnIndex("device_resolution")
                     val deviceOsIdx = c.getColumnIndex("device_os")
+                    val powerSeriesIdx = c.getColumnIndex("power_series")
+                    val cpuFreqSeriesIdx = c.getColumnIndex("cpu_freq_series")
+                    val gpuFreqSeriesIdx = c.getColumnIndex("gpu_freq_series")
+                    val cpuTempSeriesIdx = c.getColumnIndex("cpu_temp_series")
+                    val gpuPercentSeriesIdx = c.getColumnIndex("gpu_percent_series")
+                    val cpuGroupNamesIdx = c.getColumnIndex("cpu_group_names")
+                    val cpuGroupSeriesIdx = c.getColumnIndex("cpu_group_series")
+                    val cpuGroupFreqSeriesIdx = c.getColumnIndex("cpu_group_freq_series")
+                    val shellLogsIdx = c.getColumnIndex("shell_logs")
+                    val noteIdx = c.getColumnIndex("note")
                     list.add(
                         SessionRecord(
                             id = c.getString(c.getColumnIndexOrThrow("id")),
@@ -624,7 +748,42 @@ class SessionStore(context: Context) {
                                 platform = if (devicePlatformIdx >= 0) c.getString(devicePlatformIdx) else null,
                                 resolution = if (deviceResolutionIdx >= 0) c.getString(deviceResolutionIdx) else null,
                                 osVersion = if (deviceOsIdx >= 0) c.getString(deviceOsIdx) else null
-                            )
+                            ),
+                            powerSeries = if (powerSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(powerSeriesIdx))
+                            } else emptyList(),
+                            cpuFreqSeries = if (cpuFreqSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(cpuFreqSeriesIdx))
+                            } else emptyList(),
+                            gpuFreqSeries = if (gpuFreqSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(gpuFreqSeriesIdx))
+                            } else emptyList(),
+                            cpuTempSeries = if (cpuTempSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(cpuTempSeriesIdx))
+                            } else emptyList(),
+                            gpuPercentSeries = if (gpuPercentSeriesIdx >= 0) {
+                                jsonToFloatList(c.getString(gpuPercentSeriesIdx))
+                            } else emptyList(),
+                            cpuGroupNames = if (cpuGroupNamesIdx >= 0) {
+                                runCatching {
+                                    val arr = JSONArray(c.getString(cpuGroupNamesIdx))
+                                    (0 until arr.length()).mapNotNull { i ->
+                                        arr.optString(i).takeIf { it.isNotBlank() }
+                                    }
+                                }.getOrDefault(emptyList())
+                            } else emptyList(),
+                            cpuGroupSeries = if (cpuGroupSeriesIdx >= 0) {
+                                runCatching {
+                                    JSONArray(c.getString(cpuGroupSeriesIdx)).toNullableFloatLists()
+                                }.getOrDefault(emptyList())
+                            } else emptyList(),
+                            cpuGroupFreqSeries = if (cpuGroupFreqSeriesIdx >= 0) {
+                                runCatching {
+                                    JSONArray(c.getString(cpuGroupFreqSeriesIdx)).toNullableFloatLists()
+                                }.getOrDefault(emptyList())
+                            } else emptyList(),
+                            shellLogs = if (shellLogsIdx >= 0) c.getString(shellLogsIdx).orEmpty() else "",
+                            note = if (noteIdx >= 0) c.getString(noteIdx).orEmpty() else ""
                         )
                     )
                 }
@@ -655,7 +814,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 5
+            private const val DB_VERSION = 6
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

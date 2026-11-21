@@ -402,12 +402,11 @@ fun SettingsScreen(
                                 Diagnostics.copy(
                                     context,
                                     "FrameScope local ADB setup\n" +
-                                        "1. Open Developer options.\n" +
-                                        "2. Turn on USB debugging and Wireless debugging.\n" +
-                                        "3. Tap Set up bridge in FrameScope.\n" +
-                                        "4. Accept “Allow USB debugging?” with “Always allow”.\n" +
-                                        "5. Match this fingerprint: ${status.adbFingerprint}\n" +
-                                        "After that FrameScope reconnects by itself on 127.0.0.1."
+                                        "1. Start Shizuku and grant FrameScope permission.\n" +
+                                        "2. Keep USB debugging ON in Developer options.\n" +
+                                        "3. Tap Set up bridge in FrameScope. It installs its own key through Shizuku.\n" +
+                                        "4. If a prompt still appears, check “Always allow” and match: ${status.adbFingerprint}\n" +
+                                        "Wireless debugging is only a fallback. After the key is saved, FrameScope reconnects by itself on 127.0.0.1."
                                 )
                                 adbMessage = "Setup steps copied - paste them where needed."
                             }

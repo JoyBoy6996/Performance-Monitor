@@ -95,6 +95,7 @@ fun FrameScopeRoot(
                             session = session,
                             threshold = container.settings.fpsThreshold.flow.collectAsStateValue(),
                             onBack = { openSession = null },
+                            onUpdateNote = { note -> container.store.updateNote(session.id, note) },
                             bottomPadding = Space.xl
                         )
                     } else {

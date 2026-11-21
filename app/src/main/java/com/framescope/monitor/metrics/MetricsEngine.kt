@@ -410,10 +410,25 @@ class MetricsEngine(
     fun stopRecording(): SessionRecord? {
         if (!_recording.value) return null
         _recording.value = false
-        val record = sessionLogger.stop(settings.fpsThreshold.value)
+        val record = sessionLogger.stop(settings.fpsThreshold.value, sessionShellLogs())
         _live.value = LiveStats()
         return record
     }
+
+    /** A short, real collector snapshot stored with the run for its Shell Logs card. */
+    private fun sessionShellLogs(): String = buildString {
+        appendLine("captured_from=${lastMeasuredPackage.value ?: "(none)"} " +
+            "at=${android.os.SystemClock.uptimeMillis()}")
+        appendLine("active shell: ${hub.status.value.shellSource}")
+        appendLine("--- window manager ---")
+        appendLine(lastForegroundOutput().take(3_000).trim().ifBlank { "--" })
+        appendLine("--- frame counters ---")
+        appendLine(lastCounterDump().take(6_000).trim().ifBlank { "--" })
+        hub.lastError.value?.takeIf { it.isNotBlank() }?.let {
+            appendLine("--- last collector error ---")
+            appendLine(it.trim())
+        }
+    }.trimEnd()
 
     private fun updateProtectedFlag() {
         val current = _foregroundApp.value

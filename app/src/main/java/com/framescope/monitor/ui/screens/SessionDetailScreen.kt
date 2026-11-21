@@ -1,6 +1,7 @@
 package com.framescope.monitor.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,12 +14,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,9 +43,14 @@ import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.Panel
 import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.Sparkline
+import com.framescope.monitor.ui.components.SpikeChart
 import com.framescope.monitor.ui.components.StatCell
 import com.framescope.monitor.ui.components.StatusPill
+import com.framescope.monitor.ui.components.TelemetryChart
+import com.framescope.monitor.ui.components.TelemetrySeries
+import com.framescope.monitor.ui.components.TimeAxis
 import com.framescope.monitor.ui.components.fpsStateColor
+import com.framescope.monitor.ui.theme.MonoBlock
 import com.framescope.monitor.ui.theme.MonoInline
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
@@ -102,6 +114,7 @@ fun SessionDetailScreen(
     session: SessionRecord,
     threshold: Int,
     onBack: () -> Unit,
+    onUpdateNote: (String) -> Unit = {},
     bottomPadding: Dp = 24.dp
 ) {
     val formatter = remember { SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()) }
@@ -432,6 +445,20 @@ fun SessionDetailScreen(
         item { SectionHeader("Frame drops") }
 
         item { DropsPanel(session, threshold) }
+
+        item { SectionHeader("Graph details") }
+
+        item { ThermalWarningCard(session) }
+        item { DeviceProfileCard(session) }
+        item { SessionNoteCard(session, onUpdateNote) }
+        item { AppMetricsCard(session) }
+        item { FpsTemperatureCard(session, threshold) }
+        item { FrameTimeCard(session) }
+        item { CpuUsageCard(session) }
+        item { CpuFrequencyCard(session) }
+        item { PowerCapacityCard(session) }
+        item { CpuTemperatureCard(session) }
+        item { ShellLogsCard(session.shellLogs) }
     }
 }
 
@@ -831,6 +858,406 @@ private fun DropsPanel(session: SessionRecord, threshold: Int) {
         }
     }
 }
+
+/** Turns a stored nullable cluster line into a chart-safe list. */
+private fun chartValues(values: List<Float?>): List<Float> =
+    values.mapNotNull { it?.finiteOrNull() }
+
+private fun positiveValues(values: List<Float>): List<Float> =
+    values.mapNotNull { it.finiteOrNull()?.takeIf { value -> value > 0f } }
+
+private fun plausibleValues(values: List<Float>): List<Float> =
+    values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+
+private fun maxCount(vararg lists: List<*>): Int = lists.maxOfOrNull { it.size } ?: 0
+
+/** A small pad keeps a flat line from sitting on the frame of the chart. */
+private fun paddedBounds(values: List<Float>): Pair<Float, Float> {
+    val low = values.minOrNull() ?: 0f
+    val high = values.maxOrNull() ?: 1f
+    val span = (high - low).takeIf { it > 0f } ?: 1f
+    return (low - span * 0.12f) to (high + span * 0.12f)
+}
+
+@Composable
+private fun ThermalWarningCard(session: SessionRecord) {
+    val peak = listOfNotNull(session.maxTempC, session.tempSeries.maxOrNull())
+        .mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+        .maxOrNull()
+    val level = session.peakThermalStatus
+    val hot = (level != null && level > 0) || session.throttledSeconds > 0
+    if (!hot) {
+        Panel {
+            Text(
+                text = "Thermal: no mitigation reported",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "Peak temperature ${fmt(peak, 1, "°C")}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        return
+    }
+    Panel(containerColor = Color(0xFF2B1A10)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "SOC temperature too high",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = Color(0xFFF97316)
+                )
+                Text(
+                    text = "MAX ${fmt(peak, 1, "°C")}",
+                    style = MonoInline,
+                    color = Color(0xFFF97316)
+                )
+            }
+            StatusPill(
+                text = "${thermalStatusLabel(level)} · ${session.throttledSeconds}s",
+                color = Color(0xFFF97316)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeviceProfileCard(session: SessionRecord) {
+    val entries = listOf(
+        "Platform" to (session.device.platform ?: "--"),
+        "Host" to (session.device.model ?: "--"),
+        "OS" to (session.device.osVersion ?: "--"),
+        "Profile" to thermalStatusLabel(session.peakThermalStatus)
+    )
+    Panel {
+        Row(Modifier.fillMaxWidth()) {
+            entries.forEach { (label, value) ->
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = value,
+                        style = MonoInline,
+                        color = if (value == "--") {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionNoteCard(session: SessionRecord, onUpdateNote: (String) -> Unit) {
+    var note by remember(session.id) { mutableStateOf(session.note) }
+    var editing by remember(session.id) { mutableStateOf(false) }
+    Panel {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { editing = true },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = "Session note",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = note.ifBlank { "Note not set, click here to enter" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (note.isBlank()) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Text("Edit", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary)
+        }
+    }
+    if (editing) {
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text("Session note") },
+            text = {
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it.take(2_000) },
+                    label = { Text("Preset, cooler, ambient temperature...") },
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onUpdateNote(note.trim())
+                    editing = false
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editing = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AppMetricsCard(session: SessionRecord) {
+    val temps = plausibleValues(session.tempSeries)
+    val avgTemp = temps.averageOrNull()
+    val maxBatteryTemp = temps.maxOrNull()
+    val jitterPct = session.jitterMs?.let { jitter ->
+        session.avgFrameTimeMs.takeIf { it > 0f }?.let { jitter.div(it).times(100f) }
+    }
+    val timestamp = remember(session.id) {
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+    }.format(Date(session.startedAt))
+    Panel {
+        Row(Modifier.fillMaxWidth()) {
+            StatCell("MAX", fmt(session.maxFps, 1), "FPS", MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f))
+            StatCell("MIN", fmt(session.minFps, 1), "FPS", MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f))
+            StatCell("AVG", fmt(session.avgFps, 1), "FPS", MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f))
+            StatCell("JITTER", fmt(jitterPct, 1), "%", MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(Space.md))
+        Row(Modifier.fillMaxWidth()) {
+            StatCell("5% LOW", fmt(session.low5Percent, 1), "FPS", MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f))
+            StatCell("AVG", fmt(avgTemp, 1), "SOC(°C)", MaterialTheme.status.critical,
+                modifier = Modifier.weight(1f))
+            StatCell("MAX", fmt(maxBatteryTemp, 1), "Battery(°C)", MaterialTheme.status.critical,
+                modifier = Modifier.weight(1f))
+            StatCell("AVG", fmt(session.avgPowerW, 2), "Power(W)", MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f))
+        }
+        Spacer(Modifier.height(Space.md))
+        Text(
+            text = "avg: ${formatDuration(session.durationMs)} · $timestamp",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun FpsTemperatureCard(session: SessionRecord, threshold: Int) {
+    val fps = session.fpsSeries
+    val temps = plausibleValues(session.tempSeries)
+    val cpu = session.cpuSeries
+    val gpu = positiveValues(session.gpuPercentSeries)
+    val fpsBounds = paddedBounds(fps.ifEmpty { listOf(threshold.toFloat()) })
+    val tempBounds = paddedBounds(temps)
+    val lines = listOf(
+        TelemetrySeries("FPS", fps, MaterialTheme.colorScheme.onSurface, "fps",
+            fpsBounds.first, fpsBounds.second),
+        TelemetrySeries("TEMP(°C)", temps, Color(0xFFF97316), "°C",
+            tempBounds.first, tempBounds.second),
+        TelemetrySeries("CPU(%)", cpu, Color(0xFFA78BFA), "%", 0f, 100f),
+        TelemetrySeries("GPU(%)", gpu, Color(0xFF60A5FA), "%", 0f, 100f)
+    )
+    Panel {
+        Text("FPS & Temperature(°C)", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(Space.sm))
+        TelemetryChart(lines)
+        TimeAxis(session.durationMs, maxCount(fps, temps, cpu, gpu))
+        Text(
+            text = "Each line uses its own range shown above; GPU appears only when the device reports load.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
+private fun FrameTimeCard(session: SessionRecord) {
+    Panel {
+        Text("Frame Time(ms)", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(Space.sm))
+        SpikeChart(session.frameTimeSeries, Color(0xFF7DD3FC))
+        TimeAxis(session.durationMs, session.frameTimeSeries.size)
+    }
+}
+
+@Composable
+private fun CpuUsageCard(session: SessionRecord) {
+    val groups = session.cpuGroupNames.mapIndexed { index, name ->
+        TelemetrySeries(
+            label = name,
+            values = chartValues(session.cpuGroupSeries.getOrElse(index) { emptyList() }),
+            color = groupColor(index),
+            unit = "%",
+            min = 0f,
+            max = 100f
+        )
+    }
+    val lines = listOf(
+        TelemetrySeries("Total", session.cpuSeries, Color(0xFFA78BFA), "%", 0f, 100f)
+    ) + groups
+    Panel {
+        Text("CPU usage(%)", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(Space.sm))
+        TelemetryChart(lines)
+        TimeAxis(session.durationMs, maxOf(
+            session.cpuSeries.size,
+            session.cpuGroupSeries.maxOfOrNull { it.size } ?: 0
+        ))
+        if (groups.isEmpty()) {
+            Text("Per-cluster CPU load is not reported on this device.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun CpuFrequencyCard(session: SessionRecord) {
+    val total = positiveValues(session.cpuFreqSeries)
+    val ceiling = (total.maxOrNull() ?: 0f).coerceAtLeast(4_400f) * 1.05f
+    val groups = session.cpuGroupNames.mapIndexed { index, name ->
+        TelemetrySeries(
+            label = name,
+            values = positiveValues(chartValues(
+                session.cpuGroupFreqSeries.getOrElse(index) { emptyList() }
+            )),
+            color = groupColor(index),
+            unit = "MHz",
+            min = 0f,
+            max = ceiling
+        )
+    }
+    val lines = listOf(
+        TelemetrySeries("Fastest core", total, Color(0xFFA78BFA), "MHz", 0f, ceiling)
+    ) + groups
+    Panel {
+        Text("CPU frequency(MHz)", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(Space.sm))
+        TelemetryChart(lines)
+        TimeAxis(session.durationMs, maxOf(
+            total.size,
+            session.cpuGroupFreqSeries.maxOfOrNull { it.size } ?: 0
+        ))
+        if (groups.isEmpty()) {
+            Text("Per-cluster clocks are not reported on this device.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun PowerCapacityCard(session: SessionRecord) {
+    val power = positiveValues(session.powerSeries)
+    val battery = session.batterySeries
+    val ceiling = (power.maxOrNull() ?: 1f) * 1.15f
+    val lines = listOf(
+        TelemetrySeries("Power(W)", power, Color(0xFF60A5FA), "W", 0f, ceiling),
+        TelemetrySeries("Capacity(%)", battery, Color(0xFFCBD5E1), "%", 0f, 100f)
+    )
+    Panel {
+        Text("Power(W) & Capacity %", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(Space.sm))
+        TelemetryChart(lines)
+        TimeAxis(session.durationMs, maxCount(power, battery))
+        Text(
+            text = "MAX ${fmt(power.maxOrNull(), 2, "W")}  " +
+                "MIN ${fmt(power.minOrNull(), 2, "W")}  " +
+                "AVG ${fmt(power.averageOrNull(), 2, "W")}",
+            style = MonoInline,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = Space.sm)
+        )
+    }
+}
+
+@Composable
+private fun CpuTemperatureCard(session: SessionRecord) {
+    val temps = plausibleValues(session.cpuTempSeries)
+    val bounds = paddedBounds(temps)
+    Panel {
+        Text("CPU Temperature(°C)", style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(Space.sm))
+        if (temps.size < 2) {
+            Text("CPU/SoC sensor: -- (this device does not name one)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else {
+            TelemetryChart(
+                listOf(TelemetrySeries("CPU temp", temps, Color(0xFF93C5FD), "°C",
+                    bounds.first, bounds.second))
+            )
+            TimeAxis(session.durationMs, temps.size)
+            Text(
+                text = "MAX ${fmt(temps.maxOrNull(), 1, "°C")}  " +
+                    "MIN ${fmt(temps.minOrNull(), 1, "°C")}  " +
+                    "AVG ${fmt(temps.averageOrNull(), 1, "°C")}",
+                style = MonoInline,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = Space.sm)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShellLogsCard(logs: String) {
+    var expanded by remember { mutableStateOf(false) }
+    Panel {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Shell Logs", style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface)
+            Text(if (expanded) "Hide" else "Expand",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (expanded) {
+            Spacer(Modifier.height(Space.sm))
+            Text(
+                text = logs.ifBlank { "No shell output was captured for this run." },
+                style = MonoBlock,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun groupColor(index: Int): Color = listOf(
+    Color(0xFFA78BFA),
+    Color(0xFF22D3EE),
+    Color(0xFF2DD4BF),
+    Color(0xFFFB923C),
+    Color(0xFFF472B6),
+    Color(0xFFA3E635)
+)[index % 6]
 
 private fun formatDuration(ms: Long): String {
     val totalSeconds = ms / 1000

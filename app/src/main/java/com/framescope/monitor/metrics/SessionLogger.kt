@@ -1,6 +1,7 @@
 package com.framescope.monitor.metrics
 
 import com.framescope.monitor.core.CapChange
+import com.framescope.monitor.core.CpuGroupMetric
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
@@ -41,6 +42,11 @@ data class SecondBucket(
     val batteryLevel: Float,
     val thermalStatus: Int? = null,
     val powerWatts: Float? = null,
+    val cpuFreqMHz: Int = 0,
+    val gpuFreqMHz: Int = 0,
+    val cpuTempC: Float = 0f,
+    val gpuPercent: Float = 0f,
+    val cpuGroups: List<CpuGroupMetric> = emptyList(),
     /** The observed cap at the end of this second; zero means not confirmed yet. */
     val capFps: Float = 0f,
     /** "heat" only while thermal mitigation was active and the rate had dropped. */
@@ -88,6 +94,11 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketBattery = ArrayList<Float>()
     private val bucketThermalStatus = ArrayList<Int>()
     private val bucketPower = ArrayList<Float>()
+    private val bucketCpuFreq = ArrayList<Int>()
+    private val bucketGpuFreq = ArrayList<Int>()
+    private val bucketCpuTemp = ArrayList<Float>()
+    private val bucketGpuPercent = ArrayList<Float>()
+    private val bucketCpuGroups = ArrayList<List<CpuGroupMetric>>()
     private val bucketCap = ArrayList<Int>()
     private val bucketCapCause = ArrayList<String>()
     private val capChanges = ArrayList<CapChange>()
@@ -146,6 +157,11 @@ class SessionLogger(private val store: SessionStore) {
         bucketBattery.clear()
         bucketThermalStatus.clear()
         bucketPower.clear()
+        bucketCpuFreq.clear()
+        bucketGpuFreq.clear()
+        bucketCpuTemp.clear()
+        bucketGpuPercent.clear()
+        bucketCpuGroups.clear()
         bucketCap.clear()
         bucketCapCause.clear()
         capChanges.clear()
@@ -277,6 +293,11 @@ class SessionLogger(private val store: SessionStore) {
         if (battery > 0) bucketBattery.add(battery.toFloat())
         if (bucketStatus != null) bucketThermalStatus.add(bucketStatus)
         if (powerWatts != null) bucketPower.add(powerWatts)
+        metrics.cpuFreqMHz?.let { if (it > 0) bucketCpuFreq.add(it) }
+        metrics.gpuFreqMHz?.let { if (it > 0) bucketGpuFreq.add(it) }
+        metrics.cpuTempC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { bucketCpuTemp.add(it) }
+        metrics.gpuPercent?.finiteOrNull()?.let { bucketGpuPercent.add(it) }
+        if (metrics.cpuGroups.isNotEmpty()) bucketCpuGroups.add(metrics.cpuGroups)
         if (capFps != null) bucketCap.add(capFps)
         if (capFps != null && capCause != null) bucketCapCause.add(capCause)
 
@@ -340,6 +361,7 @@ class SessionLogger(private val store: SessionStore) {
         // is not averaged away into "none".
         val thermalStatus = bucketThermalStatus.maxOrNull()
         val power = if (bucketPower.isNotEmpty()) bucketPower.average().toFloat() else null
+        val averageCpuGroups = averageCpuGroups(bucketCpuGroups)
         // The last known cap is carried forward: a poll that said nothing does not
         // mean the game stopped being capped. Zero is kept only until one is known.
         val cap = bucketCap.lastOrNull() ?: lastCapFps ?: 0
@@ -354,6 +376,11 @@ class SessionLogger(private val store: SessionStore) {
                 batteryLevel = battery,
                 thermalStatus = thermalStatus,
                 powerWatts = power,
+                cpuFreqMHz = if (bucketCpuFreq.isEmpty()) 0 else bucketCpuFreq.average().toInt(),
+                gpuFreqMHz = if (bucketGpuFreq.isEmpty()) 0 else bucketGpuFreq.average().toInt(),
+                cpuTempC = if (bucketCpuTemp.isEmpty()) 0f else bucketCpuTemp.average().toFloat(),
+                gpuPercent = if (bucketGpuPercent.isEmpty()) 0f else bucketGpuPercent.average().toFloat(),
+                cpuGroups = averageCpuGroups,
                 capFps = cap.toFloat(),
                 capCause = capCause
             )
@@ -366,8 +393,28 @@ class SessionLogger(private val store: SessionStore) {
         bucketBattery.clear()
         bucketThermalStatus.clear()
         bucketPower.clear()
+        bucketCpuFreq.clear()
+        bucketGpuFreq.clear()
+        bucketCpuTemp.clear()
+        bucketGpuPercent.clear()
+        bucketCpuGroups.clear()
         bucketCap.clear()
         bucketCapCause.clear()
+    }
+
+    /** Averages the per-cluster readings of one second into one stable row. */
+    private fun averageCpuGroups(rows: List<List<CpuGroupMetric>>): List<CpuGroupMetric> {
+        if (rows.isEmpty()) return emptyList()
+        val names = rows.first().map { it.name }
+        return names.map { name ->
+            val percent = rows.mapNotNull { row ->
+                row.firstOrNull { it.name == name }?.percent?.finiteOrNull()
+            }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
+            val freq = rows.mapNotNull { row ->
+                row.firstOrNull { it.name == name }?.freqMHz
+            }.filter { it > 0 }.takeIf { it.isNotEmpty() }?.average()?.toInt()
+            CpuGroupMetric(name, percent, freq)
+        }
     }
 
     @Synchronized
@@ -410,7 +457,7 @@ class SessionLogger(private val store: SessionStore) {
     }
 
     @Synchronized
-    fun stop(targetFps: Int): SessionRecord? {
+    fun stop(targetFps: Int, shellLogs: String = ""): SessionRecord? {
         if (!isRecording) return null
         isRecording = false
         flushBucket()
@@ -487,6 +534,19 @@ class SessionLogger(private val store: SessionStore) {
         val capSeries = secondBuckets.map { it.capFps }
         val thermalCapSeconds = secondBuckets.count { it.capCause == "heat" }
 
+        val cpuGroupNames = secondBuckets.firstOrNull { it.cpuGroups.isNotEmpty() }
+            ?.cpuGroups?.map { it.name }.orEmpty()
+        val cpuGroupSeries = cpuGroupNames.map { name ->
+            secondBuckets.map { bucket ->
+                bucket.cpuGroups.firstOrNull { it.name == name }?.percent?.finiteOrNull()
+            }
+        }
+        val cpuGroupFreqSeries = cpuGroupNames.map { name ->
+            secondBuckets.map { bucket ->
+                bucket.cpuGroups.firstOrNull { it.name == name }?.freqMHz?.toFloat()
+            }
+        }
+
         val record = SessionRecord(
             id = currentSessionId,
             appPackage = currentPackage,
@@ -524,7 +584,16 @@ class SessionLogger(private val store: SessionStore) {
             capChanges = capChanges.toList(),
             thermalCapSeconds = thermalCapSeconds,
             sceneSmoothnessPercent = sceneSmoothnessPercent,
-            device = deviceInfo
+            device = deviceInfo,
+            powerSeries = secondBuckets.mapNotNull { it.powerWatts?.finiteOrNull() },
+            cpuFreqSeries = secondBuckets.map { it.cpuFreqMHz.toFloat() },
+            gpuFreqSeries = secondBuckets.map { it.gpuFreqMHz.toFloat() },
+            cpuTempSeries = secondBuckets.map { it.cpuTempC },
+            gpuPercentSeries = secondBuckets.map { it.gpuPercent },
+            cpuGroupNames = cpuGroupNames,
+            cpuGroupSeries = cpuGroupSeries,
+            cpuGroupFreqSeries = cpuGroupFreqSeries,
+            shellLogs = shellLogs
         )
 
         store.add(record)

@@ -191,6 +191,36 @@ object ShellCommands {
             "do [ -r \"\$f\" ] && cat \"\$f\"; done | sort -nr | head -1); " +
             "[ -n \"\$f\" ] && echo \"CPUFREQ=\$f\""
 
+    /**
+     * Per-core counters and the real capacity of each core.
+     *
+     * Grouping by the reported maximum clock keeps the chart honest on any chip:
+     * no fixed "little / big / prime" split is assumed.
+     */
+    fun cpuCoreDump(): String =
+        "grep '^cpu[0-9]' /proc/stat 2>/dev/null; " +
+            "for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq; do " +
+            "[ -r \"\$f\" ] || continue; " +
+            "n=\$(echo \"\$f\" | sed -E 's#.*/cpu([0-9]+)/.*#\\1#'); " +
+            "echo \"CPUMAX=\$n:\$(cat \"\$f\")\"; " +
+            "done"
+
+    /** Current clock of each core, in kHz. */
+    fun cpuCoreFreq(): String =
+        "for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq; do " +
+            "[ -r \"\$f\" ] || continue; " +
+            "n=\$(echo \"\$f\" | sed -E 's#.*/cpu([0-9]+)/.*#\\1#'); " +
+            "echo \"CPUFREQ=\$n:\$(cat \"\$f\")\"; " +
+            "done"
+
+    /** GPU busy time, only when the device publishes both counters. */
+    fun gpuBusy(): String =
+        "for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-3d0/devfreq " +
+            "/sys/devices/platform/*.gpu/devfreq; do " +
+            "[ -r \"\$d/busy_time\" ] && [ -r \"\$d/total_time\" ] && " +
+            "echo \"GPUBUSY=\$(cat \"\$d/busy_time\"):\$(cat \"\$d/total_time\")\" && break; " +
+            "done"
+
     fun displayInfo(): String =
         "dumpsys display 2>/dev/null | grep -m3 -E 'refreshRate|fps=' ; " +
             "dumpsys surfaceflinger 2>/dev/null | grep -m1 'refresh-rate'"
@@ -327,6 +357,64 @@ object Parsers {
     fun parseCpuFreq(dump: String): Int? =
         dump.lineSequence().firstOrNull { it.startsWith("CPUFREQ=") }
             ?.substringAfter("=")?.trim()?.toIntOrNull()
+
+    /** Aggregate counters of every core in `/proc/stat`, keyed by core number. */
+    fun parsePerCoreCpuStat(dump: String): Map<Int, LongArray> {
+        val out = HashMap<Int, LongArray>()
+        dump.lineSequence().forEach { line ->
+            val core = Regex("^cpu(\\d+)\\s+(.*)$").find(line.trim()) ?: return@forEach
+            val numbers = core.groupValues[2].trim().split(WHITESPACE)
+                .mapNotNull { it.toLongOrNull() }
+            if (numbers.size < 4) return@forEach
+            out[core.groupValues[1].toInt()] = longArrayOf(
+                numbers.sum(),
+                numbers[3] + numbers.getOrElse(4) { 0L }
+            )
+        }
+        return out
+    }
+
+    /** Maximum clock of each core, in kHz. Only real nodes are returned. */
+    fun parseCpuMaxFreqs(dump: String): Map<Int, Int> {
+        val out = HashMap<Int, Int>()
+        dump.lineSequence()
+            .filter { it.startsWith("CPUMAX=") }
+            .forEach { line ->
+                val pair = line.substringAfter("CPUMAX=").trim().split(":")
+                if (pair.size == 2) {
+                    val core = pair[0].toIntOrNull()
+                    val khz = pair[1].toIntOrNull()
+                    if (core != null && khz != null && khz > 0) out[core] = khz
+                }
+            }
+        return out
+    }
+
+    /** Current clock of each core, in kHz, keyed by core number. */
+    fun parseCpuFreqs(dump: String): Map<Int, Int> {
+        val out = HashMap<Int, Int>()
+        dump.lineSequence()
+            .filter { it.startsWith("CPUFREQ=") }
+            .forEach { line ->
+                val pair = line.substringAfter("CPUFREQ=").trim().split(":")
+                if (pair.size == 2) {
+                    val core = pair[0].toIntOrNull()
+                    val khz = pair[1].toIntOrNull()
+                    if (core != null && khz != null && khz > 0) out[core] = khz
+                }
+            }
+        return out
+    }
+
+    /** Cumulative GPU busy/total ticks, when the device exposes them. */
+    fun parseGpuBusy(dump: String): Pair<Long, Long>? {
+        val line = dump.lineSequence().firstOrNull { it.startsWith("GPUBUSY=") } ?: return null
+        val pair = line.substringAfter("GPUBUSY=").trim().split(":")
+        if (pair.size != 2) return null
+        val busy = pair[0].toLongOrNull() ?: return null
+        val total = pair[1].toLongOrNull() ?: return null
+        return if (total > 0L && busy >= 0L) busy to total else null
+    }
 
     fun parseRefreshRate(dump: String): Float? {
         val re = Regex("refreshRate=([0-9.]+)")

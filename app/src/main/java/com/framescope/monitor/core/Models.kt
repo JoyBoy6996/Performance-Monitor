@@ -56,6 +56,13 @@ enum class FpsSourceKind {
     GFXINFO
 }
 
+/** One real CPU cluster, named from the core numbers the device reports. */
+data class CpuGroupMetric(
+    val name: String,
+    val percent: Float? = null,
+    val freqMHz: Int? = null
+)
+
 /** Device level metrics, refreshed a couple of times per second. */
 data class SystemMetrics(
     val cpuPercent: Float? = null,
@@ -69,6 +76,12 @@ data class SystemMetrics(
     val ramTotalGb: Float? = null,
     val ramPercent: Int? = null,
     val thermalMaxC: Float? = null,
+    /** A CPU/SoC named thermal sensor, when the device exposes one. */
+    val cpuTempC: Float? = null,
+    /** GPU load, only when the device exposes a real busy-time counter. */
+    val gpuPercent: Float? = null,
+    /** Per-cluster readings, grouped by the real core capacities the device reports. */
+    val cpuGroups: List<CpuGroupMetric> = emptyList(),
     /** Android's thermal mitigation level: 0 = none, 1 = light, 2 = moderate, 3 = severe. */
     val thermalStatus: Int? = null,
     /** Warmest temperature seen since monitoring began (or since the current recording). */
@@ -224,7 +237,27 @@ data class SessionRecord(
     /** Scene's ≥45 FPS smoothness: share of the steady run at or above 45 fps. */
     val sceneSmoothnessPercent: Float? = null,
     /** Device facts captured when Record was pressed; older runs leave these blank. */
-    val device: SessionDeviceInfo = SessionDeviceInfo()
+    val device: SessionDeviceInfo = SessionDeviceInfo(),
+    /** Power in watts per second, when the device reports a battery current. */
+    val powerSeries: List<Float> = emptyList(),
+    /** Fastest CPU core clock per second, in MHz. */
+    val cpuFreqSeries: List<Float> = emptyList(),
+    /** GPU clock per second, in MHz. */
+    val gpuFreqSeries: List<Float> = emptyList(),
+    /** CPU/SoC sensor temperature per second, in °C. */
+    val cpuTempSeries: List<Float> = emptyList(),
+    /** Real GPU busy time per second, in percent, on devices that expose it. */
+    val gpuPercentSeries: List<Float> = emptyList(),
+    /** Names of the CPU clusters found on this device, in a fixed order. */
+    val cpuGroupNames: List<String> = emptyList(),
+    /** Load per cluster, in the same order as [cpuGroupNames]; null means no reading. */
+    val cpuGroupSeries: List<List<Float?>> = emptyList(),
+    /** Clock per cluster, in the same order as [cpuGroupNames]; null means no reading. */
+    val cpuGroupFreqSeries: List<List<Float?>> = emptyList(),
+    /** A short raw collector snapshot captured when the run was stopped. */
+    val shellLogs: String = "",
+    /** A note the user writes for this run. */
+    val note: String = ""
 )
 
 /** Device facts stored with a run so an old session still shows the right test setup. */

@@ -1,5 +1,6 @@
 package com.framescope.monitor.metrics
 
+import com.framescope.monitor.core.CpuGroupMetric
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
 import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.SystemMetric
@@ -20,6 +21,9 @@ import com.framescope.monitor.shell.ShellHub
 class SystemSampler(private val hub: ShellHub) {
 
     private var lastCpu: LongArray? = null
+    private var lastCpuCores: Map<Int, LongArray>? = null
+    private var lastGpuBusy: Pair<Long, Long>? = null
+    private var lastGroupNames: List<String> = emptyList()
 
     /**
      * Reads the privileged metrics.
@@ -38,7 +42,10 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.cpuStat(),
             ShellCommands.gpuInfo(),
             ShellCommands.cpuFreq(),
-            ShellCommands.thermal()
+            ShellCommands.thermal(),
+            ShellCommands.cpuCoreDump(),
+            ShellCommands.cpuCoreFreq(),
+            ShellCommands.gpuBusy()
         )
         val result = hub.execOrNull(script)
 
@@ -49,6 +56,8 @@ class SystemSampler(private val hub: ShellHub) {
         val gpu = part(1)
         val cpuFreq = Parsers.parseCpuFreq(part(2))
         val thermals = Parsers.parseThermals(part(3))
+        val cpuGroups = cpuGroups(part(4), part(5))
+        val gpuPercent = gpuPercent(part(6))
 
         val gpuName = Parsers.parseGpuName(gpu)
         val gpuFreq = Parsers.parseGpuFreq(gpu)
@@ -56,6 +65,13 @@ class SystemSampler(private val hub: ShellHub) {
         // Neither is the temperature of the phone the user is holding, so reject
         // them before taking the maximum.
         val maxThermal = thermals.values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
+        val cpuTemp = thermals.entries
+            .filter { (name, value) ->
+                name.contains("cpu", true) || name.contains("soc", true) ||
+                    name.contains("cluster", true)
+            }
+            .mapNotNull { it.value.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+            .maxOrNull()
         val thermalStatus = Parsers.parseThermalStatus(part(3))
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
@@ -70,13 +86,89 @@ class SystemSampler(private val hub: ShellHub) {
             cpuFreqMHz = cpuFreq?.let { it / 1000 },
             gpuName = gpuName,
             gpuFreqMHz = gpuFreq?.let { it / 1000 },
+            gpuPercent = gpuPercent,
+            cpuGroups = cpuGroups,
             thermalMaxC = maxThermal,
+            cpuTempC = cpuTemp,
             thermalStatus = thermalStatus,
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,
             measuredAtElapsedNanos = now
         )
+    }
+
+    /**
+     * Real CPU clusters: cores are grouped by the maximum clock the kernel reports.
+     * A device that does not publish those nodes gets one line per core instead.
+     */
+    private fun cpuGroups(coreDump: String, coreFreqDump: String): List<CpuGroupMetric> {
+        val current = Parsers.parsePerCoreCpuStat(coreDump)
+        if (current.isEmpty()) return emptyList()
+        val previous = lastCpuCores
+        lastCpuCores = current
+
+        val maxFreqs = Parsers.parseCpuMaxFreqs(coreDump)
+        val nowFreqs = Parsers.parseCpuFreqs(coreFreqDump)
+        val cores = current.keys.sorted()
+        val grouped = if (maxFreqs.keys.containsAll(cores)) {
+            cores.groupBy { maxFreqs[it] ?: 0 }
+                .values.sortedByDescending { maxFreqs[it.first()] ?: 0 }
+        } else {
+            cores.map { listOf(it) }
+        }
+
+        // Keep the same order on every poll so a chart line never jumps to a
+        // different colour when the shell returns the nodes in another order.
+        val currentNames = grouped.map(::groupLabel)
+        val ordered = if (lastGroupNames.isNotEmpty() &&
+            lastGroupNames.toSet() == currentNames.toSet()
+        ) {
+            lastGroupNames.mapNotNull { name ->
+                grouped.firstOrNull { groupLabel(it) == name }
+            }
+        } else {
+            grouped
+        }
+        lastGroupNames = ordered.map(::groupLabel)
+
+        return ordered.map { group ->
+            var totalDelta = 0L
+            var idleDelta = 0L
+            group.forEach { core ->
+                val now = current[core] ?: return@forEach
+                val before = previous?.get(core) ?: return@forEach
+                totalDelta += now[0] - before[0]
+                idleDelta += now[1] - before[1]
+            }
+            val percent = if (totalDelta > 0L) {
+                ((1.0 - idleDelta.toDouble() / totalDelta.toDouble()) * 100.0)
+                    .toFloat().coerceIn(0f, 100f)
+            } else null
+            val freqKhz = group.mapNotNull { nowFreqs[it] }.filter { it > 0 }
+            val freqMHz = if (freqKhz.isEmpty()) null else (freqKhz.average() / 1000).toInt()
+            CpuGroupMetric(groupLabel(group), percent, freqMHz)
+        }
+    }
+
+    private fun groupLabel(cores: List<Int>): String = if (cores.size == 1) {
+        "CPU${cores.first()}"
+    } else {
+        "CPU ${cores.first()}~${cores.last()}"
+    }
+
+    /** GPU load from busy/total ticks; a device without counters gets null. */
+    private fun gpuPercent(dump: String): Float? {
+        val now = Parsers.parseGpuBusy(dump) ?: run {
+            lastGpuBusy = null
+            return null
+        }
+        val before = lastGpuBusy
+        lastGpuBusy = now
+        if (before == null || now.second <= before.second) return null
+        val busyDelta = now.first - before.first
+        if (busyDelta < 0L) return null
+        return (busyDelta * 100f / (now.second - before.second).toFloat()).coerceIn(0f, 100f)
     }
 
     /**

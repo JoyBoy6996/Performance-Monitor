@@ -292,20 +292,24 @@ class AdbTcpRunner(
             lastError = null
             keyOfferUsed = true
 
-            // A completed handshake proves the phone either already knew our
-            // key or accepted it in the prompt the user just approved. Both
-            // are real, persistent trust. Never gate this on a manual file
-            // write: a failed `echo` must not make the app forget the key and
-            // ask for the prompt again on every launch.
-            keys.markAuthorisationStored()
-            _authState.value = AdbAuthState.STORED
-
-            // Best effort only. Some adbd builds do not allow a shell write to
-            // adb_keys; the successful handshake above is the source of truth.
-            if (session.offeredKey) {
+            // A silent signature means the phone already had the key: that is
+            // real persistent trust. A key we just offered is different - a
+            // prompt can be approved for this one connection only. Mark it as
+            // stored only when the key is really present in adb_keys.
+            val alreadyTrusted = !session.offeredKey
+            val storedByShell = if (alreadyTrusted) false else {
                 runCatching {
                     session.exec(storeKeyCommand(), STORE_KEY_TIMEOUT_MS)
-                }
+                }.getOrDefault(ShellResult(-1, "")).out.contains(KEYS_OK_MARKER)
+            }
+            if (alreadyTrusted || storedByShell) {
+                keys.markAuthorisationStored()
+                _authState.value = AdbAuthState.STORED
+            } else {
+                _authState.value = if (session.offeredKey) AdbAuthState.PROMPT_SENT
+                else AdbAuthState.UNKNOWN
+                lastError = "The phone accepted this connection but did not save FrameScope's key. " +
+                    "Keep Shizuku ON with permission granted, then tap Set up bridge again."
             }
 
             return session

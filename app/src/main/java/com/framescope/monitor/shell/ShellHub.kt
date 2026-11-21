@@ -137,10 +137,10 @@ class ShellHub(
         // The USB debugging prompt the user sees while starting Shizuku is for
         // Shizuku's key, not ours. Install our own key with the already-available
         // privileged shell first, so FrameScope never needs a second prompt.
-        trustKeyWithShell(shizukuHelper())
+        val keyInstalled = trustKeyWithShell(shizukuHelper())
 
         if (runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false)) {
-            return@withContext finishAdbSetup()
+            return@withContext finishAdbSetup(keyInstalled)
         }
 
         publishAdbState(false)
@@ -212,7 +212,7 @@ class ShellHub(
     }
 
     /** Confirms that the phone kept the key, not just this one session. */
-    private suspend fun finishAdbSetup(): String {
+    private suspend fun finishAdbSetup(keyInstalledByShell: Boolean): String {
         var verified = adb.verifyStoredKey()
         if (!verified) {
             verified = runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false) &&
@@ -221,9 +221,15 @@ class ShellHub(
         publishAdbState(verified)
         return if (verified) {
             adbSuccessMessage()
+        } else if (!keyInstalledByShell) {
+            "The bridge answered, but FrameScope could not save its key. " +
+                "Grant Shizuku permission and tap Set up bridge again; " +
+                "accepting a prompt without “Always allow” is not enough. " +
+                adb.unavailableReason()
         } else {
-            "The bridge answered, but the phone did not keep the ADB key. " +
-                "Accept the prompt again with “Always allow”. ${adb.unavailableReason()}"
+            "The bridge answered, but the phone did not keep FrameScope's key. " +
+                "Grant Shizuku permission again and tap Set up bridge. " +
+                adb.unavailableReason()
         }
     }
 

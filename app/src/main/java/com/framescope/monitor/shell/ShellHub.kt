@@ -70,6 +70,7 @@ class ShellHub(
         appContext
     )
     private val adb = AdbTcpRunner(port = adbPort, keys = adbKeys)
+    private val adbRepairer: AdbBridgeRepairer get() = adb
 
     private val _status = MutableStateFlow(AccessStatus())
     val status: StateFlow<AccessStatus> = _status.asStateFlow()
@@ -104,12 +105,11 @@ class ShellHub(
         if (state == ShizukuRunner.ConnectionState.READY) {
             tryGrantDumpPermission()
         }
-        val shizukuReady = state == ShizukuRunner.ConnectionState.READY
         val adbWanted = adb.authorisationStored || _adbReady.value || forceReconnect
-        val adbOk = when {
-            !adbWanted -> false
-            shizukuReady && !forceReconnect -> runCatching { adb.isAvailable() }.getOrDefault(false)
-            else -> runCatching { ensureAdbBridge() }.getOrDefault(false)
+        val adbOk = if (!adbWanted) {
+            false
+        } else {
+            runCatching { ensureAdbBridge(allowSetup = forceReconnect) }.getOrDefault(false)
         }
         publishAdbState(adbOk)
         _status.value
@@ -120,79 +120,94 @@ class ShellHub(
     /**
      * One-time local ADB setup.
      *
-     * The user only taps this once. The app looks for the phone's own `adbd`,
-     * moves it to a fixed loopback port, and keeps the RSA key after the
-     * "Always allow" prompt. Later launches reconnect silently.
+     * Shizuku opens the loopback port using USB debugging - no wireless
+     * debugging and no PC are required when it is available. If it is not, the
+     * app looks for an already-open local ADB port and moves it to the fixed
+     * port. The RSA key is saved as soon as the phone accepts it.
      */
     suspend fun setupAdbBridge(): String = withContext(Dispatchers.IO) {
         adb.retarget(LOOPBACK, adbPort)
 
-        if (runCatching { adb.isAvailable() }.getOrDefault(false)) {
-            return@withContext finishAdbSetup()
-        }
-
-        val repairer = adb as AdbBridgeRepairer
-        val discovered = runCatching { repairer.discoverLocalAdbPort() }.getOrNull()
-        if (discovered != null) {
-            val switched = runCatching {
-                repairer.requestTcpPort(adbPort, discovered)
-            }.getOrDefault(false)
-            if (switched) {
-                delay(1_500)
-                if (runCatching { adb.isAvailable() }.getOrDefault(false)) {
-                    return@withContext finishAdbSetup()
-                }
-            }
-        }
-
-        // Shizuku can prepare a classic loopback bridge even when the wireless
-        // debugging port speaks TLS and cannot be used by a plain ADB client.
-        val helper: ShellRunner? = shizukuRunner
-            .takeIf { it.connectionState.value == ShizukuRunner.ConnectionState.READY }
-        if (bootstrapAdbPort(helper)) {
+        if (runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false)) {
             return@withContext finishAdbSetup()
         }
 
         publishAdbState(false)
-        val reason = adb.unavailableReason()
-        "Could not open the local ADB bridge. $reason " +
-            "Turn on Wireless debugging, accept the prompt with “Always allow”, then try again."
+        adbSetupFailureMessage()
     }
 
     /**
-     * Silent self-heal after a reboot or a Wireless debugging toggle. The port
-     * changes, but the trusted key stays; find the phone's new port and move it
-     * back to the fixed loopback port without asking the user again.
+     * Brings the loopback bridge back silently after a reboot or a debugging
+     * toggle. The key stays saved, so this must not show the prompt again.
+     *
+     * A normal app cannot open an ADB socket from a USB cable: only a
+     * privileged shell can start adbd. Shizuku is therefore tried first, then
+     * any existing local ADB port is moved to the fixed port.
      */
-    private suspend fun ensureAdbBridge(): Boolean {
+    private suspend fun ensureAdbBridge(allowSetup: Boolean = false): Boolean {
         if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
-        if (!adb.authorisationStored) return false
-        val repairer = adb as AdbBridgeRepairer
-        val discovered = runCatching { repairer.discoverLocalAdbPort() }.getOrNull()
-            ?: return false
-        val switched = runCatching {
-            repairer.requestTcpPort(adbPort, discovered)
-        }.getOrDefault(false)
-        if (!switched) return false
-        delay(1_200)
-        return runCatching { adb.isAvailable() }.getOrDefault(false)
+
+        val helper = shizukuHelper()
+        if (helper != null && runCatching { bootstrapAdbPort(helper) }.getOrDefault(false)) {
+            return true
+        }
+
+        val mayDiscover = allowSetup || helper != null || adb.authorisationStored
+        if (mayDiscover) {
+            val discovered = runCatching { adbRepairer.discoverLocalAdbPort() }.getOrNull()
+            if (discovered != null && discovered != adbPort &&
+                runCatching { adbRepairer.requestTcpPort(adbPort, discovered) }.getOrDefault(false)
+            ) {
+                delay(1_200)
+                if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
+            }
+        }
+
+        if (hasDumpPermission() && runCatching { bootstrapAdbPort(null) }.getOrDefault(false)) {
+            return true
+        }
+        return false
+    }
+
+    private fun shizukuHelper(): ShellRunner? = shizukuRunner
+        .takeIf { it.connectionState.value == ShizukuRunner.ConnectionState.READY }
+
+    /** Tells the truth about which prerequisite is actually missing. */
+    private suspend fun adbSetupFailureMessage(): String {
+        val reason = adb.unavailableReason()
+        val shellHint = when (shizukuRunner.connectionState.value) {
+            ShizukuRunner.ConnectionState.READY ->
+                "Shizuku is running but could not start adbd on $LOOPBACK:$adbPort."
+            ShizukuRunner.ConnectionState.NOT_RUNNING ->
+                "Start Shizuku and grant permission. With USB debugging ON, " +
+                    "FrameScope can then open the bridge by itself."
+            ShizukuRunner.ConnectionState.PERMISSION_DENIED ->
+                "Grant FrameScope the Shizuku permission so it can open the bridge."
+            else -> "Shizuku is not ready yet."
+        }
+        return "Could not open the local ADB bridge. $reason $shellHint " +
+            "Alternative: turn on Wireless debugging and tap Set up bridge again."
     }
 
     /** Confirms that the phone kept the key, not just this one session. */
     private suspend fun finishAdbSetup(): String {
-        val verified = adb.verifyStoredKey()
+        var verified = adb.verifyStoredKey()
+        if (!verified) {
+            verified = runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false) &&
+                adb.verifyStoredKey()
+        }
         publishAdbState(verified)
         return if (verified) {
             adbSuccessMessage()
         } else {
-            "The bridge connected, but the phone did not remember this key. " +
+            "The bridge answered, but the phone did not keep the ADB key. " +
                 "Accept the prompt again with “Always allow”. ${adb.unavailableReason()}"
         }
     }
 
     private suspend fun bootstrapAdbPort(helper: ShellRunner?): Boolean {
-        val command = "setprop persist.adb.tcp.port $adbPort; " +
-            "setprop service.adb.tcp.port $adbPort; stop adbd; start adbd"
+        val command = "setprop service.adb.tcp.port $adbPort; " +
+            "setprop persist.adb.tcp.port $adbPort; stop adbd; start adbd"
         val accepted = runCatching {
             when {
                 helper != null -> helper.exec(command, 8_000).ok
@@ -200,7 +215,18 @@ class ShellHub(
                 else -> false
             }
         }.getOrDefault(false)
-        if (!accepted) return false
+        if (!accepted) {
+            // A rejected restart must not leave adbd stopped. Bring it back
+            // before reporting failure, so Wireless debugging still works.
+            runCatching {
+                when {
+                    helper != null -> helper.exec("start adbd", 3_000)
+                    hasDumpPermission() -> execLocalShell("start adbd", 3_000)
+                    else -> null
+                }
+            }
+            return false
+        }
         repeat(6) {
             delay(700)
             if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
@@ -215,7 +241,7 @@ class ShellHub(
         } else if (adb.authorisationStored) {
             adb.unavailableReason()
         } else {
-            "Local ADB bridge has not been set up yet."
+            "Local ADB bridge is off. Start Shizuku to open it, or tap Set up bridge."
         }
         _status.value = accessStatus(
             shizukuRunner.connectionState.value,

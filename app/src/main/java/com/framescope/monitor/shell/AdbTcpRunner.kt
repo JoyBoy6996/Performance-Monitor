@@ -156,12 +156,25 @@ class AdbTcpRunner(
                 allowKeyOffer = false
             )
         } catch (e: Exception) {
-            lastError = "The phone did not remember this ADB key. " +
-                "Accept the prompt again with “Always allow”. (${e.message ?: "no reason"})"
+            val message = e.message.orEmpty()
+            val rejected = message.contains("authentication rejected", ignoreCase = true) ||
+                message.contains("re-authorisation", ignoreCase = true) ||
+                message.contains("authorization", ignoreCase = true)
+            if (rejected) {
+                keys.clearAuthorisationStored()
+                keyOfferUsed = false
+                _authState.value = AdbAuthState.UNKNOWN
+                lastError = "The phone no longer remembers this ADB key. " +
+                    "Accept the prompt again with “Always allow”."
+            } else {
+                // A reboot or a debugging toggle changes the port. That is not
+                // the same as losing trust: keep the key so the next refresh
+                // can find the new port without showing the prompt again.
+                lastError = "The ADB key is saved, but the bridge is not answering " +
+                    "on $host:$port yet. (${message.ifBlank { "no reason" }})"
+            }
             lastFailureAt = System.currentTimeMillis()
             failureCount++
-            keys.clearAuthorisationStored()
-            _authState.value = AdbAuthState.UNKNOWN
             return@withLock false
         }
 
@@ -190,7 +203,8 @@ class AdbTcpRunner(
     fun fingerprint(): String = keys.publicKeyFingerprint()
 
     override suspend fun unavailableReason(): String = lastError
-        ?: "No ADB bridge on $host:$port. Turn on Wireless debugging in Developer options."
+        ?: "No ADB bridge on $host:$port. Start Shizuku so the app can open it, " +
+            "or turn on Wireless debugging."
 
     override suspend fun exec(command: String, timeoutMs: Long): ShellResult = mutex.withLock {
         val active = session?.takeIf { it.isAlive } ?: try {
@@ -257,20 +271,22 @@ class AdbTcpRunner(
             lastFailureAt = 0L
             failureCount = 0
             lastError = null
+            keyOfferUsed = true
 
+            // A completed handshake proves the phone either already knew our
+            // key or accepted it in the prompt the user just approved. Both
+            // are real, persistent trust. Never gate this on a manual file
+            // write: a failed `echo` must not make the app forget the key and
+            // ask for the prompt again on every launch.
+            keys.markAuthorisationStored()
+            _authState.value = AdbAuthState.STORED
+
+            // Best effort only. Some adbd builds do not allow a shell write to
+            // adb_keys; the successful handshake above is the source of truth.
             if (session.offeredKey) {
-                // Persist the key in the phone's own adb_keys so the
-                // "Allow wireless debugging?" prompt never comes back.
-                val stored = runCatching {
+                runCatching {
                     session.exec(storeKeyCommand(), STORE_KEY_TIMEOUT_MS)
-                }.getOrNull()
-                if (stored != null && stored.out.contains(KEYS_OK_MARKER)) {
-                    keys.markAuthorisationStored()
-                    _authState.value = AdbAuthState.STORED
                 }
-            } else {
-                keys.markAuthorisationStored()
-                _authState.value = AdbAuthState.STORED
             }
 
             return session
@@ -298,7 +314,8 @@ class AdbTcpRunner(
 
     private fun describe(e: Exception, targetHost: String, targetPort: Int): String = when (e) {
         is ShellUnavailable -> e.message ?: "ADB connection error"
-        is java.net.ConnectException -> "Nothing is listening on $targetHost:$targetPort. Enable Wireless debugging."
+        is java.net.ConnectException -> "Nothing is listening on $targetHost:$targetPort. " +
+            "Start Shizuku, or turn on Wireless debugging."
         is SocketTimeoutException -> "The ADB bridge on $targetHost:$targetPort timed out."
         else -> e.message ?: "Cannot reach the ADB bridge on $targetHost:$targetPort"
     }
@@ -364,7 +381,6 @@ class AdbTcpRunner(
         }
         return try {
             s.openService("tcpip:$target")
-            true
         } catch (e: Exception) {
             false
         } finally {

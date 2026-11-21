@@ -301,9 +301,10 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(Space.sm))
                     Text(
-                        text = "Shizuku stays first. This bridge is a fallback for when Shizuku is stopped. " +
-                            "The app generates one ADB key, asks the phone to trust it once, and then " +
-                            "connects on 127.0.0.1 only — no PC and no Wi-Fi needed after setup.",
+                        text = "Shizuku stays first. With USB debugging ON, Shizuku can open this bridge " +
+                            "for the app — no PC and no Wi-Fi needed. Wireless debugging is an alternative " +
+                            "if your phone blocks that. One ADB key is trusted once, then reconnects on " +
+                            "127.0.0.1 by itself.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -314,7 +315,7 @@ fun SettingsScreen(
                             "Bridge: waiting for the “Allow USB debugging?” prompt on your phone."
                         adbAuth == AdbAuthState.STORED ->
                             "Bridge: key is trusted. It will reconnect when the bridge is available."
-                        else -> "Bridge: not set up yet."
+                        else -> "Bridge: not set up yet. Start Shizuku, or tap Set up bridge."
                     }
                     Text(
                         text = adbLine,
@@ -347,7 +348,7 @@ fun SettingsScreen(
                             enabled = !checking,
                             onClick = {
                                 checking = true
-                                adbMessage = "Looking for the phone's ADB daemon..."
+                                adbMessage = "Opening the local ADB bridge..."
                                 scope.launch {
                                     val result = runCatching { container.hub.setupAdbBridge() }
                                         .getOrElse { it.describe() }

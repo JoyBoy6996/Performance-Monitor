@@ -70,10 +70,10 @@ fun FirstRunSetupDialog(
                     }
                 )
                 Text(
-                    "Prefer Shizuku. If it is not running, set up the local ADB bridge: " +
-                        "open Developer options, turn on USB and Wireless debugging, tap " +
-                        "Set up ADB bridge, then accept the prompt with “Always allow”. " +
-                        "After that it reconnects by itself."
+                    "Prefer Shizuku. With USB debugging ON, Shizuku can open the local bridge " +
+                        "for the app — no Wi-Fi or PC needed. Tap Set up ADB bridge, accept the " +
+                        "“Always allow” prompt, and it reconnects by itself. Wireless debugging " +
+                        "is an alternative if your phone blocks that."
                 )
                 Column {
                     TextButton(onClick = { openShizuku(context) }) {
@@ -108,7 +108,7 @@ fun FirstRunSetupDialog(
                     TextButton(
                         onClick = {
                             scope.launch {
-                                adbMessage = "Looking for the phone's ADB daemon..."
+                                adbMessage = "Opening the local ADB bridge..."
                                 val result = runCatching { container.hub.setupAdbBridge() }
                                     .getOrElse { it.message ?: "Could not set up the bridge." }
                                 val refreshed = runCatching { container.hub.refresh() }.getOrNull()

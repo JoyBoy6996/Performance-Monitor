@@ -282,7 +282,8 @@ fun OverlayScreen(
                             )
                             Text(
                                 text = "Scene-style control: tap starts, tap again stops. " +
-                                    "The pill stays touchable even if click-through is on.",
+                                    "Red while recording, green when stopped. The pill stays " +
+                                    "touchable even if click-through is on.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

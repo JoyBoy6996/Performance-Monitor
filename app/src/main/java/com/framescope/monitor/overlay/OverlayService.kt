@@ -13,7 +13,9 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -55,10 +57,15 @@ class OverlayService : Service() {
     private var unitText: TextView? = null
     private var frameText: TextView? = null
     private var recText: TextView? = null
+    private var pillBackground: GradientDrawable? = null
     private var titleText: TextView? = null
     private var graphView: GraphView? = null
     private val rowViews = mutableMapOf<String, TextView>()
     private val rowLabels = mutableMapOf<String, TextView>()
+
+    private val recStatusHandler = Handler(Looper.getMainLooper())
+    private var recStatusRunnable: Runnable? = null
+    private var recordingNow = false
 
     private var expanded = true
     private var dragStartX = 0f
@@ -106,6 +113,8 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        recStatusRunnable?.let { recStatusHandler.removeCallbacks(it) }
+        recStatusRunnable = null
         scope.cancel()
         removeOverlay()
         super.onDestroy()
@@ -146,6 +155,7 @@ class OverlayService : Service() {
     private fun buildOverlay() {
         graphView = null
         recText = null
+        pillBackground = null
         if (!Settings.canDrawOverlays(this)) return
 
         val app = applicationContext as? FrameScopeApp ?: return
@@ -209,11 +219,12 @@ class OverlayService : Service() {
             val padH = OverlayViews.dp(this@OverlayService, 12f * currentScale)
             val padV = OverlayViews.dp(this@OverlayService, 6f * currentScale)
             setPadding(padH, padV, padH, padV)
-            background = GradientDrawable().apply {
+            pillBackground = GradientDrawable().apply {
                 cornerRadius = OverlayViews.dp(this@OverlayService, 100f).toFloat()
                 setColor(Color.parseColor("#E60B1020"))
                 setStroke(OverlayViews.dp(this@OverlayService, 1f), Color.parseColor("#44FFFFFF"))
             }
+            background = pillBackground
         }
 
         recText = OverlayViews.label(this, "●", Color.parseColor("#64748B")).apply {
@@ -464,15 +475,32 @@ class OverlayService : Service() {
         } else {
             engine.startRecording()
         }
-        updateRecordIndicator(engine.recording.value)
+        val nowRecording = engine.recording.value
+        showRecordStatus(
+            nowRecording,
+            if (nowRecording) "● REC STARTED" else "● REC STOPPED"
+        )
+    }
+
+    /** Brief, unmistakable feedback for the tap, then back to the steady state. */
+    private fun showRecordStatus(recording: Boolean, label: String) {
+        recStatusRunnable?.let { recStatusHandler.removeCallbacks(it) }
+        updateRecordIndicator(recording, label)
+        val restore = Runnable {
+            recStatusRunnable = null
+            updateRecordIndicator(recordingNow)
+        }
+        recStatusRunnable = restore
+        recStatusHandler.postDelayed(restore, REC_STATUS_MS)
     }
 
     /** Shows the real recording state on the Pill, including runs started elsewhere. */
-    private fun updateRecordIndicator(recording: Boolean) {
-        recText?.text = if (recording) "● REC" else "●"
-        recText?.setTextColor(
-            Color.parseColor(if (recording) "#F87171" else "#64748B")
-        )
+    private fun updateRecordIndicator(recording: Boolean, label: String? = null) {
+        recordingNow = recording
+        val color = Color.parseColor(if (recording) "#F87171" else "#4ADE80")
+        recText?.text = label ?: if (recording) "● REC" else "●"
+        recText?.setTextColor(color)
+        pillBackground?.setStroke(OverlayViews.dp(this, 1f), color)
     }
 
     private fun applyExpandedState() {
@@ -530,7 +558,10 @@ class OverlayService : Service() {
 
         // Runs started from the dashboard must show the same REC state on the Pill.
         scope.launch {
-            engine.recording.collect { updateRecordIndicator(it) }
+            engine.recording.collect {
+                // A just-tapped STARTED/STOPPED label owns the pill briefly.
+                if (recStatusRunnable == null) updateRecordIndicator(it)
+            }
         }
     }
 
@@ -690,6 +721,7 @@ class OverlayService : Service() {
          * Settings app and its permission dialogs.
          */
         private const val MAX_OVERLAY_OPACITY = 0.8f
+        private const val REC_STATUS_MS = 1_500L
         private const val CHANNEL_ID = "framescope_overlay_channel"
         private const val NOTIFICATION_ID = 4040
 

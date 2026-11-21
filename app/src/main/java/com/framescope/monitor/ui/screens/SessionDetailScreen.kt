@@ -1115,7 +1115,7 @@ private fun SceneDetailCard(session: SessionRecord) {
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             StatCell(
-                "DDR AVG", fmt(ddr.averageOrNull()?.toFloat(), 0), "MHz",
+                "DDR AVG", fmt(ddr.map { it.toFloat() }.averageOrNull(), 0), "MHz",
                 MaterialTheme.colorScheme.primary,
                 modifier = Modifier.weight(1f)
             )

@@ -235,23 +235,24 @@ object ShellCommands {
     fun threadStat(packageName: String): String {
         val pkg = packageName.replace("'", "").replace("\\", "").replace("$", "")
         if (pkg.isBlank()) return "true"
+        // This is a raw string, so every shell '$' must be written as ${'$'}.
         return """
-            p=\$(pidof '$pkg' 2>/dev/null | awk '{print \$1}')
-            if [ -z "\$p" ]; then
+            p=${'$'}(pidof '$pkg' 2>/dev/null | awk '{print ${'$'}1}')
+            if [ -z "${'$'}p" ]; then
               for d in /proc/[0-9]*; do
-                grep -aqF '$pkg' "\$d/cmdline" 2>/dev/null || continue
-                p=\${d##*/}; break
+                grep -aqF '$pkg' "${'$'}d/cmdline" 2>/dev/null || continue
+                p=${'$'}{d##*/}; break
               done
             fi
-            if [ -n "\$p" ]; then
-              for t in /proc/\$p/task/[0-9]*; do
-                [ -r "\$t/stat" ] || continue
-                line=\$(cat "\$t/stat" 2>/dev/null) || continue
-                tmp=\${line#*(}; comm=\${tmp%%)*}
-                rest=\${line#*) }
-                set -- \$rest
-                [ \$# -ge 13 ] || continue
-                echo "THREAD=\${t##*/}|\$comm|\$(( \$12 + \$13 ))"
+            if [ -n "${'$'}p" ]; then
+              for t in /proc/${'$'}p/task/[0-9]*; do
+                [ -r "${'$'}t/stat" ] || continue
+                line=${'$'}(cat "${'$'}t/stat" 2>/dev/null) || continue
+                tmp=${'$'}{line#*(}; comm=${'$'}{tmp%%)*}
+                rest=${'$'}{line#*) }
+                set -- ${'$'}rest
+                [ ${'$'}# -ge 13 ] || continue
+                echo "THREAD=${'$'}{t##*/}|${'$'}comm|${'$'}(( ${'$'}12 + ${'$'}13 ))"
               done
             fi
         """.trimIndent()

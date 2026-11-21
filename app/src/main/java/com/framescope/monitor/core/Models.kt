@@ -220,7 +220,19 @@ data class SessionRecord(
     /** Every confirmed change of the game's frame-rate cap. */
     val capChanges: List<CapChange> = emptyList(),
     /** Seconds in which the cap was lowered while thermal mitigation was active. */
-    val thermalCapSeconds: Int = 0
+    val thermalCapSeconds: Int = 0,
+    /** Scene's ≥45 FPS smoothness: share of the steady run at or above 45 fps. */
+    val sceneSmoothnessPercent: Float? = null,
+    /** Device facts captured when Record was pressed; older runs leave these blank. */
+    val device: SessionDeviceInfo = SessionDeviceInfo()
+)
+
+/** Device facts stored with a run so an old session still shows the right test setup. */
+data class SessionDeviceInfo(
+    val model: String? = null,
+    val platform: String? = null,
+    val resolution: String? = null,
+    val osVersion: String? = null
 )
 
 /** A confirmed change of the rate the game was presenting at. */

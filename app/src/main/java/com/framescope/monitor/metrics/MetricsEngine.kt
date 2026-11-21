@@ -6,6 +6,7 @@ import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.ProtectedApps
+import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
@@ -349,6 +350,36 @@ class MetricsEngine(
     /** Why the current target was chosen, or why there is none. */
     fun measuredLayerReason(): String = fpsSampler.targetReason
 
+    /** Captures the test setup once, so an old session still shows its real device. */
+    private fun deviceSnapshot(): SessionDeviceInfo {
+        val ctx = androidContext ?: return SessionDeviceInfo()
+        val model = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" ")
+            .takeIf { it.isNotBlank() }
+        val platform = android.os.Build.HARDWARE
+            .takeIf { it.isNotBlank() && !it.equals("unknown", true) }
+        val metrics = android.util.DisplayMetrics()
+        runCatching {
+            val manager = ctx.getSystemService(Context.WINDOW_SERVICE)
+                as? android.view.WindowManager
+            @Suppress("DEPRECATION")
+            manager?.defaultDisplay?.getRealMetrics(metrics)
+        }
+        val resolution = if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+            "${metrics.widthPixels} x ${metrics.heightPixels}"
+        } else null
+        return SessionDeviceInfo(
+            model = model,
+            platform = platform,
+            resolution = resolution,
+            osVersion = "Android ${android.os.Build.VERSION.RELEASE} " +
+                "(SDK ${android.os.Build.VERSION.SDK_INT})"
+        )
+    }
+
     fun startRecording() {
         if (_recording.value) return
         // The Record button is tapped inside FrameScope, so the foreground app at
@@ -364,7 +395,7 @@ class MetricsEngine(
             remembered.takeIf { it.isNotBlank() && it != own } ?: current
         } else current
         val label = appLabel(target)
-        sessionLogger.start(target, label, _system.value.batteryLevel)
+        sessionLogger.start(target, label, _system.value.batteryLevel, deviceSnapshot())
         // A recording is its own heat story: start the peak from the temperature at
         // the moment Record was pressed, not from a hot session earlier today.
         val atStart = _system.value.deviceTemperatureC()

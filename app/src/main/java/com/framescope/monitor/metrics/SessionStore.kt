@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.framescope.monitor.core.CapChange
+import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.finiteOrNull
@@ -19,6 +20,17 @@ import java.io.File
 
 /** Never write NaN or infinity into an export; it makes the backup invalid. */
 private fun List<Float>.finiteDoubles(): List<Double> = mapNotNull { it.finiteOrNull()?.toDouble() }
+
+/** Reads the device facts stored with a run; a missing block is simply unknown. */
+private fun JSONObject?.toDeviceInfo(): SessionDeviceInfo {
+    if (this == null) return SessionDeviceInfo()
+    return SessionDeviceInfo(
+        model = optString("model").takeIf { it.isNotBlank() },
+        platform = optString("platform").takeIf { it.isNotBlank() },
+        resolution = optString("resolution").takeIf { it.isNotBlank() },
+        osVersion = optString("osVersion").takeIf { it.isNotBlank() }
+    )
+}
 
 /** Reads cap changes from JSON, ignoring anything that does not parse. */
 private fun JSONArray?.toCapChanges(): List<CapChange> {
@@ -200,6 +212,13 @@ class SessionStore(context: Context) {
             }
         }))
         put("thermalCapSeconds", record.thermalCapSeconds)
+        put("sceneSmoothnessPercent", record.sceneSmoothnessPercent.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
+        put("device", JSONObject().apply {
+            put("model", record.device.model ?: JSONObject.NULL)
+            put("platform", record.device.platform ?: JSONObject.NULL)
+            put("resolution", record.device.resolution ?: JSONObject.NULL)
+            put("osVersion", record.device.osVersion ?: JSONObject.NULL)
+        })
     }.toString()
 
     fun recordFromJson(text: String): SessionRecord = fromJson(text)
@@ -241,7 +260,11 @@ class SessionStore(context: Context) {
             avgPowerW = if (o.isNull("avgPowerW")) null else o.optDouble("avgPowerW").toFloat().finiteOrNull(),
             capSeries = o.optJSONArray("capSeries").toFloatList(),
             capChanges = o.optJSONArray("capChanges").toCapChanges(),
-            thermalCapSeconds = o.optInt("thermalCapSeconds")
+            thermalCapSeconds = o.optInt("thermalCapSeconds"),
+            sceneSmoothnessPercent = if (o.isNull("sceneSmoothnessPercent")) null else {
+                o.optDouble("sceneSmoothnessPercent").toFloat().finiteOrNull()
+            },
+            device = o.optJSONObject("device").toDeviceInfo()
         )
     }
 
@@ -340,7 +363,12 @@ class SessionStore(context: Context) {
                     avg_power_w REAL,
                     cap_series TEXT,
                     cap_changes TEXT,
-                    thermal_cap_seconds INTEGER DEFAULT 0
+                    thermal_cap_seconds INTEGER DEFAULT 0,
+                    scene_smoothness_percent REAL,
+                    device_model TEXT,
+                    device_platform TEXT,
+                    device_resolution TEXT,
+                    device_os TEXT
                 )
                 """.trimIndent()
             )
@@ -383,6 +411,13 @@ class SessionStore(context: Context) {
                 addColumnIfMissing(db, TABLE_RECORDS, "cap_series", "TEXT")
                 addColumnIfMissing(db, TABLE_RECORDS, "cap_changes", "TEXT")
                 addColumnIfMissing(db, TABLE_RECORDS, "thermal_cap_seconds", "INTEGER DEFAULT 0")
+            }
+            if (oldVersion < 5) {
+                addColumnIfMissing(db, TABLE_RECORDS, "scene_smoothness_percent", "REAL")
+                addColumnIfMissing(db, TABLE_RECORDS, "device_model", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "device_platform", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "device_resolution", "TEXT")
+                addColumnIfMissing(db, TABLE_RECORDS, "device_os", "TEXT")
             }
         }
 
@@ -475,6 +510,11 @@ class SessionStore(context: Context) {
                     }
                 }).toString())
                 put("thermal_cap_seconds", record.thermalCapSeconds)
+                record.sceneSmoothnessPercent.finiteOrNull()?.let { put("scene_smoothness_percent", it) }
+                put("device_model", record.device.model)
+                put("device_platform", record.device.platform)
+                put("device_resolution", record.device.resolution)
+                put("device_os", record.device.osVersion)
             }
             writableDatabase.insertWithOnConflict(
                 TABLE_RECORDS,
@@ -526,6 +566,11 @@ class SessionStore(context: Context) {
                     val capSeriesIdx = c.getColumnIndex("cap_series")
                     val capChangesIdx = c.getColumnIndex("cap_changes")
                     val thermalCapIdx = c.getColumnIndex("thermal_cap_seconds")
+                    val smoothnessIdx = c.getColumnIndex("scene_smoothness_percent")
+                    val deviceModelIdx = c.getColumnIndex("device_model")
+                    val devicePlatformIdx = c.getColumnIndex("device_platform")
+                    val deviceResolutionIdx = c.getColumnIndex("device_resolution")
+                    val deviceOsIdx = c.getColumnIndex("device_os")
                     list.add(
                         SessionRecord(
                             id = c.getString(c.getColumnIndexOrThrow("id")),
@@ -570,7 +615,16 @@ class SessionStore(context: Context) {
                                 runCatching { JSONArray(c.getString(capChangesIdx)).toCapChanges() }
                                     .getOrDefault(emptyList<CapChange>())
                             } else emptyList(),
-                            thermalCapSeconds = if (thermalCapIdx >= 0) c.getInt(thermalCapIdx) else 0
+                            thermalCapSeconds = if (thermalCapIdx >= 0) c.getInt(thermalCapIdx) else 0,
+                            sceneSmoothnessPercent = if (smoothnessIdx >= 0 && !c.isNull(smoothnessIdx)) {
+                                c.getFloat(smoothnessIdx).finiteOrNull()
+                            } else null,
+                            device = SessionDeviceInfo(
+                                model = if (deviceModelIdx >= 0) c.getString(deviceModelIdx) else null,
+                                platform = if (devicePlatformIdx >= 0) c.getString(devicePlatformIdx) else null,
+                                resolution = if (deviceResolutionIdx >= 0) c.getString(deviceResolutionIdx) else null,
+                                osVersion = if (deviceOsIdx >= 0) c.getString(deviceOsIdx) else null
+                            )
                         )
                     )
                 }
@@ -601,7 +655,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 4
+            private const val DB_VERSION = 5
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

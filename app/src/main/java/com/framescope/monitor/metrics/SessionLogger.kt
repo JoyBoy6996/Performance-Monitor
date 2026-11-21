@@ -4,6 +4,7 @@ import com.framescope.monitor.core.CapChange
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
+import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
 import com.framescope.monitor.core.SystemMetrics
@@ -75,6 +76,7 @@ class SessionLogger(private val store: SessionStore) {
     private var currentLabel = ""
     private var startedAt = 0L
     private var startBattery: Int? = null
+    private var deviceInfo = SessionDeviceInfo()
 
     private val samples = ArrayList<SessionSample>()
     private val secondBuckets = ArrayList<SecondBucket>()
@@ -120,12 +122,18 @@ class SessionLogger(private val store: SessionStore) {
     private var gapMs = 0L
 
     @Synchronized
-    fun start(packageName: String, label: String, initialBattery: Int?) {
+    fun start(
+        packageName: String,
+        label: String,
+        initialBattery: Int?,
+        device: SessionDeviceInfo = SessionDeviceInfo()
+    ) {
         currentSessionId = UUID.randomUUID().toString()
         currentPackage = packageName
         currentLabel = label
         startedAt = System.currentTimeMillis()
         startBattery = initialBattery
+        deviceInfo = device
         isRecording = true
 
         samples.clear()
@@ -440,6 +448,12 @@ class SessionLogger(private val store: SessionStore) {
         val smoothness = if (totalFrames > 0) {
             ((1f - (accumulatedJank.toFloat() / totalFrames)) * 100f).coerceIn(0f, 100f)
         } else 100f
+        // Scene calls this "≥45 FPS Smoothness". It is not the target hold and
+        // it is not the jank-free share, so all three stay separate.
+        val sceneSmoothnessPercent = if (evaluationFps.isNotEmpty()) {
+            (evaluationFps.count { it >= 45 }.toFloat() * 100f /
+                evaluationFps.size).finiteOrNull()?.coerceIn(0f, 100f)
+        } else null
 
         val avgFrameTime = if (samples.isNotEmpty()) {
             samples.map { it.frameTimeMs }.average().toFloat()
@@ -508,7 +522,9 @@ class SessionLogger(private val store: SessionStore) {
             avgPowerW = avgPower,
             capSeries = capSeries,
             capChanges = capChanges.toList(),
-            thermalCapSeconds = thermalCapSeconds
+            thermalCapSeconds = thermalCapSeconds,
+            sceneSmoothnessPercent = sceneSmoothnessPercent,
+            device = deviceInfo
         )
 
         store.add(record)

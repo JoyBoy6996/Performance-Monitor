@@ -310,7 +310,7 @@ private fun HudPreview(
     Panel {
         Box(
             modifier = Modifier
-                .fillMaxWidth()
+                .width(196.dp)
                 .clip(MaterialTheme.shapes.small)
                 .background(HudBackground)
                 .padding(Space.md)

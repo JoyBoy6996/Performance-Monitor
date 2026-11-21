@@ -9,6 +9,7 @@ import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.text.TextUtils
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -25,6 +26,8 @@ object OverlayViews {
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         includeFontPadding = false
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     fun value(context: Context, text: String, color: Int, sizeSp: Float = 12f): TextView = TextView(context).apply {
@@ -34,6 +37,8 @@ object OverlayViews {
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         includeFontPadding = false
         gravity = Gravity.END
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
     }
 
     fun row(context: Context): LinearLayout = LinearLayout(context).apply {

@@ -255,10 +255,9 @@ private fun SessionCard(
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             StatCell(
-                label = "Smooth",
-                value = fmt(session.smoothness, 0),
-                unit = "%",
-                accent = MaterialTheme.status.good,
+                label = "5% low fps",
+                value = fmt(session.low5Percent, 1),
+                accent = MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -270,15 +269,16 @@ private fun SessionCard(
                 modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             StatCell(
-                label = "5% low",
-                value = fmt(session.low5Percent, 0),
-                accent = MaterialTheme.status.warn,
+                label = "Variance",
+                value = fmt(session.fpsVariance, 1),
+                accent = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
             )
             StatCell(
-                label = "Jank",
-                value = session.jankFrames.toString(),
-                accent = MaterialTheme.colorScheme.onSurface,
+                label = "≥45 smooth",
+                value = fmt(session.sceneSmoothnessPercent, 0),
+                unit = "%",
+                accent = MaterialTheme.status.good,
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -302,9 +302,16 @@ private fun SessionCard(
         )
         session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let {
             MetricLine(
-                label = "Peak temperature",
+                label = "Max temperature",
                 value = "${it.toInt()}°C",
                 accent = MaterialTheme.status.warn
+            )
+        }
+        session.avgPowerW?.let {
+            MetricLine(
+                label = "Average power",
+                value = "${String.format("%.2f", it)} W",
+                accent = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         session.avgCpu?.let {

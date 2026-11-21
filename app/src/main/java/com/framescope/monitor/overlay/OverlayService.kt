@@ -175,6 +175,28 @@ class OverlayService : Service() {
         applyExpandedState()
     }
 
+    /**
+     * A fixed width is the whole fix for the "popup covers the game" reports.
+     *
+     * With WRAP_CONTENT the weighted frame-time text asked for all the space the
+     * window could get, so Classic, Detailed and RTSS grew to the screen width.
+     * Each style now gets a small, known width and the window is created with
+     * that exact size.
+     */
+    private fun overlayWidthPx(): Int {
+        val styleWidth = when (currentStyle) {
+            OverlayStyle.PILL -> 132f
+            OverlayStyle.COMPACT -> 108f
+            OverlayStyle.CLASSIC -> 126f
+            OverlayStyle.DETAILED -> 138f
+            OverlayStyle.RTSS -> 116f
+        }
+        val wanted = OverlayViews.dp(this, styleWidth * currentScale)
+        val max = (resources.displayMetrics.widthPixels - OverlayViews.dp(this, 12f))
+            .coerceAtLeast(OverlayViews.dp(this, 80f))
+        return wanted.coerceAtMost(max)
+    }
+
     private fun buildPill(settings: AppSettings) {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -229,8 +251,17 @@ class OverlayService : Service() {
         val header = OverlayViews.row(this)
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#00FF66"), 20f * currentScale)
         frameText = OverlayViews.value(this, "", Color.parseColor("#FFA500"), 12f * currentScale)
-        header.addView(fpsText)
-        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(
+            fpsText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        header.addView(
+            frameText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
         layout.addView(header)
 
         populateRows(layout, settings, isRtss = true)
@@ -259,8 +290,17 @@ class OverlayService : Service() {
         val header = OverlayViews.row(this)
         fpsText = OverlayViews.value(this, "--", Color.parseColor("#4ADE80"), 24f * currentScale)
         frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 12f * currentScale)
-        header.addView(fpsText)
-        header.addView(frameText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(
+            fpsText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        header.addView(
+            frameText,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
         layout.addView(header)
 
         if (showGraph && currentStyle != OverlayStyle.COMPACT) {
@@ -296,7 +336,13 @@ class OverlayService : Service() {
             rowView.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
             val value = OverlayViews.value(this, "--", valColor, 12f * currentScale)
-            rowView.addView(value)
+            rowView.addView(
+                value,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
 
             rowViews[row] = value
             rowLabels[row] = label
@@ -318,8 +364,11 @@ class OverlayService : Service() {
             flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
 
+        val windowWidth = if (currentStyle == OverlayStyle.PILL) {
+            WindowManager.LayoutParams.WRAP_CONTENT
+        } else overlayWidthPx()
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            windowWidth,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             flags,
@@ -405,13 +454,15 @@ class OverlayService : Service() {
             }
         }
 
-        // Rebuild only when structure changes (style, rows)
+        // Rebuild only when structure or text size changes (style, rows, scale).
+        // Scale changes the pixel width of the window, so it cannot be a restyle.
         scope.launch {
             combine(
                 settings.overlayStyle.flow,
-                settings.overlayRows.flow
-            ) { style, rows ->
-                style to rows
+                settings.overlayRows.flow,
+                settings.overlayScale.flow
+            ) { style, rows, scale ->
+                Triple(style, rows, scale)
             }.collect {
                 buildOverlay()
             }
@@ -420,12 +471,11 @@ class OverlayService : Service() {
         // Re-style in place for presentation properties
         scope.launch {
             combine(
-                settings.overlayScale.flow,
                 settings.overlayOpacity.flow,
                 settings.overlayShowGraph.flow,
                 settings.overlayGraphHeight.flow,
                 settings.overlayClickThrough.flow
-            ) { _, _, _, _, _ -> }.collect {
+            ) { _, _, _, _ -> }.collect {
                 restyleOverlay(settings)
             }
         }
@@ -435,7 +485,6 @@ class OverlayService : Service() {
         val rootLayout = root ?: return
         val lp = params ?: return
         currentOpacity = settings.overlayOpacity.value.coerceIn(0.3f, MAX_OVERLAY_OPACITY)
-        currentScale = settings.overlayScale.value.coerceIn(0.7f, 1.6f)
         showGraph = settings.overlayShowGraph.value
         graphHeight = settings.overlayGraphHeight.value
 
@@ -449,7 +498,7 @@ class OverlayService : Service() {
         graphView?.let { gv ->
             gv.visibility = if (showGraph && expanded) View.VISIBLE else View.GONE
             val lpGraph = gv.layoutParams
-            lpGraph?.height = OverlayViews.dp(this, graphHeight.toFloat())
+            lpGraph?.height = OverlayViews.dp(this, graphHeight.toFloat() * currentScale)
             gv.layoutParams = lpGraph
         }
 

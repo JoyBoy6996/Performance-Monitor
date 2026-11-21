@@ -55,6 +55,29 @@ private fun fmt(value: Float?, decimals: Int, unit: String = ""): String {
 private fun List<Float>.averageOrNull(): Float? =
     if (isEmpty()) null else average().toFloat().finiteOrNull()
 
+/** The steady part of a run, without the start/stop settling samples. */
+private fun steadyFps(session: SessionRecord): List<Float> = session.fpsSeries.steadyWindow()
+    .ifEmpty { session.fpsSeries.filter { it.finiteOrNull() != null && it > 0f } }
+
+/** Share of the run at or above a rate, from real recorded samples. */
+private fun shareAtLeast(series: List<Float>, rate: Int): Float? {
+    if (series.isEmpty()) return null
+    return series.count { it >= rate }.toFloat().times(100f)
+        .div(series.size).finiteOrNull()?.coerceIn(0f, 100f)
+}
+
+/**
+ * Scene's "≥45 FPS Smoothness". Old runs did not save it, so it is recomputed
+ * from their original per-second samples instead of being guessed.
+ */
+private fun sceneSmoothness(session: SessionRecord): Float? =
+    session.sceneSmoothnessPercent.finiteOrNull()?.coerceIn(0f, 100f)
+        ?: shareAtLeast(steadyFps(session), 45)
+
+/** How much of the run actually held the chosen target. */
+private fun targetHold(session: SessionRecord, threshold: Int): Float? =
+    shareAtLeast(steadyFps(session), threshold)
+
 /** Short legend for the cap line, using only changes the sampler actually confirmed. */
 private fun capLegend(session: SessionRecord): String? {
     val changes = session.capChanges
@@ -101,7 +124,39 @@ fun SessionDetailScreen(
             }
         }
     ) {
-        item { SectionHeader("Overview") }
+        item { SectionHeader("Test setup") }
+
+        item {
+            Panel {
+                MetricLine(
+                    label = "Device",
+                    value = session.device.model ?: "--",
+                    accent = MaterialTheme.colorScheme.onSurface
+                )
+                MetricLine(
+                    label = "Platform",
+                    value = session.device.platform ?: "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "Resolution",
+                    value = session.device.resolution ?: "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "OS",
+                    value = session.device.osVersion ?: "--",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "Target used",
+                    value = "$threshold fps",
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        item { SectionHeader("Match stats") }
 
         item {
             Panel {
@@ -130,22 +185,21 @@ fun SessionDetailScreen(
                 }
                 Row(Modifier.padding(top = Space.md)) {
                     StatCell(
-                        label = "1% low",
-                        value = fmt(session.low1Percent, 1),
+                        label = "5% low",
+                        value = fmt(session.low5Percent, 1),
                         unit = "fps",
                         accent = MaterialTheme.status.warn,
                         modifier = Modifier.weight(1f).padding(end = Space.sm)
                     )
                     StatCell(
-                        label = "5% low",
-                        value = fmt(session.low5Percent, 1),
-                        unit = "fps",
-                        accent = MaterialTheme.status.warn,
+                        label = "Variance",
+                        value = fmt(session.fpsVariance ?: fpsVariance(session.fpsSeries), 1),
+                        accent = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
                     )
                     StatCell(
-                        label = "Smooth",
-                        value = fmt(session.smoothness, 0),
+                        label = "≥45 fps smooth",
+                        value = fmt(sceneSmoothness(session), 1),
                         unit = "%",
                         accent = MaterialTheme.status.good,
                         modifier = Modifier.weight(1f).padding(start = Space.sm)
@@ -165,6 +219,21 @@ fun SessionDetailScreen(
                     } else {
                         MaterialTheme.colorScheme.onSurface
                     }
+                )
+                MetricLine(
+                    label = "Jank-free frames",
+                    value = fmt(session.smoothness, 1, "%"),
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "Held $threshold fps target",
+                    value = fmt(targetHold(session, threshold), 1, "%"),
+                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                MetricLine(
+                    label = "1% low",
+                    value = fmt(session.low1Percent, 1, " fps"),
+                    accent = MaterialTheme.status.warn
                 )
                 MetricLine(
                     label = "Average frame time",
@@ -212,14 +281,6 @@ fun SessionDetailScreen(
                         else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                val variance = session.fpsVariance ?: fpsVariance(session.fpsSeries)
-                variance?.let {
-                    MetricLine(
-                        label = "FPS variance",
-                        value = fmt(it, 2),
-                        accent = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
                 session.avgPowerW?.let {
                     MetricLine(
                         label = "Average power",
@@ -230,7 +291,7 @@ fun SessionDetailScreen(
                 val peakTemp = session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)
                 peakTemp?.let {
                     MetricLine(
-                        label = "Peak temperature",
+                        label = "Max temperature",
                         value = fmt(it, 1, "°C"),
                         accent = MaterialTheme.status.warn
                     )
@@ -279,7 +340,7 @@ fun SessionDetailScreen(
                 StatusPill(
                     text = when {
                         session.avgFps >= threshold -> "Held target"
-                        session.smoothness >= 90f -> "Mostly held target"
+                        (targetHold(session, threshold) ?: 0f) >= 90f -> "Mostly held target"
                         else -> "Missed target"
                     },
                     color = stateColor

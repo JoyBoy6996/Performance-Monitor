@@ -322,10 +322,12 @@ class FpsSampler(
         val detectedGame = !detected.isNullOrBlank() && detected != ownPackage &&
             !isNonGame(detected)
 
-        // What we publish is the real foreground app. Home and FrameScope are
-        // measured too, so the pill shows their live screen FPS instead of a
-        // stale game number. Only a blank detector moment falls back to the game.
-        val pkg = if (detected.isNullOrBlank() && rememberedFresh) remembered else detected
+        // FrameScope's own overlay is never the game. While it is dragged over a
+        // match, the compositor presents that window at the panel rate, and the
+        // device-wide counter then reads 144 - those are not frames the game drew.
+        // When the overlay takes input focus, keep measuring the last real game
+        // from its own layer instead of switching to Qstats' own windows.
+        val pkg = targetForMeasurement(detected, ownPackage, remembered, rememberedFresh)
 
         if (pkg != foregroundApp) {
             // A different app is in front. The per-layer counters start again;
@@ -335,6 +337,11 @@ class FpsSampler(
         foregroundApp = pkg
         if (detectedGame) {
             _lastMeasuredPackage.value = detected
+            lastMeasuredAtMs = nowMs
+        } else if (rememberedFresh && remembered != null && pkg == remembered) {
+            // The game is still the measurement target even though the overlay
+            // window holds the input focus. Keep that target fresh while it is
+            // being measured from its own layer.
             lastMeasuredAtMs = nowMs
         }
 
@@ -368,30 +375,33 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // Scene FPS Meter and the other accurate meters read the hardware
-        // present timestamps of the game's own layer and derive FPS from their
-        // span. No wall-clock window or sampling interval can distort that, so
-        // it is the primary source for a game. The panel here runs at 150 Hz;
-        // the device-wide counter measures that, not the game.
-        val fromScene = if (detectedGame) {
+        // A game is measured only from its own layer. Scene FPS Meter does the same:
+        // it reads the present timestamps of the surface the game draws into, so a
+        // moving overlay or a status-bar update cannot add frames to the reading.
+        val gameTarget = !pkg.isNullOrBlank() && !isNonGame(pkg) &&
+            (detectedGame || (rememberedFresh && pkg == remembered))
+
+        val fromScene = if (gameTarget) {
             sampleFromSceneLatency(pkg, nowUptime)
         } else null
         if (fromScene != null) return fromScene
 
         // TimeStats counters are the fallback when a build keeps no present
-        // timestamps for the game's layer.
-        val fromCounters = if (detectedGame) {
+        // timestamps for the game's layer. They are selected by package/uid, so
+        // an overlay counter can never win this step.
+        val fromCounters = if (gameTarget) {
             sampleFromCounters(pkg, targetFps, nowUptime)
         } else null
         if (fromCounters != null) return fromCounters
 
-        // The device-wide counter is the live screen FPS for home and other
-        // apps, and the fallback for a game whose layer counter is frozen.
-        val fromGlobal = sampleFromGlobalCounter(
-            pkg,
-            nowUptime,
-            appPackage = if (detectedGame) pkg else remembered
-        )
+        // The device-wide counter counts EVERY surface: the game, Qstats' pill and
+        // anything else the compositor presents. It is the live screen FPS for home
+        // and other apps, but never for a game - that is how dragging the pill used
+        // to turn a 90 fps match into 144. When the game's own sources are silent,
+        // the answer is "warming up", not the panel's rate.
+        val fromGlobal = if (!gameTarget) {
+            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
+        } else null
         if (fromGlobal != null) return fromGlobal
 
         // A short window is only a delay. Return quickly so the next poll can
@@ -401,7 +411,7 @@ class FpsSampler(
         // Layer sources also only describe a real game - on home or inside
         // FrameScope they name a system surface, which must never be published
         // as the app's frame rate.
-        if (!detectedGame || (globalWindowPending && !globalCounterUnavailable)) {
+        if (!gameTarget || (globalWindowPending && !globalCounterUnavailable)) {
             return publishUnavailable(
                 source = "SurfaceFlinger presented frames",
                 kind = FpsSourceKind.TIMESTATS,
@@ -411,10 +421,9 @@ class FpsSampler(
             )
         }
 
-        // Fallbacks for a game whose own counter entry is frozen.
-        val fromActive = sampleFromActiveLayer(pkg, targetFps, nowUptime)
-        if (fromActive != null) return fromActive
-
+        // Fallbacks for a game whose own counter entry is frozen. The unnamed
+        // "active layer" probe was removed: while the pill is dragged it answers
+        // for Qstats' own surface at 144 Hz, which is not the game's FPS.
         val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
         if (fromLatency != null) return fromLatency
 
@@ -1060,6 +1069,11 @@ class FpsSampler(
      * timestamps, so neither a slow shell call nor the sampling interval can move
      * it. Pending and sentinel timestamps are dropped by the parser. TimeStats
      * counters are only a fallback for builds that keep no present timestamps.
+     *
+     * Only layers whose name carries the game's package are read here. The old
+     * unnamed "active layer" probe answered for Qstats' own overlay while it was
+     * dragged, so its 144 Hz frames were published as the game's FPS. A layer that
+     * cannot be attributed is never used for a game.
      */
     private suspend fun sampleFromSceneLatency(
         pkg: String,
@@ -1071,6 +1085,7 @@ class FpsSampler(
 
         fun consider(layer: String, dump: String) {
             if (dump.isBlank()) return
+            if (isNoiseLayer(layer, ownPackage)) return
             val sample = parseLayerLatencies("@@@$layer\n$dump").firstOrNull() ?: return
             val presents = sample.presents.filter { it > 0L && it < Long.MAX_VALUE }
             if (presents.size < MIN_EXACT_FRAMES) return
@@ -1096,23 +1111,16 @@ class FpsSampler(
         }
 
         // A game usually names its buffer after its package. Asking those layers
-        // by name is what keeps a system surface from being published as the
-        // game's frame rate.
+        // by name is what keeps the overlay, the system bars and another app from
+        // being published as the game's frame rate. The third argument is zero on
+        // purpose: a "newest layer" fallback would pick the pill while it is
+        // dragged over the game.
         val list = hub.execOrNull(ShellCommands.surfaceList(), LIST_TIMEOUT_MS)?.out.orEmpty()
-        for (name in layerNamesFor(list, pkg, ownLimit = 6, newestLimit = 0)) {
+        for (name in layerNamesFor(list, pkg, ownLimit = 8, newestLimit = 0)) {
             val dump = hub.execOrNull(
                 ShellCommands.surfaceLatencyOfLayer(name), EXACT_LATENCY_TIMEOUT_MS
             )?.out.orEmpty()
             consider(name, dump)
-        }
-
-        // An engine-named surface carries no package. The unnamed probe answers
-        // for the layer that presented last - the game while it is drawing.
-        if (readings.isEmpty()) {
-            val dump = hub.execOrNull(
-                ShellCommands.surfaceLatencyDefault(), ACTIVE_LATENCY_TIMEOUT_MS
-            )?.out.orEmpty()
-            consider("the layer that is on the screen", dump)
         }
 
         // Prefer a layer that names the game, then the fastest one that proved
@@ -1159,71 +1167,6 @@ class FpsSampler(
             windowMs = best.windowMs,
             low1PercentFps = lowPercentFps(best.presents.zipWithNext { a, b -> b - a }, 1),
             low5PercentFps = lowPercentFps(best.presents.zipWithNext { a, b -> b - a }, 5),
-            appPackage = pkg,
-            nowUptime = nowUptime
-        )
-        return _state.value
-    }
-
-    /**
-     * The layer SurfaceFlinger is presenting right now.
-     *
-     * Asked without a name, `--latency` answers with the active layer. On a game
-     * that layer carries the engine's name and no package name, so it is the
-     * only probe that finds the frames of a game like com.pubg.imobile. It is
-     * asked only while the game is the foreground app, so the answer belongs to
-     * that game. A dump that only holds the refresh period is refused.
-     */
-    private suspend fun sampleFromActiveLayer(
-        pkg: String,
-        targetFps: Int,
-        nowUptime: Long
-    ): FpsState? {
-        val dump = hub.execOrNull(
-            ShellCommands.surfaceLatencyDefault(),
-            ACTIVE_LATENCY_TIMEOUT_MS
-        )?.out.orEmpty()
-        if (dump.isBlank()) return null
-
-        val (_, presents) = Parsers.parseLatency(dump)
-        if (presents.size < MIN_ACTIVE_FRAMES) return null
-
-        // This probe only runs when the game itself is the foreground app, so a
-        // dump that answers here is the game's own surface. The clock its frames
-        // are stamped with cannot always be matched to either clock of the app;
-        // refusing the reading for that reason is what left the overlay on
-        // "--fps". The age is reported for diagnosis, never used to throw away
-        // the only source that measures this game.
-        val sampleAgeMs = presentationAgeNs(
-            presents.last(),
-            nowUptime,
-            SystemClock.elapsedRealtimeNanos()
-        )?.div(1_000_000L) ?: 0L
-
-        val deltas = presents.zipWithNext { a, b -> b - a }.filter { it > 0L }
-        val stats = computeFrameStats(deltas) ?: return null
-        val fps = stats.fps
-        if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) return null
-        val settled = settleToGameCap(fps, refreshRateHz())
-
-        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
-        measuredLayer = "the layer that is on the screen"
-
-        latencyCounter.frameBudgetNs = frameBudgetNs(targetFps)
-        val result = latencyCounter.onSample("active", presents, nowUptime)
-
-        publish(
-            fps = settled,
-            frameTimeMs = 1_000f / settled,
-            source = "SurfaceFlinger (the layer on the screen)",
-            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
-            layer = "active",
-            totalFrames = latencyCounter.totalUniqueFrames,
-            jankFrames = latencyCounter.totalJankFrames,
-            sampleAgeMs = sampleAgeMs,
-            windowMs = result.windowMs,
-            low1PercentFps = latencyCounter.low1PercentFps(),
-            low5PercentFps = latencyCounter.low5PercentFps(),
             appPackage = pkg,
             nowUptime = nowUptime
         )
@@ -1497,6 +1440,24 @@ class FpsSampler(
         private const val DISPLAY_HZ_TIMEOUT_MS = 2_000L
 
         /**
+         * The app whose FPS may be published.
+         *
+         * Qstats' own window is never a measurement target. When the pill takes
+         * input focus during a drag, the last real game is kept instead: the
+         * overlay's own 144 Hz frames are not game frames.
+         */
+        internal fun targetForMeasurement(
+            detected: String?,
+            ownPackage: String,
+            remembered: String?,
+            rememberedFresh: Boolean
+        ): String? = when {
+            detected.isNullOrBlank() -> if (rememberedFresh) remembered else null
+            detected == ownPackage -> if (rememberedFresh) remembered else null
+            else -> detected
+        }
+
+        /**
          * How long a known app in front is trusted.
          *
          * The privileged lookup is a `dumpsys window`, which costs more than the
@@ -1542,18 +1503,12 @@ class FpsSampler(
         /** A window shorter than this makes a counter difference meaningless. */
         private const val MIN_COUNTER_WINDOW_MS = 500L
 
-        /** Fewer frames than this on the active layer say nothing about FPS. */
-        private const val MIN_ACTIVE_FRAMES = 4
-
         /**
          * An unnamed layer has to prove it is drawing before it can be called
          * the game. A short burst or an idle surface is not a frame rate.
          */
         private const val MIN_UNATTRIBUTED_FRAMES = 8
         private const val MIN_UNATTRIBUTED_FPS = 24f
-
-        /** How long the unnamed active-layer probe may take. */
-        private const val ACTIVE_LATENCY_TIMEOUT_MS = 3_000L
 
         /**
          * How long a real reading is kept while the game or FrameScope is in

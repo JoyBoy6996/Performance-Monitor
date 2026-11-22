@@ -275,7 +275,9 @@ private class SceneReportRenderer(private val sink: PageSink) {
             val colors = intArrayOf(
                 ReportTheme.platform, ReportTheme.host, ReportTheme.os, ReportTheme.profile
             )
-            entries.forEachIndexed { index, (name, value) ->
+            entries.forEachIndexed { index, entry ->
+                val name = entry.first ?: "--"
+                val value = entry.second
                 val cx = x0 + columnWidth * index + columnWidth / 2f
                 label.textAlign = Paint.Align.CENTER
                 text(name, cx, y0 + 14f, label)
@@ -739,6 +741,7 @@ fun SessionShareDialog(
     threshold: Int,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Share session") },
@@ -750,13 +753,13 @@ fun SessionShareDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                SessionShare.shareAsPdf(LocalContext.current, session, threshold)
+                SessionShare.shareAsPdf(context, session, threshold)
                 onDismiss()
             }) { Text("PDF") }
         },
         dismissButton = {
             TextButton(onClick = {
-                SessionShare.shareAsImage(LocalContext.current, session, threshold)
+                SessionShare.shareAsImage(context, session, threshold)
                 onDismiss()
             }) { Text("Image") }
         }

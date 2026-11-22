@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -405,7 +406,7 @@ fun SceneSessionCards(
 }
 
 @Composable
-private fun DeviceColumn(label: String, value: String, color: Color) {
+private fun RowScope.DeviceColumn(label: String, value: String, color: Color) {
     Column(
         Modifier.weight(1f),
         horizontalAlignment = Alignment.CenterHorizontally

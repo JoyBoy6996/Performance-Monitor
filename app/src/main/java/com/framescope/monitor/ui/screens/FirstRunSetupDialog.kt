@@ -74,12 +74,11 @@ fun FirstRunSetupDialog(
                     }
                 )
                 Text(
-                    "No Wi-Fi? Two ways. " +
-                        "1) PC + USB cable once: run 'adb tcpip 5555' on the PC, then tap Set up ADB " +
-                        "bridge here. " +
-                        "2) No PC: start ShizukuNext from USB debugging, grant Qstats permission, " +
-                        "then tap Install key once. Some ROMs do not save an ADB key from the prompt; " +
-                        "Shizuku lets Qstats install its own key so reconnect stays silent."
+                    "No Wi-Fi? ShizukuNext runs from USB debugging with no PC and no Wi-Fi. " +
+                        "Start it, grant Qstats permission, and turn on “Start on boot” — that is the " +
+                        "whole one-time setup. No ADB key is needed. " +
+                        "If you prefer no Shizuku: connect to a PC with USB once, run 'adb tcpip 5555', " +
+                        "then tap Set up ADB bridge here."
                 )
                 Column {
                     TextButton(onClick = { openShizuku(context) }) {

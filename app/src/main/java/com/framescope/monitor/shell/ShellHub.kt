@@ -210,8 +210,9 @@ class ShellHub(
             val helper = shizukuHelper()
                 ?: return@keyInstall "Shizuku is running but its shell is not ready yet. Try again."
             if (!trustKeyWithShell(helper)) {
-                return@keyInstall "Shizuku is running, but this ROM refused to write Qstats' key " +
-                    "to /data/misc/adb/adb_keys. Keep Shizuku running; Qstats can still use its shell."
+                return@keyInstall "This ROM blocks writing /data/misc/adb/adb_keys. No problem: " +
+                    "Shizuku is already giving Qstats shell access, so no ADB key is needed. " +
+                    "Keep Shizuku Start-on-boot ON."
             }
 
             adb.retarget(LOOPBACK, adbPort)

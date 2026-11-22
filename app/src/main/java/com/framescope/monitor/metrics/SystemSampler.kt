@@ -102,7 +102,8 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.gpuBusy(),
             ShellCommands.ddrFreq(),
             ShellCommands.threadStat(packageName),
-            ShellCommands.clockTicks()
+            ShellCommands.clockTicks(),
+            ShellCommands.telemetryIdentity()
         )
         val result = hub.execOrNull(script, timeoutMs)
 
@@ -138,6 +139,7 @@ class SystemSampler(private val hub: ShellHub) {
             .mapNotNull { it.value.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
             .maxOrNull()
         val thermalStatus = Parsers.parseThermalStatus(part(3))
+        val identity = Parsers.parseDeviceIdentity(part(10))
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
         record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
@@ -168,6 +170,8 @@ class SystemSampler(private val hub: ShellHub) {
             thermalMaxC = maxThermal,
             cpuTempC = cpuTemp,
             thermalStatus = thermalStatus,
+            platform = identity.first,
+            performanceProfile = identity.second,
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,

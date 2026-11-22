@@ -104,6 +104,10 @@ data class SystemMetrics(
     val batteryCycles: Int? = null,
     /** Android's thermal mitigation level: 0 = none, 1 = light, 2 = moderate, 3 = severe. */
     val thermalStatus: Int? = null,
+    /** Chip platform reported by the kernel (`getprop ro.board.platform`), when readable. */
+    val platform: String? = null,
+    /** Active performance profile reported by the device, when it publishes one. */
+    val performanceProfile: String? = null,
     /** Warmest temperature seen since monitoring began (or since the current recording). */
     val tempPeakC: Float? = null,
     /** How far the phone has cooled from that peak, in °C. */
@@ -318,7 +322,9 @@ data class SessionDeviceInfo(
     val model: String? = null,
     val platform: String? = null,
     val resolution: String? = null,
-    val osVersion: String? = null
+    val osVersion: String? = null,
+    /** Active performance mode captured with the run; "Balanced" when unknown. */
+    val profile: String? = null
 )
 
 /** A confirmed change of the rate the game was presenting at. */

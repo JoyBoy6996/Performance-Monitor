@@ -21,6 +21,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -30,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
@@ -64,6 +66,7 @@ fun SessionsScreen(
     bottomPadding: Dp = 24.dp
 ) {
     val sessions by container.store.sessions.collectAsState()
+    val context = LocalContext.current
     val formatter = remember { SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()) }
     val threshold = container.settings.fpsThreshold.flow.collectAsState().value
     var shareTarget by remember { mutableStateOf<SessionRecord?>(null) }
@@ -99,6 +102,9 @@ fun SessionsScreen(
                     formattedDate = formatter.format(Date(session.startedAt)),
                     onOpen = { onOpenSession(session) },
                     onShare = { shareTarget = session },
+                    onExportPdf = {
+                        SessionShare.exportPdfToDownloads(context, session, threshold)
+                    },
                     onDelete = { container.store.delete(session.id) }
                 )
             }
@@ -151,6 +157,7 @@ private fun SessionCard(
     formattedDate: String,
     onOpen: () -> Unit,
     onShare: () -> Unit,
+    onExportPdf: () -> Unit,
     onDelete: () -> Unit
 ) {
     val stateColor = fpsStateColor(session.avgFps, threshold)
@@ -178,6 +185,9 @@ private fun SessionCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = Space.xs)
                 )
+            }
+            TextButton(onClick = onExportPdf) {
+                Text("PDF")
             }
             IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
                 Icon(

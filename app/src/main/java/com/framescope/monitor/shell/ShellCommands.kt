@@ -1,5 +1,7 @@
 package com.framescope.monitor.shell
 
+import java.util.Locale
+
 /** Helpers that build the shell snippets and parse their output. */
 object ShellCommands {
 
@@ -306,6 +308,16 @@ object ShellCommands {
 
     fun deviceProps(): String =
         "getprop ro.product.model; getprop ro.board.platform; getprop ro.hardware; getprop ro.build.version.release"
+
+    /**
+     * Identity and performance profile for a recorded run. One extra line in the
+     * telemetry batch, so it costs no separate shell round trip.
+     */
+    fun telemetryIdentity(): String =
+        "echo PLATFORM=\$(getprop ro.board.platform 2>/dev/null); " +
+            "echo PROFILE=\$(settings get system power_save_type 2>/dev/null); " +
+            "echo GAMEMODE=\$(getprop sys.vivo.game.mode 2>/dev/null); " +
+            "echo GAMEMODE2=\$(getprop persist.sys.game.mode 2>/dev/null)"
 }
 
 /** Parsers for the shell output. */
@@ -436,6 +448,30 @@ object Parsers {
     fun parseCpuFreq(dump: String): Int? =
         dump.lineSequence().firstOrNull { it.startsWith("CPUFREQ=") }
             ?.substringAfter("=")?.trim()?.toIntOrNull()
+
+    /**
+     * Real platform codename and the active performance profile.
+     *
+     * `getprop ro.board.platform` is the chip platform the kernel reports (for
+     * example SUN). A profile is only claimed when a device actually publishes
+     * one; otherwise the report falls back to "Balanced" instead of "--".
+     */
+    fun parseDeviceIdentity(dump: String): Pair<String?, String?> {
+        fun value(key: String): String? = dump.lineSequence()
+            .firstOrNull { it.trim().startsWith("$key=") }
+            ?.substringAfter("=")?.trim()
+            ?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+        val platform = value("PLATFORM")?.uppercase(Locale.US)
+        val mode = listOfNotNull(value("GAMEMODE"), value("GAMEMODE2"), value("PROFILE"))
+            .joinToString(" ").lowercase(Locale.US)
+        val profile = when {
+            mode.contains("monster") || mode.contains("performance") ||
+                mode.contains("game") || mode.contains("high") -> "Monster"
+            mode.contains("balanced") || mode.contains("normal") || mode.contains("0") -> "Balanced"
+            else -> null
+        }
+        return platform to profile
+    }
 
     /** Aggregate counters of every core in `/proc/stat`, keyed by core number. */
     fun parsePerCoreCpuStat(dump: String): Map<Int, LongArray> {

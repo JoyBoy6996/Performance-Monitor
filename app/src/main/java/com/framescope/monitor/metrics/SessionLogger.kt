@@ -233,6 +233,16 @@ class SessionLogger(private val store: SessionStore) {
         val now = System.currentTimeMillis()
         val nowSec = now / 1000
 
+        // The kernel's platform and the active performance mode come from the same
+        // privileged batch as the rest of the telemetry. Keep the first real reading
+        // so the session's device card never falls back to a guessed Build.HARDWARE.
+        if (metrics.platform != null || metrics.performanceProfile != null) {
+            deviceInfo = deviceInfo.copy(
+                platform = metrics.platform?.takeIf { it.isNotBlank() } ?: deviceInfo.platform,
+                profile = metrics.performanceProfile ?: deviceInfo.profile
+            )
+        }
+
         val fps = fpsState.fps.finiteOrNull() ?: 0f
         val frameTime = fpsState.frameTimeMs.finiteOrNull() ?: 0f
         val cpu = metrics.cpuPercent.finiteOrNull() ?: 0f

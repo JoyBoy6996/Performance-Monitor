@@ -80,7 +80,8 @@ private fun JSONObject?.toDeviceInfo(): SessionDeviceInfo {
         model = optString("model").takeIf { it.isNotBlank() },
         platform = optString("platform").takeIf { it.isNotBlank() },
         resolution = optString("resolution").takeIf { it.isNotBlank() },
-        osVersion = optString("osVersion").takeIf { it.isNotBlank() }
+        osVersion = optString("osVersion").takeIf { it.isNotBlank() },
+        profile = optString("profile").takeIf { it.isNotBlank() }
     )
 }
 
@@ -307,6 +308,7 @@ class SessionStore(context: Context) {
             put("platform", record.device.platform ?: JSONObject.NULL)
             put("resolution", record.device.resolution ?: JSONObject.NULL)
             put("osVersion", record.device.osVersion ?: JSONObject.NULL)
+            put("profile", record.device.profile ?: JSONObject.NULL)
         })
     }.toString()
 
@@ -524,6 +526,7 @@ class SessionStore(context: Context) {
                     device_platform TEXT,
                     device_resolution TEXT,
                     device_os TEXT,
+                    device_profile TEXT,
                     power_series TEXT,
                     cpu_freq_series TEXT,
                     gpu_freq_series TEXT,
@@ -624,6 +627,9 @@ class SessionStore(context: Context) {
             if (oldVersion < 9) {
                 addColumnIfMissing(db, TABLE_RECORDS, "display_hz", "REAL")
             }
+            if (oldVersion < 10) {
+                addColumnIfMissing(db, TABLE_RECORDS, "device_profile", "TEXT")
+            }
         }
 
         private fun addColumnIfMissing(
@@ -721,6 +727,7 @@ class SessionStore(context: Context) {
                 put("device_platform", record.device.platform)
                 put("device_resolution", record.device.resolution)
                 put("device_os", record.device.osVersion)
+                put("device_profile", record.device.profile)
                 put("power_series", JSONArray(record.powerSeries.finiteDoubles()).toString())
                 put("cpu_freq_series", JSONArray(record.cpuFreqSeries.finiteDoubles()).toString())
                 put("gpu_freq_series", JSONArray(record.gpuFreqSeries.finiteDoubles()).toString())
@@ -803,6 +810,7 @@ class SessionStore(context: Context) {
                     val devicePlatformIdx = c.getColumnIndex("device_platform")
                     val deviceResolutionIdx = c.getColumnIndex("device_resolution")
                     val deviceOsIdx = c.getColumnIndex("device_os")
+                    val deviceProfileIdx = c.getColumnIndex("device_profile")
                     val powerSeriesIdx = c.getColumnIndex("power_series")
                     val cpuFreqSeriesIdx = c.getColumnIndex("cpu_freq_series")
                     val gpuFreqSeriesIdx = c.getColumnIndex("gpu_freq_series")
@@ -876,7 +884,8 @@ class SessionStore(context: Context) {
                                 model = if (deviceModelIdx >= 0) c.getString(deviceModelIdx) else null,
                                 platform = if (devicePlatformIdx >= 0) c.getString(devicePlatformIdx) else null,
                                 resolution = if (deviceResolutionIdx >= 0) c.getString(deviceResolutionIdx) else null,
-                                osVersion = if (deviceOsIdx >= 0) c.getString(deviceOsIdx) else null
+                                osVersion = if (deviceOsIdx >= 0) c.getString(deviceOsIdx) else null,
+                                profile = if (deviceProfileIdx >= 0) c.getString(deviceProfileIdx) else null
                             ),
                             powerSeries = if (powerSeriesIdx >= 0) {
                                 jsonToFloatList(c.getString(powerSeriesIdx))
@@ -985,7 +994,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 9
+            private const val DB_VERSION = 10
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

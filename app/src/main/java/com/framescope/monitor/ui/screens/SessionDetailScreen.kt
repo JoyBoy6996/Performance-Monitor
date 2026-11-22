@@ -32,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
@@ -120,6 +121,7 @@ fun SessionDetailScreen(
     onUpdateNote: (String) -> Unit = {},
     bottomPadding: Dp = 24.dp
 ) {
+    val context = LocalContext.current
     val formatter = remember { SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()) }
     val stateColor = fpsStateColor(session.avgFps, threshold)
     val appName = session.appLabel.ifBlank {
@@ -133,6 +135,11 @@ fun SessionDetailScreen(
         subtitle = "${formatter.format(Date(session.startedAt))} · ${formatDuration(session.durationMs)}",
         bottomPadding = bottomPadding,
         actions = {
+            TextButton(onClick = {
+                SessionShare.exportPdfToDownloads(context, session, threshold)
+            }) {
+                Text("PDF")
+            }
             IconButton(onClick = { shareOpen = true }) {
                 Icon(
                     imageVector = Icons.Rounded.Share,
@@ -149,278 +156,13 @@ fun SessionDetailScreen(
             }
         }
     ) {
-        item { SectionHeader("Test setup") }
-
         item {
-            Panel {
-                MetricLine(
-                    label = "Device",
-                    value = session.device.model ?: "--",
-                    accent = MaterialTheme.colorScheme.onSurface
-                )
-                MetricLine(
-                    label = "Platform",
-                    value = session.device.platform ?: "--",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                MetricLine(
-                    label = "Resolution",
-                    value = session.device.resolution ?: "--",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                MetricLine(
-                    label = "OS",
-                    value = session.device.osVersion ?: "--",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                MetricLine(
-                    label = "Target used",
-                    value = "$threshold fps",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            SceneSessionCards(
+                session = session,
+                threshold = threshold,
+                onUpdateNote = onUpdateNote
+            )
         }
-
-        item { SectionHeader("Match stats") }
-
-        item {
-            Panel {
-                Row {
-                    StatCell(
-                        label = "Average",
-                        value = fmt(session.avgFps, 1),
-                        unit = "fps",
-                        accent = stateColor,
-                        modifier = Modifier.weight(1f).padding(end = Space.sm)
-                    )
-                    StatCell(
-                        label = "Peak",
-                        value = fmt(session.maxFps, 0),
-                        unit = "fps",
-                        accent = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
-                    )
-                    StatCell(
-                        label = "Lowest",
-                        value = fmt(session.minFps, 0),
-                        unit = "fps",
-                        accent = MaterialTheme.status.critical,
-                        modifier = Modifier.weight(1f).padding(start = Space.sm)
-                    )
-                }
-                Row(Modifier.padding(top = Space.md)) {
-                    StatCell(
-                        label = "5% low",
-                        value = fmt(session.low5Percent, 1),
-                        unit = "fps",
-                        accent = MaterialTheme.status.warn,
-                        modifier = Modifier.weight(1f).padding(end = Space.sm)
-                    )
-                    StatCell(
-                        label = "Variance",
-                        value = fmt(session.fpsVariance ?: fpsVariance(session.fpsSeries), 1),
-                        accent = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
-                    )
-                    StatCell(
-                        label = "≥45 fps smooth",
-                        value = fmt(sceneSmoothness(session), 1),
-                        unit = "%",
-                        accent = MaterialTheme.status.good,
-                        modifier = Modifier.weight(1f).padding(start = Space.sm)
-                    )
-                }
-                Spacer(Modifier.height(Space.md))
-
-                SectionHeader("Frame pacing")
-                MetricLine(
-                    label = "Frames",
-                    value = session.totalFrames.toString(),
-                    accent = MaterialTheme.colorScheme.onSurface
-                )
-                MetricLine(
-                    label = "Jank frames",
-                    value = session.jankFrames.toString(),
-                    accent = if (session.jankFrames > 0) {
-                        MaterialTheme.status.warn
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    }
-                )
-                MetricLine(
-                    label = "Jank-free frames",
-                    value = fmt(session.smoothness, 1, "%"),
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                MetricLine(
-                    label = "1% low",
-                    value = fmt(session.low1Percent, 1, " fps"),
-                    accent = MaterialTheme.status.warn
-                )
-                MetricLine(
-                    label = "Average frame time",
-                    value = fmt(session.avgFrameTimeMs, 2, " ms"),
-                    accent = MaterialTheme.colorScheme.onSurface
-                )
-                MetricLine(
-                    label = "Longest frame",
-                    value = fmt(session.longestFrameMs, 1, " ms"),
-                    accent = if (session.longestFrameMs > 33f) {
-                        MaterialTheme.status.critical
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    }
-                )
-                MetricLine(
-                    label = "FPS range",
-                    value = "${fmt(session.minFps, 0)}–${fmt(session.maxFps, 0)} fps",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                val jitter = session.jitterMs ?: frameTimeJitterMs(session.frameTimeSeries)
-                jitter?.let {
-                    MetricLine(
-                        label = "Jitter",
-                        value = fmt(it, 2, " ms"),
-                        accent = if (it > 3f) MaterialTheme.status.warn
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                PanelDivider()
-                SectionHeader("Target & cap")
-                MetricLine(
-                    label = "Held $threshold fps target",
-                    value = fmt(targetHold(session, threshold), 1, "%"),
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                val capNow = session.capSeries.lastOrNull()?.takeIf { it > 0f }
-                MetricLine(
-                    label = "Detected FPS cap",
-                    value = if (capNow == null) "--" else {
-                        fmt(capNow, 0, " fps") +
-                            if (session.thermalCapSeconds > 0) " · heat" else ""
-                    },
-                    accent = if (session.thermalCapSeconds > 0) {
-                        MaterialTheme.status.warn
-                    } else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                if (session.capChanges.isNotEmpty()) {
-                    MetricLine(
-                        label = "Cap changes",
-                        value = session.capChanges.size.toString(),
-                        accent = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                PanelDivider()
-                SectionHeader("Heat & power")
-                session.avgPowerW?.let {
-                    MetricLine(
-                        label = "Average power",
-                        value = fmt(it, 2, " W"),
-                        accent = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                val peakTemp = session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)
-                peakTemp?.let {
-                    MetricLine(
-                        label = "Max temperature",
-                        value = fmt(it, 1, "°C"),
-                        accent = MaterialTheme.status.warn
-                    )
-                }
-                val finalTemp = session.tempSeries.lastOrNull().plausibleTempC(MAX_HOTSPOT_TEMP_C)
-                if (peakTemp != null && finalTemp != null && peakTemp - finalTemp >= 0.1f) {
-                    MetricLine(
-                        label = "Cooled from peak",
-                        value = fmt(peakTemp - finalTemp, 1, "°C"),
-                        accent = MaterialTheme.status.good
-                    )
-                }
-                session.peakThermalStatus?.let { status ->
-                    MetricLine(
-                        label = "Thermal state",
-                        value = thermalStatusLabel(status),
-                        accent = if (status > 0) {
-                            MaterialTheme.status.warn
-                        } else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (session.throttledSeconds > 0) {
-                    MetricLine(
-                        label = "Throttled time",
-                        value = formatDuration(session.throttledSeconds * 1000L),
-                        accent = MaterialTheme.status.warn
-                    )
-                }
-
-                PanelDivider()
-                SectionHeader("Device load")
-                session.avgCpu?.let {
-                    MetricLine(
-                        label = "Average CPU",
-                        value = fmt(it, 1, "%"),
-                        accent = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                val battery = session.batterySeries
-                if (battery.isNotEmpty()) {
-                    MetricLine(
-                        label = "Battery",
-                        value = "${fmt(battery.first(), 0, "%")} → " +
-                            fmt(battery.last(), 0, "%"),
-                        accent = MaterialTheme.status.good
-                    )
-                }
-
-                Spacer(Modifier.height(Space.sm))
-                StatusPill(
-                    text = when {
-                        session.avgFps >= threshold -> "Held target"
-                        (targetHold(session, threshold) ?: 0f) >= 90f -> "Mostly held target"
-                        else -> "Missed target"
-                    },
-                    color = stateColor
-                )
-            }
-        }
-
-        if (session.capChanges.isNotEmpty()) {
-            item { SectionHeader("FPS cap changes") }
-
-            item { CapChangesPanel(session) }
-        }
-
-        item { SectionHeader("Frame drops") }
-
-        item { DropsPanel(session, threshold) }
-
-        item { SectionHeader("Graphs") }
-
-        item { SectionHeader("Overview") }
-        item { ThermalWarningCard(session) }
-        item { DeviceProfileCard(session) }
-        item { SessionNoteCard(session, onUpdateNote) }
-        item { AppMetricsCard(session) }
-
-        item { SectionHeader("Frame rate & pacing") }
-        item { FpsTemperatureCard(session, threshold) }
-        item { FrameTimeCard(session) }
-
-        item { SectionHeader("Device load") }
-        item { CpuUsageCard(session) }
-        item { CpuFrequencyCard(session) }
-
-        item { SectionHeader("Scene detail") }
-        item { SceneDetailCard(session) }
-        item { PerCoreCard(session) }
-        item { ThreadsCard(session) }
-
-        item { SectionHeader("Before & after") }
-        item { BeforeAfterCard(session) }
-
-        item { SectionHeader("Diagnostics") }
-        item { ShellLogsCard(session.shellLogs) }
     }
 
     if (shareOpen) {

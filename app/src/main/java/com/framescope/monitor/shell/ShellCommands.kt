@@ -122,7 +122,8 @@ object ShellCommands {
      * stays small enough for every poll.
      */
     fun surfaceTotalFrames(): String =
-        "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | grep -m1 'totalFrames'"
+        "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
+            "awk '/layerName =/{exit} /totalFrames/{print; exit}'"
 
     /**
      * The counters of one app, without the counters of every other app.

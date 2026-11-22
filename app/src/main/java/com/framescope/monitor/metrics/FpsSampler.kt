@@ -175,6 +175,9 @@ class FpsSampler(
     private val latencyCounter = FrameCounter(DEFAULT_FRAME_BUDGET_NS)
     private val sceneFpsCalculator = SceneFpsCalculator(windowMs = 500L, staleTimeoutMs = 350L)
 
+    /** The layer the rolling Scene calculator belongs to; frames of two layers never mix. */
+    private var sceneCalculatorLayer = ""
+
     /**
      * Cumulative counters of the Scene-style timestamp source.
      *
@@ -263,6 +266,8 @@ class FpsSampler(
         sceneJankFrames = 0L
         sceneLastTimestampNs = 0L
         sceneLayerKey = ""
+        sceneCalculatorLayer = ""
+        sceneFpsCalculator.reset()
     }
 
     /**
@@ -381,17 +386,16 @@ class FpsSampler(
         val gameTarget = !pkg.isNullOrBlank() && !isNonGame(pkg) &&
             (detectedGame || (rememberedFresh && pkg == remembered))
 
-        val fromScene = if (gameTarget) {
-            sampleFromSceneLatency(pkg, nowUptime)
-        } else null
+        // Scene measures every target from the frames of that target's own layer.
+        // This also works on the home screen: the launcher names its surface, and
+        // its present timestamps are the real frames the screen drew.
+        val fromScene = sampleFromSceneLatency(pkg, nowUptime)
         if (fromScene != null) return fromScene
 
         // TimeStats counters are the fallback when a build keeps no present
-        // timestamps for the game's layer. They are selected by package/uid, so
-        // an overlay counter can never win this step.
-        val fromCounters = if (gameTarget) {
-            sampleFromCounters(pkg, targetFps, nowUptime)
-        } else null
+        // timestamps for the layer. They are selected by package/uid, so an
+        // overlay counter can never win this step.
+        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
         if (fromCounters != null) return fromCounters
 
         // The device-wide counter counts EVERY surface: the game, Qstats' pill and
@@ -406,12 +410,9 @@ class FpsSampler(
 
         // A short window is only a delay. Return quickly so the next poll can
         // finish it. The per-layer fallbacks below take seconds; running them
-        // here pushes the next poll past the window, the counter never gets a
-        // reading, and the previous FPS stays on the overlay forever.
-        // Layer sources also only describe a real game - on home or inside
-        // FrameScope they name a system surface, which must never be published
-        // as the app's frame rate.
-        if (!gameTarget || (globalWindowPending && !globalCounterUnavailable)) {
+        // here pushes the next poll past the window and the counter never gets
+        // a reading. The old number is dropped instead of being held forever.
+        if (globalWindowPending && !globalCounterUnavailable) {
             return publishUnavailable(
                 source = "SurfaceFlinger presented frames",
                 kind = FpsSourceKind.TIMESTATS,
@@ -736,7 +737,12 @@ class FpsSampler(
 
         // Use SceneFpsCalculator for the FPS value: deduplication prevents
         // ring-buffer overlaps from inflating the count, and the stale timeout
-        // drops to 0 when no new frames arrive.
+        // drops to 0 when no new frames arrive. A game owns several layers, so
+        // the rolling window must start again whenever the layer changes.
+        if (sceneCalculatorLayer != name) {
+            sceneFpsCalculator.reset()
+            sceneCalculatorLayer = name
+        }
         val displayHz = refreshRateHz() ?: 60f
         val sceneResult = sceneFpsCalculator.calculate(
             sample.presents, displayHz, SystemClock.elapsedRealtime()
@@ -1091,11 +1097,15 @@ class FpsSampler(
             if (presents.size < MIN_EXACT_FRAMES) return
             val spanNs = presents.last() - presents.first()
             if (spanNs <= 0L) return
-            // The age is only for the report. A build may stamp presents on a
-            // clock this process cannot match; the span between them is still
-            // the frame rate, so it must not throw the reading away.
-            val ageMs = (presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs)
-                ?: 0L) / 1_000_000L
+            // Scene drops to zero as soon as no new frame arrives. A ring buffer
+            // keeps old timestamps long after a screen stopped drawing, so a
+            // reading whose newest frame is older than one second is history,
+            // not the current FPS. Both clocks are tried; a build that stamps
+            // presents on an unmatched clock simply has no reading here.
+            val ageNs = presentationAgeNs(
+                presents.last(), nowUptimeNs, nowElapsedNs, SCENE_STALE_NS
+            ) ?: return
+            val ageMs = ageNs / 1_000_000L
             val fps = (presents.size - 1) * 1_000_000_000f / spanNs
             // An idle surface presents a handful of frames a second. Calling
             // that the game's FPS would be the wrong number again.
@@ -1267,22 +1277,15 @@ class FpsSampler(
         idleSweepNextAt = 0L
         globalHistory.clear()
         if (pkg != null) {
-            // Reset the baselines for the new app, but keep the number that was
-            // already on screen. The old sampler never blanked its reading when
-            // the app in front changed; writing an empty state here dropped the
-            // overlay to "--fps" every time FrameScope or the launcher came up.
-            val last = _state.value
-            _state.value = if (last.fps > 0f) {
-                last.copy(
-                    availability = MetricAvailability.WARMING_UP,
-                    reason = "Waiting for $pkg to present frames"
-                )
-            } else {
-                FpsState(
-                    availability = MetricAvailability.WARMING_UP,
-                    reason = "Waiting for $pkg to present frames"
-                )
-            }
+            // A reading belongs to the app that drew those frames. Carrying the
+            // old game's number onto the home screen is exactly what looked like
+            // a stuck FPS: the pill kept showing 90 while the launcher was live.
+            // Scene drops to zero when there are no fresh frames, so here the
+            // honest answer is "--" until this target's own frames arrive.
+            _state.value = FpsState(
+                availability = MetricAvailability.WARMING_UP,
+                reason = "Waiting for $pkg to present frames"
+            )
         }
     }
 
@@ -1344,14 +1347,12 @@ class FpsSampler(
     }
 
     /**
-     * Builds a "no new reading" state that keeps the last real measurement.
+     * Builds a "no new reading" state.
      *
-     * This is the behaviour of the version that measured games correctly: when
-     * a source has nothing new - a frozen game, an idle screen, a dump that did
-     * not arrive - the number on screen stays at the last true value and only
-     * the status changes. Showing 0 as a frame rate is a different claim: it
-     * says the screen rendered nothing, which cannot be concluded from a source
-     * that simply did not answer.
+     * Scene drops to zero as soon as the newest frame is stale. A shell poll can
+     * miss one window, so the last true value survives one short grace period;
+     * after that the overlay shows "--" instead of holding an old number. That
+     * is what made the FPS look stuck on the home screen.
      */
     private fun rememberLastReading(
         source: String,
@@ -1360,11 +1361,10 @@ class FpsSampler(
         availability: MetricAvailability
     ): FpsState {
         val last = _state.value
-        // A real number is still a real number after one empty poll. Writing an
-        // invalid state here is what made the overlay flip to "--fps" between
-        // real readings, which is what the user saw. Keep the reading and its
-        // own, already clock-checked age; never recompute that age from wall
-        // time, which is how the "134117 ms old" line was produced.
+        // One slow or empty shell call must not blank the pill. More than a
+        // second without fresh frames is stale though: keep the reading and its
+        // own, already clock-checked age, but never recompute that age from wall
+        // time - that is how the "134117 ms old" line was produced.
         val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
         val keep = last.fps > 0f &&
             nowElapsedNs - last.measuredAtElapsedNanos < KEEP_LAST_READING_NS
@@ -1511,11 +1511,11 @@ class FpsSampler(
         private const val MIN_UNATTRIBUTED_FPS = 24f
 
         /**
-         * How long a real reading is kept while the game or FrameScope is in
-         * front. The launcher clears it at once; past this point a number is
-         * history and is blanked rather than shown as a current reading.
+         * How long one real reading survives a single missed poll. Past this
+         * point there are no fresh frames to justify it and the number is
+         * blanked, the way Scene drops a stale reading.
          */
-        private const val KEEP_LAST_READING_NS = 300_000_000_000L
+        private const val KEEP_LAST_READING_NS = 1_000_000_000L
 
         /**
          * How long the game that was just in front stays the measurement target
@@ -1531,6 +1531,15 @@ class FpsSampler(
          * at; its last frames are refused instead of being shown with an age.
          */
         private const val FRAME_MAX_AGE_NS = 2_000_000_000L
+
+        /**
+         * How recent the newest present must be to count as a live FPS.
+         *
+         * Scene's own calculator uses a shorter stale window; one poll of a
+         * privileged shell can take longer, so one second still rejects an old
+         * ring buffer without blanking a live screen between polls.
+         */
+        private const val SCENE_STALE_NS = 1_000_000_000L
 
         /**
          * How long the latency dump of a package's layers may take.

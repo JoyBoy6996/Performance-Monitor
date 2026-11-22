@@ -50,6 +50,8 @@ data class SecondBucket(
     val cpuTempC: Float = 0f,
     /** Max of all plausible thermal sensors; not a battery reading. */
     val socTempC: Float = 0f,
+    /** Battery skin sensor is kept separate and stays null when unreadable. */
+    val batteryTempC: Float? = null,
     val gpuPercent: Float = 0f,
     val cpuGroups: List<CpuGroupMetric> = emptyList(),
     /** One load per real core, ordered by core number. */
@@ -476,6 +478,11 @@ class SessionLogger(private val store: SessionStore) {
                 gpuFreqMHz = if (bucketGpuFreq.isEmpty()) 0 else bucketGpuFreq.average().toInt(),
                 cpuTempC = if (bucketCpuTemp.isEmpty()) 0f else bucketCpuTemp.average().toFloat(),
                 socTempC = if (bucketSocTemp.isEmpty()) 0f else bucketSocTemp.average().toFloat(),
+                batteryTempC = if (bucketBatteryTemp.isEmpty()) {
+                    null
+                } else {
+                    bucketBatteryTemp.average().toFloat()
+                },
                 gpuPercent = if (bucketGpuPercent.isEmpty()) 0f else bucketGpuPercent.average().toFloat(),
                 cpuGroups = averageCpuGroups,
                 coreLoads = coreLoads,
@@ -757,7 +764,7 @@ class SessionLogger(private val store: SessionStore) {
             gpuFreqSeries = secondBuckets.map { it.gpuFreqMHz.toFloat() },
             cpuTempSeries = secondBuckets.map { it.cpuTempC },
             socTempSeries = secondBuckets.map { it.socTempC },
-            batteryTempSeries = secondBuckets.map { it.batteryTempC },
+            batteryTempSeries = secondBuckets.mapNotNull { it.batteryTempC },
             gpuPercentSeries = secondBuckets.map { it.gpuPercent },
             cpuGroupNames = cpuGroupNames,
             cpuGroupSeries = cpuGroupSeries,

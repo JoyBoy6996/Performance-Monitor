@@ -187,6 +187,51 @@ class ShellHub(
     }
 
     /**
+     * Installs Qstats' own key with an already running Shizuku server.
+     *
+     * The "Allow USB debugging?" prompt shown while starting Shizuku is for
+     * Shizuku's key, not Qstats'. Ticking "Always allow" there therefore never
+     * makes this app's key trusted. This explicit repair path writes our public
+     * key into adb_keys with Shizuku's shell rights and verifies it silently.
+     */
+    suspend fun installKeyWithShizuku(): String = withContext(Dispatchers.IO) {
+        adbSetupMutex.withLock keyInstall@{
+            val state = shizukuRunner.refresh(forceReconnect = true)
+            if (state != ShizukuRunner.ConnectionState.READY) {
+                return@keyInstall "Shizuku is not running. Start Shizuku-Next, grant Qstats " +
+                    "permission, then tap Install key again."
+            }
+            if (!shizukuRunner.connectionDetails.value.permissionGranted &&
+                !runCatching { shizukuRunner.requestPermission() }.getOrDefault(false)
+            ) {
+                return@keyInstall "Grant Qstats permission inside Shizuku-Next, then tap Install key again."
+            }
+
+            val helper = shizukuHelper()
+                ?: return@keyInstall "Shizuku is running but its shell is not ready yet. Try again."
+            if (!trustKeyWithShell(helper)) {
+                return@keyInstall "Shizuku is running, but this ROM refused to write Qstats' key " +
+                    "to /data/misc/adb/adb_keys. Keep Shizuku running; Qstats can still use its shell."
+            }
+
+            adb.retarget(LOOPBACK, adbPort)
+            if (!runCatching { ensureAdbBridge(allowSetup = true) }.getOrDefault(false)) {
+                return@keyInstall "Qstats' key is now trusted, but port $adbPort is not open. " +
+                    "Start Shizuku or Wireless debugging, then tap Reconnect."
+            }
+
+            settings?.setupCompleted?.value = true
+            publishAdbState(true)
+            if (runCatching { adb.confirmSavedKey() }.getOrDefault(false)) {
+                adbSuccessMessage()
+            } else {
+                "Qstats' key was installed with Shizuku. ADB is live; if this ROM still drops " +
+                    "trust after a reboot, keep Shizuku Start-on-boot enabled."
+            }
+        }
+    }
+
+    /**
      * Brings the loopback bridge back silently after a reboot or a debugging
      * toggle. The key stays saved, so this must not show the prompt again.
      *
@@ -312,10 +357,9 @@ class ShellHub(
             adbSuccessMessage()
         } else {
             "Local ADB bridge is live on $LOOPBACK:$adbPort — live FPS and telemetry work " +
-                "right now. Qstats will retry silently on every launch. If this ROM still " +
-                "forgets the key after a reboot or USB toggle, tick “Always allow” once, " +
-                "or keep Shizuku with permission granted so the app can reopen port " +
-                "$adbPort by itself."
+                "right now. This ROM did not save Qstats' key. Start Shizuku-Next with Qstats " +
+                "permission granted, then tap “Install key” once; Qstats will write its own " +
+                "key and reconnect silently afterwards."
         }
     }
 

@@ -56,6 +56,18 @@ class FpsSampler(
     @Volatile
     private var lastDisplayHzAttemptMs = 0L
 
+    /**
+     * The most recent active-layer latency dump, used for the first FPS reading too.
+     *
+     * The display refresh is already read once at the start of every poll. That
+     * same dump holds the recent frame timestamps, so reusing it here fills the
+     * pill on the first poll without paying for a second privileged command.
+     */
+    @Volatile
+    private var lastActiveLatencyDump: String = ""
+    @Volatile
+    private var lastActiveLatencyAtMs = 0L
+
     private val detector = ForegroundDetector(hub)
 
     /**
@@ -263,6 +275,8 @@ class FpsSampler(
         globalHistory.clear()
         globalWindowPending = false
         globalCounterUnavailable = false
+        lastActiveLatencyDump = ""
+        lastActiveLatencyAtMs = 0L
         currentThermalStatus = null
         capTracker.reset()
         gameCheckPackage = null
@@ -373,16 +387,14 @@ class FpsSampler(
             )
         }
 
-        // Scene-style immediate reading: one active-layer `--latency` dump already
+        // Scene-style immediate reading: the active-layer `--latency` dump already
         // carries the last presents, so the pill can show a real FPS on the very
-        // first poll instead of waiting for a counter baseline. Skip it when
-        // Qstats' own window holds focus - those frames are not the app's. The
-        // panel-rate guard below rejects a focused overlay at the display rate,
-        // so the remembered game underneath can still answer immediately.
+        // first poll instead of waiting for a counter baseline. Qstats' own window
+        // is never measured: its frames belong to the app, not to the game.
         val fromActiveLatency = sampleFromActiveLatency(
             pkg = pkg,
             nowUptime = nowUptime,
-            rejectPanelRate = detected == ownPackage
+            allowActiveLayer = detected != ownPackage && pkg != ownPackage
         )
         if (fromActiveLatency != null) return fromActiveLatency
 
@@ -678,19 +690,25 @@ class FpsSampler(
      * Scene-style FPS from the active layer's present timestamps.
      *
      * This is the first thing tried because a single `--latency` dump already
-     * holds the last ~127 presents. The rate is the number of frames over the
-     * span of those timestamps, so it is real on the first poll - unlike a
-     * cumulative counter, which needs two reads and a short wait. The layer
-     * A focused Qstats window presents its own frames at the panel rate. When
-     * Qstats is in front, a reading at that rate is refused so the remembered
-     * game underneath is never replaced by the overlay's own presents.
+     * holds the last ~127 presents. The rate is those frames over their own time
+     * span, so it is real on the first poll - unlike a cumulative counter, which
+     * needs two reads and a short wait. The dump read for the display refresh at
+     * the start of this poll is reused when it is still fresh, so the pill does
+     * not pay for a second shell command before it can show a number.
+     *
+     * Qstats' own surface is never a measurement target. If its window is in
+     * front, the active layer can only be its own UI, so this source is skipped.
      */
     private suspend fun sampleFromActiveLatency(
         pkg: String,
         nowUptime: Long,
-        rejectPanelRate: Boolean = false
+        allowActiveLayer: Boolean
     ): FpsState? {
-        val dump = hub.execOrNull(
+        if (!allowActiveLayer) return null
+        val nowMs = SystemClock.elapsedRealtime()
+        val dump = lastActiveLatencyDump.takeIf {
+            it.isNotBlank() && nowMs - lastActiveLatencyAtMs <= ACTIVE_LATENCY_CACHE_MS
+        } ?: hub.execOrNull(
             ShellCommands.surfaceLatencyDefault(),
             ACTIVE_LATENCY_TIMEOUT_MS
         )?.out.orEmpty()
@@ -703,17 +721,13 @@ class FpsSampler(
         val nowUptimeNs = SystemClock.uptimeNanos()
         val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
         val ageNs = presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs) ?: return null
-        val spanNs = presents.last() - presents.first()
-        if (spanNs <= 0L) return null
-
-        val fps = (presents.size - 1) * 1_000_000_000f / spanNs
+        val deltas = presents.zipWithNext { a, b -> b - a }
+        // This rejects a standing surface and a buffer that refreshed after a
+        // long idle gap: neither series can describe a live frame rate.
+        val stats = computeFrameStats(deltas) ?: return null
+        val fps = stats.fps
         val displayHz = refreshRateHz()
-        // A standing surface has no frame rate. Publishing its last handful of
-        // timestamps as 4 fps would be a made-up reading, so it is refused.
         if (fps < MIN_GAME_FPS || !isPlausibleFps(fps, displayHz)) return null
-        // While Qstats itself is in front, a panel-rate answer belongs to its
-        // own window, not to the game or home screen underneath.
-        if (rejectPanelRate && displayHz != null && fps >= displayHz * 0.98f) return null
         val settled = settleToGameCap(fps, displayHz)
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
@@ -726,11 +740,11 @@ class FpsSampler(
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = measuredLayer,
             totalFrames = presents.size.toLong(),
-            jankFrames = computeFrameStats(presents.zipWithNext { a, b -> b - a })?.jank?.toLong() ?: 0L,
+            jankFrames = stats.jank.toLong(),
             sampleAgeMs = ageNs / 1_000_000L,
-            windowMs = spanNs / 1_000_000L,
-            low1PercentFps = lowPercentFps(presents.zipWithNext { a, b -> b - a }, 1),
-            low5PercentFps = lowPercentFps(presents.zipWithNext { a, b -> b - a }, 5),
+            windowMs = deltas.sum() / 1_000_000L,
+            low1PercentFps = lowPercentFps(deltas, 1),
+            low5PercentFps = lowPercentFps(deltas, 5),
             appPackage = pkg,
             nowUptime = nowUptime
         )
@@ -1057,6 +1071,8 @@ class FpsSampler(
             ShellCommands.surfaceLatencyDefault(),
             DISPLAY_HZ_TIMEOUT_MS
         )?.out.orEmpty()
+        lastActiveLatencyDump = dump
+        lastActiveLatencyAtMs = now
         val hz = refreshHzFromLatencyDump(dump)
         if (hz != null) {
             displayHzAtMs = now
@@ -1698,6 +1714,13 @@ class FpsSampler(
          * other source, so it must answer quickly enough to fill the pill at once.
          */
         private const val ACTIVE_LATENCY_TIMEOUT_MS = 1_200L
+
+        /**
+         * How long the display refresh dump may be reused as the first FPS reading.
+         * One poll is far shorter than this, so the pill never waits for a second
+         * shell command; the timestamp freshness check still rejects old frames.
+         */
+        private const val ACTIVE_LATENCY_CACHE_MS = 1_000L
 
         /** Fewer frames than this say nothing about a frame rate. */
         private const val MIN_EXACT_FRAMES = 8

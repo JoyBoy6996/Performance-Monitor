@@ -373,6 +373,19 @@ class FpsSampler(
             )
         }
 
+        // Scene-style immediate reading: one active-layer `--latency` dump already
+        // carries the last presents, so the pill can show a real FPS on the very
+        // first poll instead of waiting for a counter baseline. Skip it when
+        // Qstats' own window holds focus - those frames are not the app's. The
+        // panel-rate guard below rejects a focused overlay at the display rate,
+        // so the remembered game underneath can still answer immediately.
+        val fromActiveLatency = sampleFromActiveLatency(
+            pkg = pkg,
+            nowUptime = nowUptime,
+            rejectPanelRate = detected == ownPackage
+        )
+        if (fromActiveLatency != null) return fromActiveLatency
+
         // TimeStats prints nothing until it is switched on. Do this before the
         // game-layer check below: that check reads the same dump, and a first
         // poll that saw an empty dump cached "not a game" for ten seconds.
@@ -659,6 +672,69 @@ class FpsSampler(
     ): FpsState? {
         val reading = readGlobalFrames(pkg, nowUptime, appPackage) ?: return null
         return publishGlobalFrames(reading)
+    }
+
+    /**
+     * Scene-style FPS from the active layer's present timestamps.
+     *
+     * This is the first thing tried because a single `--latency` dump already
+     * holds the last ~127 presents. The rate is the number of frames over the
+     * span of those timestamps, so it is real on the first poll - unlike a
+     * cumulative counter, which needs two reads and a short wait. The layer
+     * A focused Qstats window presents its own frames at the panel rate. When
+     * Qstats is in front, a reading at that rate is refused so the remembered
+     * game underneath is never replaced by the overlay's own presents.
+     */
+    private suspend fun sampleFromActiveLatency(
+        pkg: String,
+        nowUptime: Long,
+        rejectPanelRate: Boolean = false
+    ): FpsState? {
+        val dump = hub.execOrNull(
+            ShellCommands.surfaceLatencyDefault(),
+            ACTIVE_LATENCY_TIMEOUT_MS
+        )?.out.orEmpty()
+        if (dump.isBlank()) return null
+
+        val sample = parseLayerLatencies("@@@active\n$dump").firstOrNull() ?: return null
+        val presents = sample.presents
+        if (presents.size < MIN_EXACT_FRAMES) return null
+
+        val nowUptimeNs = SystemClock.uptimeNanos()
+        val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
+        val ageNs = presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs) ?: return null
+        val spanNs = presents.last() - presents.first()
+        if (spanNs <= 0L) return null
+
+        val fps = (presents.size - 1) * 1_000_000_000f / spanNs
+        val displayHz = refreshRateHz()
+        // A standing surface has no frame rate. Publishing its last handful of
+        // timestamps as 4 fps would be a made-up reading, so it is refused.
+        if (fps < MIN_GAME_FPS || !isPlausibleFps(fps, displayHz)) return null
+        // While Qstats itself is in front, a panel-rate answer belongs to its
+        // own window, not to the game or home screen underneath.
+        if (rejectPanelRate && displayHz != null && fps >= displayHz * 0.98f) return null
+        val settled = settleToGameCap(fps, displayHz)
+
+        activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
+        measuredLayer = "the active presented layer"
+        targetReason = "active layer present timestamps"
+        publish(
+            fps = settled,
+            frameTimeMs = 1_000f / settled,
+            source = "SurfaceFlinger frame times",
+            kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
+            layer = measuredLayer,
+            totalFrames = presents.size.toLong(),
+            jankFrames = computeFrameStats(presents.zipWithNext { a, b -> b - a })?.jank?.toLong() ?: 0L,
+            sampleAgeMs = ageNs / 1_000_000L,
+            windowMs = spanNs / 1_000_000L,
+            low1PercentFps = lowPercentFps(presents.zipWithNext { a, b -> b - a }, 1),
+            low5PercentFps = lowPercentFps(presents.zipWithNext { a, b -> b - a }, 5),
+            appPackage = pkg,
+            nowUptime = nowUptime
+        )
+        return _state.value
     }
 
     /**
@@ -1616,6 +1692,12 @@ class FpsSampler(
          * on every poll, after the counters have already named the layer.
          */
         private const val EXACT_LATENCY_TIMEOUT_MS = 1_200L
+
+        /**
+         * The active-layer dump is one small command and is tried before every
+         * other source, so it must answer quickly enough to fill the pill at once.
+         */
+        private const val ACTIVE_LATENCY_TIMEOUT_MS = 1_200L
 
         /** Fewer frames than this say nothing about a frame rate. */
         private const val MIN_EXACT_FRAMES = 8

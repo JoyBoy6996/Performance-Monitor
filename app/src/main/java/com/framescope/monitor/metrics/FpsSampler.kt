@@ -765,8 +765,14 @@ class FpsSampler(
      * pulled down; a reading below a cap is never inflated, and a game running
      * at a rate that is not one of these steps is published as measured.
      */
-    private fun settleToGameCap(fps: Float, displayHz: Float?): Float {
+    internal fun settleToGameCap(fps: Float, displayHz: Float?): Float {
         val ceiling = displayHz?.takeIf { it > 0f } ?: return fps
+        // The device-wide counter also sees the overlay and status bar, so a 120 fps
+        // match can read 133. No screen can present more frames than it refreshes:
+        // hold any small overshoot at the ceiling and never publish it as a higher
+        // frame rate. An absurd reading is left alone so the plausibility check
+        // rejects it instead of turning it into a plausible looking number.
+        if (fps > ceiling * 1.02f && fps <= ceiling * 1.5f) return ceiling
         // Only real game rates belong here. Fractional panel multipliers such as
         // 0.8 × 144 = 115.2 used to pull a genuine 120 down to 115.2 and a 90 down
         // to 86.4 on a 144 Hz screen, which was a measurement error, not a cap.

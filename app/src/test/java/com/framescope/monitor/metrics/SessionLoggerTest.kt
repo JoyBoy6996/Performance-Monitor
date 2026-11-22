@@ -155,6 +155,50 @@ class SessionLoggerTest {
     }
 
     @Test
+    fun theAverageUsesElapsedTimeNotTheWindowedFrameCounter() {
+        val logger = SessionLogger(store())
+        val base = System.currentTimeMillis() - 4_000L
+        val readings = listOf(0L, 1_000L, 2_000L, 3_000L).map { offset ->
+            SessionSample(
+                sessionId = "s",
+                timestamp = base + offset,
+                fps = 120f,
+                frameTimeMs = 1000f / 120f,
+                cpuPercent = 0f,
+                gpuFreqMHz = 0,
+                thermalMaxC = 0f,
+                batteryLevel = 80,
+                ramPercent = 50
+            )
+        }
+
+        // Every reading reports the same 120 frames in its own window. Differencing
+        // that counter gives 0 fps; the elapsed time gives the real 120 fps.
+        assertEquals(120f, logger.timeWeightedAverageFps(readings)!!, 0.01f)
+    }
+
+    @Test
+    fun idleGapsDoNotDragTheAverageDown() {
+        val logger = SessionLogger(store())
+        val base = System.currentTimeMillis() - 10_000L
+        // A long pause in the middle must not be counted as a slow second.
+        val readings = listOf(0L, 1_000L, 21_000L, 22_000L).map { offset ->
+            SessionSample(
+                sessionId = "s",
+                timestamp = base + offset,
+                fps = 120f,
+                frameTimeMs = 1000f / 120f,
+                cpuPercent = 0f,
+                gpuFreqMHz = 0,
+                thermalMaxC = 0f,
+                batteryLevel = 80,
+                ramPercent = 50
+            )
+        }
+        assertEquals(120f, logger.timeWeightedAverageFps(readings)!!, 0.01f)
+    }
+
+    @Test
     fun theLowsAreTheWorstWindowOfTheRun() {
         val logger = SessionLogger(store())
         logger.start("com.example.game", "Game", 80)

@@ -514,11 +514,7 @@ class SessionLogger(private val store: SessionStore) {
     fun currentLiveStats(): LiveStats {
         if (!isRecording || samples.isEmpty()) return LiveStats()
         val measuredMs = measuredDurationMs()
-        val avgFps = if (measuredMs > 0L) {
-            (accumulatedFrames.toDouble() * 1000.0 / measuredMs).toFloat()
-        } else {
-            0f
-        }
+        val avgFps = timeWeightedAverageFps(samples) ?: 0f
         val smoothness = if (accumulatedFrames > 0) {
             ((1f - (accumulatedJank.toFloat() / accumulatedFrames)) * 100f).coerceIn(0f, 100f)
         } else {
@@ -570,13 +566,10 @@ class SessionLogger(private val store: SessionStore) {
         val sortedFps = evaluationFps.sorted()
 
         // The average is the frames that were presented divided by the time that was
-        // actually measured, not the average of the per second readings.
-        val measuredMs = measuredDurationMs()
-        val avgFps = if (measuredMs > 0L) {
-            (accumulatedFrames.toDouble() * 1000.0 / measuredMs).toFloat()
-        } else {
-            sortedFps.average().toFloat()
-        }
+        // actually measured, not the average of the per second readings. The sampler's
+        // frame counter changes meaning between sources, so the span between readings
+        // is the reliable denominator for every source.
+        val avgFps = timeWeightedAverageFps(samples) ?: sortedFps.average().toFloat()
         val maxFps = if (maxFpsSeen == 0f) sortedFps.last() else maxFpsSeen
         val minFps = if (minFpsSeen == Float.MAX_VALUE) sortedFps.first() else minFpsSeen
 
@@ -729,6 +722,37 @@ class SessionLogger(private val store: SessionStore) {
         store.add(record)
         store.addSamples(samples)
         return record
+    }
+
+    /**
+     * Average of the readings over the span of time they actually cover.
+     *
+     * The sampler's frame counter means different things to different sources: some
+     * publish the growth of a one second window and others a lifetime total. Taking
+     * differences of it made a 120 fps match report 3 fps while max and min still
+     * read 133 and 60. The span between readings is source independent, so each
+     * reading is weighted by the time it covers and idle gaps are left out.
+     */
+    internal fun timeWeightedAverageFps(readings: List<SessionSample>): Float? {
+        val usable = readings.filter { sample ->
+            sample.fps.finiteOrNull()?.let { it > 0f } == true
+        }
+        if (usable.isEmpty()) return null
+        if (usable.size == 1) return usable[0].fps
+
+        var weighted = 0.0
+        var spanMs = 0L
+        for (i in 1 until usable.size) {
+            val delta = usable[i].timestamp - usable[i - 1].timestamp
+            if (delta <= 0L || delta > GAP_THRESHOLD_MS) continue
+            weighted += usable[i].fps.toDouble() * delta
+            spanMs += delta
+        }
+        return if (spanMs > 0L) {
+            (weighted / spanMs).toFloat()
+        } else {
+            usable.map { it.fps }.average().toFloat()
+        }
     }
 
     /** The time of the run that carried a reading, without the gaps. */

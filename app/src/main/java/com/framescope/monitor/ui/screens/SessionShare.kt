@@ -97,6 +97,8 @@ private object ReportTheme {
     val blue = Color.parseColor("#3897F0")
     val fps = Color.parseColor("#E8EAED")
     val temp = Color.parseColor("#D97736")
+    val cpu = Color.parseColor("#E056FD")
+    val gpu = Color.parseColor("#4FC3F7")
     val total = Color.parseColor("#00E5FF")
     val frame = Color.parseColor("#7CC4FA")
     val warnBack = Color.parseColor("#2A211B")

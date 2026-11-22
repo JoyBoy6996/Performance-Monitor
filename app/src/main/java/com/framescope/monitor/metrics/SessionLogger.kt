@@ -4,7 +4,7 @@ import com.framescope.monitor.core.CapChange
 import com.framescope.monitor.core.CpuGroupMetric
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveStats
-import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
+import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.SessionSegment
@@ -14,6 +14,9 @@ import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.core.steadyWindow
 import java.util.UUID
+
+/** A chip/SoC sensor can legitimately read up to 110 C; battery sensors cannot. */
+private const val MAX_CHIP_TEMP_C = 110f
 
 /**
  * Telemetry snapshot captured on every sampling interval during a session.
@@ -114,6 +117,7 @@ class SessionLogger(private val store: SessionStore) {
     private val bucketGpuFreq = ArrayList<Int>()
     private val bucketCpuTemp = ArrayList<Float>()
     private val bucketSocTemp = ArrayList<Float>()
+    private val bucketBatteryTemp = ArrayList<Float>()
     private val bucketGpuPercent = ArrayList<Float>()
     private val bucketCpuGroups = ArrayList<List<CpuGroupMetric>>()
     private val bucketCoreLoads = ArrayList<List<Float?>>()
@@ -189,6 +193,7 @@ class SessionLogger(private val store: SessionStore) {
         bucketGpuFreq.clear()
         bucketCpuTemp.clear()
         bucketSocTemp.clear()
+        bucketBatteryTemp.clear()
         bucketGpuPercent.clear()
         bucketCpuGroups.clear()
         bucketCoreLoads.clear()
@@ -230,6 +235,22 @@ class SessionLogger(private val store: SessionStore) {
         gapMs = 0L
     }
 
+    /**
+     * Replaces the placeholder start line with the real uid=2000 identity as soon
+     * as the first privileged tick answers. Until then the honest "--" stays there;
+     * no value is ever invented to fill the gap.
+     */
+    @Synchronized
+    fun adoptTelemetry(detail: String, platform: String?, profile: String?) {
+        if (!isRecording) return
+        if (detail.isNotBlank()) initialShellLog = detail.trim()
+        deviceInfo = deviceInfo.copy(
+            platform = platform?.takeIf { it.isNotBlank() }?.uppercase(java.util.Locale.US)
+                ?: deviceInfo.platform,
+            profile = profile?.takeIf { it.isNotBlank() } ?: deviceInfo.profile
+        )
+    }
+
     @Synchronized
     fun onSample(fpsState: FpsState, metrics: SystemMetrics, targetFps: Int) {
         if (!isRecording || !fpsState.valid) return
@@ -251,7 +272,11 @@ class SessionLogger(private val store: SessionStore) {
         val frameTime = fpsState.frameTimeMs.finiteOrNull() ?: 0f
         val cpu = metrics.cpuPercent.finiteOrNull() ?: 0f
         val gpuFreq = metrics.gpuFreqMHz ?: 0
-        val temp = metrics.deviceTemperatureC() ?: 0f
+        // The named CPU/SoC sensor is the chip's own reading. The battery sensor is
+        // kept strictly separate and may never become a "SOC" or "CPU" temperature.
+        val chipTemp = (metrics.cpuTempC ?: metrics.thermalMaxC)
+            .plausibleTempC(MAX_CHIP_TEMP_C)
+        val temp = chipTemp ?: metrics.deviceTemperatureC() ?: 0f
         val battery = metrics.batteryLevel ?: 0
         val ram = metrics.ramPercent ?: 0
         val powerWatts = metrics.powerWatts.finiteOrNull()?.takeIf { it >= 0f }
@@ -351,8 +376,10 @@ class SessionLogger(private val store: SessionStore) {
         if (powerWatts != null) bucketPower.add(powerWatts)
         metrics.cpuFreqMHz?.let { if (it > 0) bucketCpuFreq.add(it) }
         metrics.gpuFreqMHz?.let { if (it > 0) bucketGpuFreq.add(it) }
-        metrics.cpuTempC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { bucketCpuTemp.add(it) }
-        metrics.thermalMaxC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { bucketSocTemp.add(it) }
+        chipTemp?.let { bucketCpuTemp.add(it) }
+        chipTemp?.let { bucketSocTemp.add(it) }
+        metrics.batteryTempC?.plausibleTempC(MAX_BATTERY_TEMP_C)
+            ?.let { bucketBatteryTemp.add(it) }
         metrics.gpuPercent?.finiteOrNull()?.let { bucketGpuPercent.add(it) }
         if (metrics.cpuGroups.isNotEmpty()) bucketCpuGroups.add(metrics.cpuGroups)
         if (metrics.cpuCoreLoadPct.any { it != null }) bucketCoreLoads.add(metrics.cpuCoreLoadPct)
@@ -474,6 +501,7 @@ class SessionLogger(private val store: SessionStore) {
         bucketGpuFreq.clear()
         bucketCpuTemp.clear()
         bucketSocTemp.clear()
+        bucketBatteryTemp.clear()
         bucketGpuPercent.clear()
         bucketCpuGroups.clear()
         bucketCoreLoads.clear()
@@ -547,7 +575,7 @@ class SessionLogger(private val store: SessionStore) {
             100f
         }
         val avgFt = samples.map { it.frameTimeMs }.average().toFloat()
-        val maxTemp = samples.mapNotNull { it.thermalMaxC.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
+        val maxTemp = samples.mapNotNull { it.thermalMaxC.plausibleTempC(MAX_CHIP_TEMP_C) }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
         val peakThermalStatus = samples.mapNotNull { it.thermalStatus }.maxOrNull()
         val throttledSeconds = secondBuckets.count { (it.thermalStatus ?: 0) > 0 }
@@ -618,7 +646,7 @@ class SessionLogger(private val store: SessionStore) {
             samples.map { it.frameTimeMs }.average().toFloat()
         } else if (avgFps > 0f) 1000f / avgFps else 16.6f
 
-        val maxTemp = samples.mapNotNull { it.thermalMaxC.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
+        val maxTemp = samples.mapNotNull { it.thermalMaxC.plausibleTempC(MAX_CHIP_TEMP_C) }.maxOrNull()
         val avgCpu = samples.map { it.cpuPercent }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
         val peakThermalStatus = samples.mapNotNull { it.thermalStatus }.maxOrNull()
         val throttledSeconds = secondBuckets.count { (it.thermalStatus ?: 0) > 0 }
@@ -729,6 +757,7 @@ class SessionLogger(private val store: SessionStore) {
             gpuFreqSeries = secondBuckets.map { it.gpuFreqMHz.toFloat() },
             cpuTempSeries = secondBuckets.map { it.cpuTempC },
             socTempSeries = secondBuckets.map { it.socTempC },
+            batteryTempSeries = secondBuckets.map { it.batteryTempC },
             gpuPercentSeries = secondBuckets.map { it.gpuPercent },
             cpuGroupNames = cpuGroupNames,
             cpuGroupSeries = cpuGroupSeries,

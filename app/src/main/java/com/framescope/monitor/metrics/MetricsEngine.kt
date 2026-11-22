@@ -428,9 +428,14 @@ class MetricsEngine(
     private fun deviceSnapshot(): SessionDeviceInfo {
         val ctx = androidContext ?: return SessionDeviceInfo()
         // The device card shows the real model (I2405), not a vendor-prefixed guess.
-        val model = android.os.Build.MODEL.trim().takeIf { it.isNotBlank() }
-        val platform = android.os.Build.HARDWARE
-            .takeIf { it.isNotBlank() && !it.equals("unknown", true) }
+        val model = android.os.Build.MODEL.trim()
+            .replace(Regex("^vivo\\s+", RegexOption.IGNORE_CASE), "")
+            .takeIf { it.isNotBlank() }
+        // Build.HARDWARE is a compile-time guess ("qcom"). The chip platform comes
+        // only from getprop ro.board.platform on the privileged Shizuku shell.
+        val kernelPlatform = _system.value.platform
+        val platform = kernelPlatform?.takeIf { it.isNotBlank() }?.uppercase()
+        val profile = _system.value.performanceProfile?.takeIf { it.isNotBlank() }
         val metrics = android.util.DisplayMetrics()
         runCatching {
             val manager = ctx.getSystemService(Context.WINDOW_SERVICE)
@@ -445,7 +450,8 @@ class MetricsEngine(
             model = model,
             platform = platform,
             resolution = resolution,
-            osVersion = "Android ${android.os.Build.VERSION.RELEASE}"
+            osVersion = "Android ${android.os.Build.VERSION.RELEASE}",
+            profile = profile
         )
     }
 
@@ -476,6 +482,24 @@ class MetricsEngine(
             device = deviceSnapshot(),
             initialShellLog = telemetryHeaderLine()
         )
+        // The shell identity probe runs at Record time on the SAME uid=2000 Shizuku
+        // UserService as the frame probe. If it answers, it replaces the placeholder
+        // start line and the guessed device facts before the user reads the report.
+        scope.launch {
+            val measured = _foregroundApp.value ?: lastMeasuredPackage.value.orEmpty()
+            val fresh = kotlinx.coroutines.withTimeoutOrNull(PRIVILEGED_SAMPLE_TIMEOUT_MS) {
+                systemSampler.sample(measured, PRIVILEGED_SHELL_TIMEOUT_MS)
+            }
+            if (fresh != null && fresh.telemetryDetail.isNotBlank()) {
+                _privileged.value = fresh
+                publishSystem()
+                sessionLogger.adoptTelemetry(
+                    detail = fresh.telemetryDetail,
+                    platform = fresh.platform,
+                    profile = fresh.performanceProfile
+                )
+            }
+        }
         // A recording is its own heat story: start the peak from the temperature at
         // the moment Record was pressed, not from a hot session earlier today.
         val atStart = _system.value.deviceTemperatureC()

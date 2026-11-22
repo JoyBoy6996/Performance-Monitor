@@ -510,31 +510,10 @@ class ShellHub(
             }
         }
 
-        if (_adbReady.value || adb.authorisationStored) {
-            _telemetryShell.value = "Local ADB bridge"
-            try {
-                val result = adb.exec(command, timeoutMs)
-                _adbReady.value = true
-                _lastError.value = null
-                return@withContext result
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _adbReady.value = false
-                _lastError.value = e.message ?: "Local ADB bridge did not answer"
-                throw e
-            }
-        }
-
-        if (hasDumpPermission()) {
-            _telemetryShell.value = "App shell (DUMP)"
-            val local = execLocalShell(command, timeoutMs)
-            if (local.ok && local.out.isNotBlank()) {
-                _lastError.value = null
-                return@withContext local
-            }
-        }
-
+        // Hardware telemetry is Shizuku-only. The local ADB bridge and the app's
+        // own DUMP shell may serve the frame probe, but they are never allowed to
+        // answer a procfs/sysfs hardware read: an unprivileged zero is a fake
+        // reading. No answer is reported as "--" by the caller instead.
         _telemetryShell.value = "None"
         val reason = shizukuRunner.errorMessage.value?.takeIf { it.isNotBlank() }
             ?: "No privileged shell is connected. Start Shizuku to read hardware telemetry."

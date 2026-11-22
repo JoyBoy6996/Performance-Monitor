@@ -335,6 +335,22 @@ object ShellCommands {
             "echo PROFILE=\$(settings get system power_save_type 2>/dev/null); " +
             "echo GAMEMODE=\$(getprop sys.vivo.game.mode 2>/dev/null); " +
             "echo GAMEMODE2=\$(getprop persist.sys.game.mode 2>/dev/null)"
+
+    /**
+     * One-time session-start identity probe, run on the same privileged shell as
+     * the per-second batch. It asks for the real uid, the kernel board platform,
+     * the Vivo/iQOO game mode, the power profile, the advertised maximum core
+     * clocks (for dynamic cluster grouping) and every thermal zone name.
+     */
+    fun telemetryInit(): String = listOf(
+        telemetryIdentity(),
+        "echo UID=\$(id -u 2>/dev/null)",
+        "echo PLAT=\$(getprop ro.board.platform 2>/dev/null)",
+        "echo VIVO_GAME=\$(getprop sys.vivo.game.mode 2>/dev/null)",
+        "echo POWER_SAVE=\$(settings get system power_save_type 2>/dev/null)",
+        "head -n 1 /sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq 2>/dev/null",
+        cpuCoreDump()
+    ).joinToString("\n")
 }
 
 /** Parsers for the shell output. */
@@ -479,6 +495,7 @@ object Parsers {
         ?.takeIf { it.isNotBlank() && !it.equals("null", true) }
 
     fun parseShellUid(dump: String): String? = lineValue(dump, "SHELLUID")
+        ?: lineValue(dump, "UID")
     fun parseShellUser(dump: String): String? = lineValue(dump, "SHELLUSER")
 
     data class ThermalZoneReading(val path: String, val type: String, val raw: Float?)
@@ -502,17 +519,23 @@ object Parsers {
     }
 
     fun parseDeviceIdentity(dump: String): Pair<String?, String?> {
-        val platform = lineValue(dump, "PLATFORM")?.uppercase(Locale.US)
-        val mode = listOfNotNull(
-            lineValue(dump, "GAMEMODE"), lineValue(dump, "GAMEMODE2"), lineValue(dump, "PROFILE")
-        ).joinToString(" ").lowercase(Locale.US)
-        val profile = when {
-            mode.contains("monster") || mode.contains("performance") ||
-                mode.contains("game") || mode.contains("high") -> "Monster"
-            // The report must never show "--" for the profile: an idle device is
-            // running its normal balanced profile.
-            else -> "Balanced"
-        }
+        val platform = (lineValue(dump, "PLATFORM") ?: lineValue(dump, "PLAT"))
+            ?.uppercase(Locale.US)
+        val game = listOfNotNull(
+            lineValue(dump, "VIVO_GAME"), lineValue(dump, "GAMEMODE"),
+            lineValue(dump, "GAMEMODE2")
+        ).firstOrNull { it.isNotBlank() }
+        val power = listOfNotNull(
+            lineValue(dump, "PROFILE"), lineValue(dump, "POWER_SAVE")
+        ).firstOrNull { it.isNotBlank() }
+        val mode = listOfNotNull(game, power).joinToString(" ").lowercase(Locale.US)
+        val namedMonster = listOf(
+            "monster", "performance", "high", "ultra", "turbo", "esports"
+        ).any { mode.contains(it) }
+        // iQOO/Vivo expose game mode as a small integer. Any non-zero value is
+        // an active performance mode; power_save_type alone is not a game mode.
+        val activeGameMode = game?.trim()?.toIntOrNull()?.let { it > 0 } ?: false
+        val profile = if (namedMonster || activeGameMode) "Monster" else "Balanced"
         return platform to profile
     }
 

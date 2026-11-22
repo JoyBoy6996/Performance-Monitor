@@ -100,7 +100,7 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.ddrFreq(),          // 7
             ShellCommands.threadStat(packageName), // 8
             ShellCommands.clockTicks(),       // 9
-            ShellCommands.telemetryIdentity(), // 10
+            ShellCommands.telemetryInit(),    // 10
             ShellCommands.thermalSysfs()      // 11
         )
         val result = runCatching { hub.execTelemetry(script, timeoutMs) }.getOrNull()
@@ -215,7 +215,9 @@ class SystemSampler(private val hub: ShellHub) {
     ): String {
         val uid = Parsers.parseShellUid(identityDump) ?: "--"
         val board = platform ?: "--"
-        val zone = chipZones.firstOrNull()?.path ?: "--"
+        // Every matched CPU/SoC sensor is listed, never a battery or skin zone.
+        val zones = chipZones.map { it.path }.distinct().joinToString(",")
+            .ifBlank { "--" }
         val clusters = if (groups.isEmpty()) {
             "--"
         } else {
@@ -223,7 +225,7 @@ class SystemSampler(private val hub: ShellHub) {
                 "${group.name}:${group.freqMHz?.let { "$it" } ?: "--"}MHz"
             }
         }
-        return "shell_uid=$uid | platform=$board | thermal_zone=$zone | clusters=$clusters"
+        return "shell_uid=$uid | platform=$board | thermal_zone=$zones | clusters=$clusters"
     }
 
     /** Source label for the extra Scene-style collectors, for the diagnostics report. */

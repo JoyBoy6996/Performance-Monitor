@@ -282,6 +282,8 @@ data class SessionRecord(
     val cpuTempSeries: List<Float> = emptyList(),
     /** Max of the real thermal sensors per second; the honest hotspot fallback. */
     val socTempSeries: List<Float> = emptyList(),
+    /** Battery sensor temperature per second, in °C. Never mixed with chip sensors. */
+    val batteryTempSeries: List<Float> = emptyList(),
     /** Real GPU busy time per second, in percent, on devices that expose it. */
     val gpuPercentSeries: List<Float> = emptyList(),
     /** Names of the CPU clusters found on this device, in a fixed order. */

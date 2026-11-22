@@ -4,11 +4,12 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
@@ -21,7 +22,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
-import com.framescope.monitor.core.MAX_HOTSPOT_TEMP_C
+import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
@@ -40,11 +41,19 @@ private fun fmt(value: Float?, decimals: Int): String {
 
 private fun List<Float>.clean(): List<Float> = mapNotNull { it.finiteOrNull() }
 private fun List<Float>.positive(): List<Float> = clean().filter { it > 0f }
-private fun List<Float>.hotspot(): List<Float> = mapNotNull { it.plausibleTempC(110f) }
-private fun List<Float>.avgOrNull(): Float? = clean().takeIf { it.isNotEmpty() }?.average()?.toFloat()
+private fun List<Float>.hotspot(): List<Float> = mapNotNull { it.plausibleTempC(TEMP_MAX_C) }
+private fun List<Float>.battery(): List<Float> =
+    mapNotNull { it.plausibleTempC(MAX_BATTERY_TEMP_C) }
+private fun List<Float>.clamped(min: Float, max: Float): List<Float> =
+    clean().map { it.coerceIn(min, max) }
+private fun List<Float>.avgOrNull(): Float? =
+    clean().takeIf { it.isNotEmpty() }?.average()?.toFloat()
 
 private fun column(rows: List<List<Float?>>, index: Int): List<Float> =
     rows.mapNotNull { it.getOrNull(index)?.finiteOrNull() }
+
+private fun intColumn(rows: List<List<Int?>>, index: Int): List<Float> =
+    rows.mapNotNull { it.getOrNull(index)?.toFloat()?.finiteOrNull() }
 
 private fun duration(ms: Long): String {
     val total = ms / 1000
@@ -71,21 +80,30 @@ private fun tick(ms: Long): String {
 private fun timeLabels(session: SessionRecord): List<String> =
     (0..5).map { tick(session.durationMs * it / 5L) }
 
-/** The named CPU/SoC sensor, with honest legacy fallbacks. */
+/** Named CPU/SoC sensor, with honest legacy fallbacks. Battery skin never wins. */
 private fun temperatureSeries(session: SessionRecord): List<Float> = session.cpuTempSeries
     .ifEmpty { session.socTempSeries }
     .ifEmpty { session.tempSeries }
     .hotspot()
 
-/** Ticks are always given top-to-bottom: largest value first. */
+private fun batteryTemperatureSeries(session: SessionRecord): List<Float> =
+    session.batteryTempSeries.battery()
+
+private fun allFrequencies(session: SessionRecord): List<Float> =
+    session.cpuGroupFreqSeries.flatMap { row -> row.mapNotNull { it?.finiteOrNull() } }
+        .positive()
+        .ifEmpty { session.cpuFreqSeries.positive() }
+
+/** Ticks are always top-to-bottom: largest value first. */
 private fun scale(max: Float, steps: Int, decimals: Int = 0): List<String> =
     (steps downTo 0).map { fmt(max * it / steps, decimals) }
 
+private const val TEMP_MAX_C = 110f
 private const val PAGE_W = 1080
-private const val MARGIN = 48f
-private const val GAP = 24f
-private const val PAD = 28f
-private const val RADIUS = 24f
+private const val MARGIN = 32f
+private const val PAD = 32f
+private const val GAP = 30f
+private const val RADIUS = 36f
 
 private object ReportTheme {
     val background = Color.parseColor("#0D0D0F")
@@ -101,6 +119,9 @@ private object ReportTheme {
     val gpu = Color.parseColor("#4FC3F7")
     val total = Color.parseColor("#00E5FF")
     val frame = Color.parseColor("#7CC4FA")
+    val power = Color.parseColor("#2962FF")
+    val capacity = Color.parseColor("#90CAF9")
+    val chipTemp = Color.parseColor("#81D4FA")
     val warnBack = Color.parseColor("#2A211B")
     val warn = Color.parseColor("#FF8C42")
     val platform = Color.parseColor("#7B61FF")
@@ -120,38 +141,45 @@ private data class ChartLine(
     val min: Float,
     val max: Float,
     val spikes: Boolean = false,
-    val width: Float = 3f
+    val width: Float = 3f,
+    /** Uses the exact TEMP formula instead of the generic min/max formula. */
+    val temperature: Boolean = false
 )
 
 private fun peakSoc(session: SessionRecord): Float? =
     listOfNotNull(session.maxTempC, temperatureSeries(session).maxOrNull())
-        .mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
+        .mapNotNull { it.plausibleTempC(TEMP_MAX_C) }
+        .maxOrNull()
 
-/** One height per card, in the exact order the report draws them. */
-private fun cardHeights(session: SessionRecord): List<Float> {
-    val heights = mutableListOf<Float>()
-    if ((peakSoc(session) ?: 0f) >= 85f) heights.add(96f)
-    heights.addAll(
-        listOf(
-            190f,  // 2 device info
-            96f,   // 3 note
-            350f,  // 4 game header + 2x4 KPI grid
-            580f,  // 5 FPS & temperature
-            520f,  // 6 frame time
-            560f,  // 7 CPU usage
-            560f,  // 8 CPU frequency
-            520f,  // 9 CPU detail
-            520f,  // 10 GPU & threads
-            920f   // 11 shell logs + start identity
-        )
+/** Height of the last card is measured from the rows it actually contains. */
+private fun detailHeight(session: SessionRecord): Float {
+    val coreRows = minOf(
+        maxOf(session.perCoreLoadSeries.size, session.perCoreFreqSeries.size), 8
     )
-    return heights
+    val threadRows = minOf(session.threadNames.size, 6)
+    val logRows = session.shellLogs.lineSequence().count().coerceIn(1, 12)
+    return 440f + coreRows * 34f + threadRows * 30f + logRows * 24f
 }
 
-/** A single continuous page: no split cards, no empty pages, no watermark. */
+/** One measured height per card, in the exact order the report draws them. */
+private fun cardHeights(session: SessionRecord): List<Float> = listOf(
+    104f,                    // 1 thermal status
+    190f,                    // 2 device info
+    96f,                     // 3 note
+    350f,                    // 4 game header + 2x4 KPI grid
+    600f,                    // 5 FPS & temperature
+    520f,                    // 6 frame time
+    560f,                    // 7 CPU usage
+    600f,                    // 8 CPU frequency
+    520f,                    // 9 power & capacity
+    520f,                    // 10 CPU temperature
+    detailHeight(session)    // 11 CPU detail + GPU/threads + shell logs
+)
+
+/** One continuous page: no split cards, no empty pages, no watermark. */
 private fun reportHeight(session: SessionRecord): Int {
     val heights = cardHeights(session)
-    return (heights.sum() + GAP * (heights.size - 1) + MARGIN * 2f).toInt() + 8
+    return (heights.sum() + GAP * (heights.size - 1) + MARGIN * 2f).toInt()
 }
 
 /** Crisp vector glyphs, replacing solid squares in the device row. */
@@ -166,7 +194,7 @@ private fun drawDeviceIcon(canvas: Canvas, kind: Int, cx: Float, cy: Float, colo
         style = Paint.Style.FILL
     }
     when (kind) {
-        0 -> { // microchip
+        0 -> {
             canvas.drawRoundRect(RectF(cx - 12f, cy - 12f, cx + 12f, cy + 12f), 4f, 4f, stroke)
             canvas.drawRoundRect(RectF(cx - 6f, cy - 6f, cx + 6f, cy + 6f), 2f, 2f, fill)
             (-8..8 step 8).forEach { offset ->
@@ -176,17 +204,17 @@ private fun drawDeviceIcon(canvas: Canvas, kind: Int, cx: Float, cy: Float, colo
                 canvas.drawLine(cx + 12f, cy + offset, cx + 18f, cy + offset, stroke)
             }
         }
-        1 -> { // phone
+        1 -> {
             canvas.drawRoundRect(RectF(cx - 10f, cy - 16f, cx + 10f, cy + 16f), 4f, 4f, stroke)
             canvas.drawLine(cx - 4f, cy + 11f, cx + 4f, cy + 11f, stroke)
         }
-        2 -> { // android
+        2 -> {
             canvas.drawArc(RectF(cx - 10f, cy - 14f, cx + 10f, cy + 6f), 180f, 180f, false, stroke)
             canvas.drawRoundRect(RectF(cx - 9f, cy - 2f, cx + 9f, cy + 14f), 4f, 4f, stroke)
             canvas.drawCircle(cx - 4f, cy - 6f, 1.5f, fill)
             canvas.drawCircle(cx + 4f, cy - 6f, 1.5f, fill)
         }
-        else -> { // speedometer
+        else -> {
             canvas.drawArc(RectF(cx - 14f, cy - 12f, cx + 14f, cy + 16f), 200f, 140f, false, stroke)
             canvas.drawLine(cx, cy + 4f, cx + 8f, cy - 8f, stroke)
             canvas.drawCircle(cx, cy + 4f, 2f, fill)
@@ -214,10 +242,12 @@ private fun drawGamepad(canvas: Canvas, x: Float, y: Float, color: Int) {
 /**
  * Draws the eleven Scene cards into one canvas at 1080 px logical width.
  *
- * Chart Y labels are placed with the same formula as the data:
- * top = maximum, bottom = minimum. Nothing is paginated or sliced.
+ * Chart Y is always upward: chartBottom - ((value - min) / (max - min)) * chartHeight.
+ * For a temperature line that is exactly
+ * chartBottom - ((tempC.coerceIn(0,110) / 110) * chartHeight).
  */
 private class SceneReportRenderer(
+    private val context: Context,
     private val canvas: Canvas,
     session: SessionRecord
 ) {
@@ -291,19 +321,30 @@ private class SceneReportRenderer(
         canvas.drawColor(ReportTheme.background)
     }
 
-    fun thermalBanner(peak: Float?, secondsAbove90: Int) {
-        if (peak == null || peak < 85f) return
-        card(warnPaint) { x0, y0, x1, y1 ->
-            body.color = ReportTheme.warn
+    /** Card 1 is always present; warning colours appear only for a real hot chip. */
+    fun thermalStatus(peak: Float?, secondsAbove90: Int) {
+        card(if ((peak ?: 0f) >= 85f) warnPaint else cardPaint) { x0, y0, x1, y1 ->
             val baseline = (y0 + y1) / 2f + 8f
-            text(
-                fit("Soc temperature too high MAX:${fmt(peak, 1)}°C", (x1 - x0) * 0.65f, body),
-                x0, baseline, body
-            )
-            body.textAlign = Paint.Align.RIGHT
-            text("≥90°C ${secondsAbove90}S", x1, baseline, body)
-            body.textAlign = Paint.Align.LEFT
-            body.color = ReportTheme.text
+            if ((peak ?: 0f) >= 85f) {
+                body.color = ReportTheme.warn
+                text(
+                    fit("Soc temperature too high MAX:${fmt(peak, 1)}°C", (x1 - x0) * 0.65f, body),
+                    x0, baseline, body
+                )
+                body.textAlign = Paint.Align.RIGHT
+                text("≥90°C ${secondsAbove90}S", x1, baseline, body)
+                body.textAlign = Paint.Align.LEFT
+                body.color = ReportTheme.text
+            } else {
+                label.textAlign = Paint.Align.LEFT
+                text("Thermal Status", x0, y0 + 8f, header)
+                body.textAlign = Paint.Align.RIGHT
+                text(
+                    "SOC MAX: ${fmt(peak, 1)}°C   ≥90°C ${secondsAbove90}S",
+                    x1, baseline, body
+                )
+                body.textAlign = Paint.Align.LEFT
+            }
         }
     }
 
@@ -352,14 +393,34 @@ private class SceneReportRenderer(
         }
     }
 
+    /** Real launcher icon at 38dp with 8dp corners, scaled to this 1080px canvas. */
+    private fun drawLauncherIcon(session: SessionRecord, x: Float, y: Float) {
+        val size = 96
+        val drawable = runCatching {
+            @Suppress("DEPRECATION")
+            context.packageManager.getApplicationIcon(session.appPackage)
+        }.getOrNull()
+        if (drawable == null) {
+            drawGamepad(canvas, x, y - 8f, ReportTheme.blue)
+            return
+        }
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val iconCanvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(iconCanvas)
+        val shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.shader = shader }
+        canvas.drawRoundRect(RectF(x, y, x + size, y + size), 20f, 20f, paint)
+    }
+
     fun sessionHeader(session: SessionRecord) {
         card { x0, y0, x1, _ ->
             val stamp = SimpleDateFormat("yyyy-MM-dd  HH:mm:ss", Locale.getDefault())
                 .format(Date(session.startedAt))
-            drawGamepad(canvas, x0, y0 - 4f, ReportTheme.blue)
+            drawLauncherIcon(session, x0, y0 - 12f)
             text(
                 fit(session.appLabel.ifBlank { session.appPackage }, (x1 - x0) * 0.55f, title),
-                x0 + 64f, y0 + 8f, title
+                x0 + 120f, y0 + 8f, title
             )
             label.textAlign = Paint.Align.RIGHT
             text(stamp, x1, y0 + 8f, label)
@@ -377,8 +438,8 @@ private class SceneReportRenderer(
                 Triple("JITTER", fmt(jitter, 1) + "%", "FPS"),
                 Triple("1% LOW", fmt(session.low1Percent, 1), "FPS"),
                 Triple("AVG", fmt(temps.avgOrNull(), 1), "SOC(°C)"),
-                Triple("MAX", fmt(temps.maxOrNull(), 1), "SOC(°C)"),
-                Triple("AVG", fmt(session.cpuSeries.avgOrNull(), 0), "CPU(%)")
+                Triple("MAX", fmt(batteryTemperatureSeries(session).maxOrNull(), 1), "Battery(°C)"),
+                Triple("AVG", fmt(session.avgPowerW, 2), "Power(W)")
             )
             val cellW = (x1 - x0) / 4f
             cells.forEachIndexed { index, cell ->
@@ -392,20 +453,20 @@ private class SceneReportRenderer(
         }
     }
 
-    /** Correct orientation: data and labels both use max at top, min at bottom. */
+    /** Upward Y: max at chartTop, min at chartBottom, for every series. */
     private fun drawChart(
-        x0: Float, top: Float, x1: Float, bottom: Float,
+        x0: Float, chartTop: Float, x1: Float, chartBottom: Float,
         lines: List<ChartLine>,
         leftLabels: List<String>,
         rightLabels: List<String> = emptyList()
     ) {
-        val plotLeft = x0 + 64f
-        val plotRight = if (rightLabels.isEmpty()) x1 - 12f else x1 - 64f
-        val plotBottom = bottom - 40f
+        val plotLeft = x0 + 72f
+        val plotRight = if (rightLabels.isEmpty()) x1 - 12f else x1 - 72f
+        val chartHeight = chartBottom - chartTop
         val tickLast = (leftLabels.size - 1).coerceAtLeast(1)
 
         leftLabels.forEachIndexed { index, value ->
-            val y = top + (plotBottom - top) * index / tickLast
+            val y = chartTop + chartHeight * index / tickLast
             canvas.drawLine(plotLeft, y, plotRight, y, gridPaint)
             text(value, plotLeft - 12f, y + 6f, axisLeft)
             if (rightLabels.isNotEmpty()) {
@@ -416,8 +477,7 @@ private class SceneReportRenderer(
         }
         repeat(6) { index ->
             val x = plotLeft + (plotRight - plotLeft) * index / 5f
-            canvas.drawLine(x, top, x, plotBottom, gridPaint)
-            // Six evenly spaced ticks are drawn by the caller at this exact x.
+            canvas.drawLine(x, chartTop, x, chartBottom, gridPaint)
         }
 
         lines.forEach { line ->
@@ -425,14 +485,18 @@ private class SceneReportRenderer(
             if (values.size < 2) return@forEach
             val span = (line.max - line.min).takeIf { it > 0f } ?: 1f
             val step = (plotRight - plotLeft) / (values.size - 1)
-            fun yOf(value: Float): Float =
-                plotBottom - ((value - line.min) / span).coerceIn(0f, 1f) * (plotBottom - top)
+            fun yOf(value: Float): Float = if (line.temperature) {
+                // Exact Card 5 / Card 10 temperature mapping, 0..110 °C.
+                chartBottom - ((value.coerceIn(0f, TEMP_MAX_C) / TEMP_MAX_C) * chartHeight)
+            } else {
+                chartBottom - ((value - line.min) / span).coerceIn(0f, 1f) * chartHeight
+            }
             linePaint.color = line.color
             linePaint.strokeWidth = line.width
             if (line.spikes) {
                 values.forEachIndexed { index, value ->
                     val x = plotLeft + step * index
-                    canvas.drawLine(x, plotBottom, x, yOf(value), linePaint)
+                    canvas.drawLine(x, chartBottom, x, yOf(value), linePaint)
                 }
             } else {
                 var previousX = plotLeft
@@ -448,28 +512,30 @@ private class SceneReportRenderer(
         }
     }
 
+    /** Six evenly spaced X ticks, always drawn even for an empty legacy series. */
     private fun drawTimeTicks(
-        x0: Float, top: Float, x1: Float, bottom: Float,
+        x0: Float, baseline: Float, x1: Float,
         rightLabels: List<String> = emptyList(),
         labels: List<String>
     ) {
-        val plotLeft = x0 + 64f
-        val plotRight = if (rightLabels.isEmpty()) x1 - 12f else x1 - 64f
-        val baseline = bottom - 10f
+        val plotLeft = x0 + 72f
+        val plotRight = if (rightLabels.isEmpty()) x1 - 12f else x1 - 72f
+        if (plotRight <= plotLeft) return
         labels.take(6).forEachIndexed { index, value ->
             val x = plotLeft + (plotRight - plotLeft) * index / 5f
             text(value, x, baseline, axisCenter)
         }
     }
 
+    /** One centred legend row, never one row per line. */
     private fun legend(x0: Float, x1: Float, baseline: Float, entries: List<Pair<String, Int>>) {
         var width = 0f
         entries.forEach { width += label.measureText(it.first) + 46f }
         var x = (x0 + x1 - width) / 2f
         label.textAlign = Paint.Align.LEFT
         entries.forEach { entry ->
-            canvas.drawRect(
-                RectF(x, baseline - 16f, x + 16f, baseline),
+            canvas.drawRoundRect(
+                RectF(x, baseline - 16f, x + 16f, baseline), 4f, 4f,
                 Paint(Paint.ANTI_ALIAS_FLAG).apply { color = entry.second }
             )
             text(entry.first, x + 24f, baseline, label)
@@ -484,26 +550,33 @@ private class SceneReportRenderer(
         style.textAlign = old
     }
 
+    // Card 5 - FPS + temperature, plus real CPU/GPU load. One legend, one TEMP footer.
     fun fpsTemperature(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
             text("FPS & Temperature(°C)", x0, y0, header)
             val fpsCeil = (session.fpsSeries.positive().maxOrNull() ?: 120f)
                 .let { if (it > 130f) 144f else 120f }
-            val temps = temperatureSeries(session).map { it.coerceIn(0f, 110f) }
-            val chartTop = y0 + 32f
-            val chartBottom = y1 - 108f
+            val temps = temperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
+            val chartTop = y0 + 44f
+            val chartBottom = y1 - 142f
             drawChart(
                 x0, chartTop, x1, chartBottom,
                 listOf(
-                    ChartLine("FPS", session.fpsSeries, ReportTheme.fps, 0f, fpsCeil),
-                    ChartLine("TEMP(°C)", temps, ReportTheme.temp, 0f, 110f, width = 3f)
+                    ChartLine("FPS", session.fpsSeries.clamped(0f, fpsCeil),
+                        ReportTheme.fps, 0f, fpsCeil),
+                    ChartLine("TEMP(°C)", temps, ReportTheme.temp, 0f, TEMP_MAX_C,
+                        temperature = true),
+                    ChartLine("CPU(%)", session.cpuSeries.clamped(0f, 100f),
+                        ReportTheme.cpu, 0f, 100f),
+                    ChartLine("GPU(%)", session.gpuPercentSeries.clamped(0f, 100f),
+                        ReportTheme.gpu, 0f, 100f)
                 ),
                 scale(fpsCeil, 5),
-                scale(110f, 5)
+                scale(TEMP_MAX_C, 5)
             )
-            drawTimeTicks(x0, chartTop, x1, chartBottom, scale(110f, 5), timeLabels(session))
+            drawTimeTicks(x0, chartBottom + 34f, x1, scale(TEMP_MAX_C, 5), timeLabels(session))
             legend(
-                x0, x1, y1 - 66f,
+                x0, x1, y1 - 72f,
                 listOf(
                     Pair("FPS", ReportTheme.fps),
                     Pair("TEMP(°C)", ReportTheme.temp),
@@ -515,61 +588,63 @@ private class SceneReportRenderer(
                 "TEMP MAX: ${fmt(temps.maxOrNull(), 1)}°C   " +
                     "MIN: ${fmt(temps.minOrNull(), 1)}°C   " +
                     "AVG: ${fmt(temps.avgOrNull(), 1)}°C",
-                x0, x1, y1 - 16f, body
+                x0, x1, y1 - 24f, body
             )
         }
     }
 
+    // Card 6 - sharp 2.5px sky-blue frame-time spikes.
     fun frameTime(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
             text("Frame Time(ms)", x0, y0, header)
             val maxFrame = (session.frameTimeSeries.positive().maxOrNull() ?: 100f)
                 .coerceAtLeast(100f)
-            val chartTop = y0 + 32f
-            val chartBottom = y1 - 62f
+            val chartTop = y0 + 44f
+            val chartBottom = y1 - 86f
             drawChart(
                 x0, chartTop, x1, chartBottom,
                 listOf(
                     ChartLine(
-                        "Frame Time", session.frameTimeSeries, ReportTheme.frame,
-                        0f, maxFrame, spikes = true, width = 2.5f
+                        "Frame Time", session.frameTimeSeries.clamped(0f, maxFrame),
+                        ReportTheme.frame, 0f, maxFrame, spikes = true, width = 2.5f
                     )
                 ),
                 scale(maxFrame, 5)
             )
-            drawTimeTicks(x0, chartTop, x1, chartBottom, emptyList(), timeLabels(session))
-            centered("MAX: ${fmt(session.maxFrameTimeMs, 0)}ms", x0, x1, y1 - 12f, label)
+            drawTimeTicks(x0, chartBottom + 34f, x1, emptyList(), timeLabels(session))
+            centered("MAX: ${fmt(session.maxFrameTimeMs, 0)}ms", x0, x1, y1 - 16f, label)
         }
     }
 
+    // Card 7 - total plus every dynamically detected CPU cluster.
     fun cpuUsage(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
             text("CPU Usage(%)", x0, y0, header)
             val lines = mutableListOf(
-                ChartLine("Total", session.cpuSeries, ReportTheme.total, 0f, 100f)
+                ChartLine("Total", session.cpuSeries.clamped(0f, 100f),
+                    ReportTheme.total, 0f, 100f)
             )
             session.cpuGroupNames.forEachIndexed { index, name ->
                 lines.add(
                     ChartLine(
-                        name, column(session.cpuGroupSeries, index),
+                        name, column(session.cpuGroupSeries, index).clamped(0f, 100f),
                         ReportTheme.cluster[index % ReportTheme.cluster.size], 0f, 100f
                     )
                 )
             }
-            val chartTop = y0 + 32f
-            val chartBottom = y1 - 70f
+            val chartTop = y0 + 44f
+            val chartBottom = y1 - 92f
             drawChart(x0, chartTop, x1, chartBottom, lines, scale(100f, 5))
-            drawTimeTicks(x0, chartTop, x1, chartBottom, emptyList(), timeLabels(session))
-            legend(x0, x1, y1 - 16f, lines.map { Pair(it.label, it.color) })
+            drawTimeTicks(x0, chartBottom + 34f, x1, emptyList(), timeLabels(session))
+            legend(x0, x1, y1 - 20f, lines.map { Pair(it.label, it.color) })
         }
     }
 
+    // Card 8 - full grid, six ticks, legend and footer even when samples are empty.
     fun cpuFrequency(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
             text("CPU Frequency(MHz)", x0, y0, header)
-            val allFreq = session.cpuGroupFreqSeries.flatMap { row ->
-                row.mapNotNull { it?.finiteOrNull() }
-            }.positive()
+            val allFreq = allFrequencies(session)
             val ceiling = maxOf(4000f, (allFreq.maxOrNull() ?: 0f) * 1.05f)
             val lines = session.cpuGroupNames.ifEmpty { listOf("CPU") }.mapIndexed { index, name ->
                 ChartLine(
@@ -579,46 +654,113 @@ private class SceneReportRenderer(
                     ReportTheme.cluster[index % ReportTheme.cluster.size], 0f, ceiling
                 )
             }
-            val chartTop = y0 + 32f
-            val chartBottom = y1 - 108f
+            val chartTop = y0 + 44f
+            val chartBottom = y1 - 142f
             drawChart(x0, chartTop, x1, chartBottom, lines, scale(ceiling, 5))
-            drawTimeTicks(x0, chartTop, x1, chartBottom, emptyList(), timeLabels(session))
-            legend(x0, x1, y1 - 66f, lines.map { Pair(it.label, it.color) })
+            drawTimeTicks(x0, chartBottom + 34f, x1, emptyList(), timeLabels(session))
+            legend(x0, x1, y1 - 72f, lines.map { Pair(it.label, it.color) })
             centered(
                 "MAX: ${fmt(allFreq.maxOrNull(), 0)}MHz   " +
                     "MIN: ${fmt(allFreq.minOrNull(), 0)}MHz   " +
                     "AVG: ${fmt(allFreq.avgOrNull(), 0)}MHz",
+                x0, x1, y1 - 24f, body
+            )
+        }
+    }
+
+    // Card 9 - Power(W) left axis 0..8 and Capacity(%) right axis 0..100.
+    fun powerCapacity(session: SessionRecord) {
+        card { x0, y0, x1, y1 ->
+            text("Power(W) & Capacity(%)", x0, y0, header)
+            val chartTop = y0 + 44f
+            val chartBottom = y1 - 142f
+            val right = scale(100f, 5)
+            drawChart(
+                x0, chartTop, x1, chartBottom,
+                listOf(
+                    ChartLine("Power(W)", session.powerSeries.clamped(0f, 8f),
+                        ReportTheme.power, 0f, 8f),
+                    ChartLine("Capacity(%)", session.batterySeries.clamped(0f, 100f),
+                        ReportTheme.capacity, 0f, 100f)
+                ),
+                scale(8f, 5, 1),
+                right
+            )
+            drawTimeTicks(x0, chartBottom + 34f, x1, right, timeLabels(session))
+            legend(
+                x0, x1, y1 - 72f,
+                listOf(
+                    Pair("Power(W)", ReportTheme.power),
+                    Pair("Capacity(%)", ReportTheme.capacity)
+                )
+            )
+            val power = session.powerSeries.positive()
+            centered(
+                "MAX: ${fmt(power.maxOrNull(), 2)}W   " +
+                    "MIN: ${fmt(power.minOrNull(), 2)}W   " +
+                    "AVG: ${fmt(power.avgOrNull(), 2)}W",
+                x0, x1, y1 - 24f, body
+            )
+        }
+    }
+
+    // Card 10 - dedicated CPU/SoC temperature line, never a battery skin zone.
+    fun cpuTemperature(session: SessionRecord) {
+        card { x0, y0, x1, y1 ->
+            text("CPU Temperature(°C)", x0, y0, header)
+            val temps = temperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
+            val chartTop = y0 + 44f
+            val chartBottom = y1 - 86f
+            drawChart(
+                x0, chartTop, x1, chartBottom,
+                listOf(
+                    ChartLine("CPU(°C)", temps, ReportTheme.chipTemp, 0f, TEMP_MAX_C,
+                        temperature = true)
+                ),
+                scale(TEMP_MAX_C, 5)
+            )
+            drawTimeTicks(x0, chartBottom + 34f, x1, emptyList(), timeLabels(session))
+            centered(
+                "MAX: ${fmt(temps.maxOrNull(), 1)}°C   " +
+                    "MIN: ${fmt(temps.minOrNull(), 1)}°C   " +
+                    "AVG: ${fmt(temps.avgOrNull(), 1)}°C",
                 x0, x1, y1 - 16f, body
             )
         }
     }
 
-    fun cpuDetail(session: SessionRecord) {
+    // Card 11 - CPU detail, GPU & threads and the full real Shell Logs block.
+    fun hardwareDetail(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
-            text("CPU Detail", x0, y0, header)
-            val cores = maxOf(session.perCoreLoadSeries.size, session.perCoreFreqSeries.size)
+            val coreRows = minOf(
+                maxOf(session.perCoreLoadSeries.size, session.perCoreFreqSeries.size), 8
+            )
+            val threadRows = minOf(session.threadNames.size, 6)
+            val logs = session.shellLogs.lineSequence().toList()
+                .let { if (it.isEmpty()) listOf("--") else it.take(12) }
+            val identity = logs.firstOrNull { it.startsWith("shell_uid=") }
+                ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
             var y = y0 + 40f
-            if (cores == 0) {
-                text("Per-core: --", x0, y, label)
-                return@card
-            }
-            repeat(minOf(cores, 8)) { core ->
-                val load = column(session.perCoreLoadSeries, core).avgOrNull()
-                val clock = column(
-                    session.perCoreFreqSeries.map { row -> row.map { it?.toFloat() } }, core
-                ).positive().avgOrNull()
-                text("CPU $core", x0, y, label)
-                body.textAlign = Paint.Align.RIGHT
-                text("${fmt(load, 0)}%   ${fmt(clock, 0)} MHz", x1, y, body)
-                body.textAlign = Paint.Align.LEFT
-                y += 30f
-            }
-        }
-    }
 
-    fun gpuThreads(session: SessionRecord) {
-        card { x0, y0, x1, y1 ->
-            text("GPU & Threads", x0, y0, header)
+            text("CPU Detail", x0, y0, header)
+            if (coreRows == 0) {
+                text("Per-core: --", x0, y, label)
+            } else {
+                repeat(coreRows) { core ->
+                    val load = column(session.perCoreLoadSeries, core).avgOrNull()
+                    val clock = intColumn(session.perCoreFreqSeries, core).positive().avgOrNull()
+                    text("CPU $core", x0, y, label)
+                    body.textAlign = Paint.Align.RIGHT
+                    text("${fmt(load, 0)}%   ${fmt(clock, 0)} MHz", x1, y, body)
+                    body.textAlign = Paint.Align.LEFT
+                    y += 34f
+                }
+            }
+            y += 16f
+
+            text("GPU & Threads", x0, y, header)
+            y += 34f
+            val freqs = allFrequencies(session)
             val gpuLoad = session.gpuPercentSeries.positive()
             val gpuClock = session.gpuFreqSeries.positive()
             val rows = listOf(
@@ -630,9 +772,10 @@ private class SceneReportRenderer(
                     "DDR CLOCK",
                     if (session.ddrFreqSeries.isEmpty()) "--"
                     else fmt(session.ddrFreqSeries.average().toFloat(), 0)
-                )
+                ),
+                Pair("CPU CLOCK AVG", fmt(freqs.avgOrNull(), 0)),
+                Pair("CPU CLOCK MAX", fmt(freqs.maxOrNull(), 0))
             )
-            var y = y0 + 40f
             rows.forEach { row ->
                 text(row.first, x0, y, label)
                 body.textAlign = Paint.Align.RIGHT
@@ -640,45 +783,45 @@ private class SceneReportRenderer(
                 body.textAlign = Paint.Align.LEFT
                 y += 30f
             }
-            y += 12f
+            y += 16f
+
             text("Top threads", x0, y, label)
             y += 28f
-            session.threadNames.take(6).forEachIndexed { index, name ->
-                text(fit(name, (x1 - x0) * 0.7f, label), x0, y, label)
-                body.textAlign = Paint.Align.RIGHT
-                text(fmt(session.threadAvgLoads.getOrElse(index) { 0f }, 1) + "%", x1, y, body)
-                body.textAlign = Paint.Align.LEFT
-                y += 26f
+            if (threadRows == 0) {
+                text("--", x0, y, label)
+                y += 30f
+            } else {
+                repeat(threadRows) { index ->
+                    val name = session.threadNames[index]
+                    text(fit(name, (x1 - x0) * 0.7f, label), x0, y, label)
+                    body.textAlign = Paint.Align.RIGHT
+                    val load = session.threadAvgLoads.getOrNull(index)
+                    text(if (load == null) "--" else fmt(load, 1) + "%", x1, y, body)
+                    body.textAlign = Paint.Align.LEFT
+                    y += 30f
+                }
             }
-        }
-    }
+            y += 20f
 
-    fun shellLogs(session: SessionRecord) {
-        card { x0, y0, x1, y1 ->
-            val identity = session.shellLogs.lineSequence()
-                .firstOrNull { it.startsWith("shell_uid=") }
-                ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
-            text("Shell Logs", x0, y0, header)
+            text("Shell Logs", x0, y, header)
+            y += 34f
             body.color = ReportTheme.blue
-            text(fit(identity, x1 - x0, body), x0, y0 + 40f, body)
+            text(fit(identity, x1 - x0, body), x0, y, body)
             body.color = ReportTheme.text
-            var y = y0 + 72f
-            session.shellLogs.ifBlank { "--" }.lineSequence().take(24).forEach { line ->
+            y += 28f
+            logs.take(12).forEach { line ->
                 if (y > y1) return@forEach
                 text(fit(line, x1 - x0, mono), x0, y, mono)
-                y += 22f
+                y += 24f
             }
         }
     }
 }
 
-private fun renderReport(session: SessionRecord, canvas: Canvas, threshold: Int) {
-    val report = SceneReportRenderer(canvas, session)
+private fun renderReport(context: Context, session: SessionRecord, canvas: Canvas) {
+    val report = SceneReportRenderer(context, canvas, session)
     report.start()
-    report.thermalBanner(
-        peakSoc(session),
-        temperatureSeries(session).count { it >= 90f }
-    )
+    report.thermalStatus(peakSoc(session), temperatureSeries(session).count { it >= 90f })
     report.deviceRow(session)
     report.note(session)
     report.sessionHeader(session)
@@ -686,21 +829,25 @@ private fun renderReport(session: SessionRecord, canvas: Canvas, threshold: Int)
     report.frameTime(session)
     report.cpuUsage(session)
     report.cpuFrequency(session)
-    report.cpuDetail(session)
-    report.gpuThreads(session)
-    report.shellLogs(session)
+    report.powerCapacity(session)
+    report.cpuTemperature(session)
+    report.hardwareDetail(session)
 }
 
 private fun safeName(session: SessionRecord): String =
     session.appLabel.replace(Regex("[^A-Za-z0-9]+"), "_")
         .trim('_').take(24).ifBlank { "session" }
 
-private fun buildPdf(session: SessionRecord, threshold: Int, output: OutputStream) {
+private fun buildPdf(
+    context: Context,
+    session: SessionRecord,
+    output: OutputStream
+) {
     val document = PdfDocument()
     try {
         val info = PdfDocument.PageInfo.Builder(PAGE_W, reportHeight(session), 1).create()
         val page = document.startPage(info)
-        renderReport(session, page.canvas, threshold)
+        renderReport(context, session, page.canvas)
         document.finishPage(page)
         document.writeTo(output)
     } finally {
@@ -708,9 +855,9 @@ private fun buildPdf(session: SessionRecord, threshold: Int, output: OutputStrea
     }
 }
 
-private fun buildImage(session: SessionRecord, threshold: Int): Bitmap {
+private fun buildImage(context: Context, session: SessionRecord): Bitmap {
     val bitmap = Bitmap.createBitmap(PAGE_W, reportHeight(session), Bitmap.Config.ARGB_8888)
-    renderReport(session, Canvas(bitmap), threshold)
+    renderReport(context, session, Canvas(bitmap))
     return bitmap
 }
 
@@ -720,7 +867,7 @@ object SessionShare {
         runCatching {
             val dir = File(context.filesDir, "exports").apply { mkdirs() }
             val file = File(dir, "Qstats_${safeName(session)}_${session.id}.pdf")
-            FileOutputStream(file).use { buildPdf(session, threshold, it) }
+            FileOutputStream(file).use { buildPdf(context, session, it) }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "application/pdf"
@@ -751,14 +898,14 @@ object SessionShare {
                 )
                 uri?.let { target ->
                     context.contentResolver.openOutputStream(target)?.use {
-                        buildPdf(session, threshold, it)
+                        buildPdf(context, session, it)
                     }
                 }
             }
             if (uri == null) {
                 val dir = File(context.filesDir, "exports").apply { mkdirs() }
                 val file = File(dir, name)
-                FileOutputStream(file).use { buildPdf(session, threshold, it) }
+                FileOutputStream(file).use { buildPdf(context, session, it) }
                 uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
             }
             val open = Intent(Intent.ACTION_VIEW).apply {
@@ -772,7 +919,7 @@ object SessionShare {
 
     fun shareAsImage(context: Context, session: SessionRecord, threshold: Int) {
         runCatching {
-            val bitmap = buildImage(session, threshold)
+            val bitmap = buildImage(context, session)
             val dir = File(context.filesDir, "exports").apply { mkdirs() }
             val file = File(dir, "Qstats_${safeName(session)}_${session.id}.png")
             FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }

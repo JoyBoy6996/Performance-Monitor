@@ -258,13 +258,47 @@ object ShellCommands {
         """.trimIndent()
     }
 
-    /** GPU busy time, only when the device publishes both counters. */
-    fun gpuBusy(): String =
-        "for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-3d0/devfreq " +
-            "/sys/devices/platform/*.gpu/devfreq; do " +
-            "[ -r \"\$d/busy_time\" ] && [ -r \"\$d/total_time\" ] && " +
-            "echo \"GPUBUSY=\$(cat \"\$d/busy_time\"):\$(cat \"\$d/total_time\")\" && break; " +
-            "done"
+    /**
+     * Real GPU load, found at runtime instead of being guessed from the device name.
+     *
+     * The shell scans the kernel's own GPU interfaces: a ready percentage where one
+     * exists (KGSL gpu_busy_percentage, Mali utilisation), otherwise busy/total ticks
+     * (KGSL gpubusy, devfreq busy_time/total_time). Only a file that exists and holds
+     * plausible numbers is used, so an absent counter stays "--" and never becomes 0.
+     */
+    fun gpuBusy(): String = """
+        for f in /sys/class/kgsl/kgsl-*/gpu_busy_percentage \
+                 /sys/class/misc/mali0/device/utilisation \
+                 /sys/class/misc/mali0/device/utilization \
+                 /sys/devices/platform/*.gpu/utilisation \
+                 /sys/class/gpu*/utilization \
+                 /sys/kernel/gpu/gpu_busy; do
+            [ -r "\$f" ] || continue
+            v=\$(cat "\$f" 2>/dev/null)
+            p=\$(printf '%s' "\$v" | tr -cd '0-9.' 2>/dev/null)
+            case "\$p" in ''|*[!0-9.]*) continue ;; esac
+            p=\${p%%.*}
+            [ -n "\$p" ] && echo "GPUPCT=\$p" && break
+        done
+        for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-*/devfreq \
+                 /sys/class/kgsl/kgsl-* /sys/devices/platform/*.gpu/devfreq; do
+            if [ -r "\$d/busy_time" ] && [ -r "\$d/total_time" ]; then
+                b=\$(cat "\$d/busy_time" 2>/dev/null)
+                t=\$(cat "\$d/total_time" 2>/dev/null)
+                case "\$b:\$t" in
+                    *[!0-9:]*) ;;
+                    *:*) [ -n "\$b" ] && [ -n "\$t" ] && echo "GPUBUSY=\$b:\$t" && break ;;
+                esac
+            fi
+            if [ -r "\$d/gpubusy" ]; then
+                v=\$(cat "\$d/gpubusy" 2>/dev/null | tr '\t' ' ')
+                case "\$v" in
+                    *@*) b=\${v%@*}; t=\${v#*@}; echo "GPUBUSY=\$b:\$t"; break ;;
+                    *" "*) b=\${v%% *}; t=\${v##* }; echo "GPUBUSY=\$b:\$t"; break ;;
+                esac
+            fi
+        done
+    """.trimIndent()
 
     fun displayInfo(): String =
         "dumpsys display 2>/dev/null | grep -m3 -E 'refreshRate|fps=' ; " +
@@ -449,6 +483,15 @@ object Parsers {
                 }
             }
         return out
+    }
+
+    /** A kernel interface that publishes GPU load as a percentage directly. */
+    fun parseGpuPercentDirect(dump: String): Float? {
+        val line = dump.lineSequence().firstOrNull { it.startsWith("GPUPCT=") } ?: return null
+        val raw = line.substringAfter("GPUPCT=").trim()
+            .split(Regex("\\s+")).firstOrNull() ?: return null
+        val value = raw.removeSuffix("%").toFloatOrNull() ?: return null
+        return if (value in 0f..100f) value else null
     }
 
     /** Cumulative GPU busy/total ticks, when the device exposes them. */

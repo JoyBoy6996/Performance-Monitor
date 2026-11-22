@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
@@ -39,20 +38,22 @@ private fun fmt(value: Float?, decimals: Int): String {
 private fun <T : Number> List<T>.averageOrNull(): Float? =
     if (isEmpty()) null else map { it.toFloat() }.average().toFloat().finiteOrNull()
 
-private const val PAGE_W = 1240
-private const val PAGE_H = 1754
-private const val MARGIN = 60
+/** A4 in PostScript points, not device pixels. This is what PdfDocument expects. */
+private const val PAGE_W = 595f
+private const val PAGE_H = 842f
+private const val MARGIN = 38f
 private const val CONTENT_W = PAGE_W - 2 * MARGIN
+private const val IMAGE_SCALE = 2f
 
 private val BG = Color.parseColor("#FFFFFF")
-private val CARD = Color.parseColor("#F6F8FB")
+private val CARD = Color.parseColor("#F5F8FC")
 private val PRIMARY = Color.parseColor("#111827")
 private val MUTED = Color.parseColor("#5B6472")
 private val GREEN = Color.parseColor("#0F766E")
 private val AMBER = Color.parseColor("#B45309")
 private val RED = Color.parseColor("#B91C1C")
 private val CYAN = Color.parseColor("#0369A1")
-private val GRID = Color.parseColor("#DDE3EB")
+private val GRID = Color.parseColor("#DCE3EC")
 private val BRAND = Color.parseColor("#111827")
 
 private data class ShareStat(val label: String, val value: String, val color: Int)
@@ -95,14 +96,53 @@ private fun beforeAfterValue(values: List<Float>, decimals: Int, unit: String): 
 }
 
 /**
- * Draws the same Scene-style breakdown the detail screen shows onto bitmap pages.
- * The very same pages become the PNG images and the PDF, so neither format can
- * be missing a section.
+ * One page at a time, whichever format is being written.
+ *
+ * PDF pages are drawn directly in A4 points. Image pages use the exact same
+ * coordinates on a 2x bitmap, so a PDF and its PNG twin can never drift apart.
  */
-private class ReportPainter {
+private interface PageSink {
+    fun beginPage(number: Int): Canvas
+    fun endPage(canvas: Canvas, number: Int)
+}
+
+private class BitmapPageSink : PageSink {
     val pages = mutableListOf<Bitmap>()
+
+    override fun beginPage(number: Int): Canvas {
+        val bitmap = Bitmap.createBitmap(
+            (PAGE_W * IMAGE_SCALE).toInt(),
+            (PAGE_H * IMAGE_SCALE).toInt(),
+            Bitmap.Config.ARGB_8888
+        )
+        val canvas = Canvas(bitmap)
+        canvas.scale(IMAGE_SCALE, IMAGE_SCALE)
+        pages.add(bitmap)
+        return canvas
+    }
+
+    override fun endPage(canvas: Canvas, number: Int) = Unit
+}
+
+private class PdfPageSink(private val document: PdfDocument) : PageSink {
+    private var current: PdfDocument.Page? = null
+
+    override fun beginPage(number: Int): Canvas {
+        val info = PdfDocument.PageInfo.Builder(PAGE_W.toInt(), PAGE_H.toInt(), number).create()
+        current = document.startPage(info)
+        return current!!.canvas
+    }
+
+    override fun endPage(canvas: Canvas, number: Int) {
+        current?.let { document.finishPage(it) }
+        current = null
+    }
+}
+
+private class ReportRenderer(private val sink: PageSink) {
     private lateinit var canvas: Canvas
     private var y = 0f
+    private var pageNumber = 0
 
     private fun paint(size: Float, style: Int, color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = size
@@ -110,20 +150,20 @@ private class ReportPainter {
         this.color = color
     }
 
-    private val brandPaint = paint(21f, Typeface.BOLD, BRAND)
-    private val titlePaint = paint(52f, Typeface.BOLD, PRIMARY)
-    private val subPaint = paint(23f, Typeface.NORMAL, MUTED)
-    private val sectionPaint = paint(28f, Typeface.BOLD, BRAND)
-    private val labelPaint = paint(22f, Typeface.NORMAL, MUTED)
-    private val valuePaint = paint(30f, Typeface.BOLD, PRIMARY)
-    private val metricLabelPaint = paint(23f, Typeface.NORMAL, MUTED)
-    private val metricValuePaint = paint(23f, Typeface.BOLD, PRIMARY).apply {
+    private val brandPaint = paint(9f, Typeface.BOLD, BRAND)
+    private val titlePaint = paint(22f, Typeface.BOLD, PRIMARY)
+    private val subPaint = paint(10f, Typeface.NORMAL, MUTED)
+    private val sectionPaint = paint(11f, Typeface.BOLD, BRAND)
+    private val labelPaint = paint(9f, Typeface.NORMAL, MUTED)
+    private val valuePaint = paint(13f, Typeface.BOLD, PRIMARY)
+    private val metricLabelPaint = paint(10f, Typeface.NORMAL, MUTED)
+    private val metricValuePaint = paint(10f, Typeface.BOLD, PRIMARY).apply {
         textAlign = Paint.Align.RIGHT
     }
-    private val chartTitlePaint = paint(24f, Typeface.BOLD, PRIMARY)
-    private val smallPaint = paint(21f, Typeface.NORMAL, MUTED)
-    private val footPaint = paint(19f, Typeface.NORMAL, MUTED)
-    private val pagePaint = paint(19f, Typeface.NORMAL, MUTED).apply {
+    private val chartTitlePaint = paint(10f, Typeface.BOLD, PRIMARY)
+    private val smallPaint = paint(9f, Typeface.NORMAL, MUTED)
+    private val footPaint = paint(8f, Typeface.NORMAL, MUTED)
+    private val pagePaint = paint(8f, Typeface.NORMAL, MUTED).apply {
         textAlign = Paint.Align.RIGHT
     }
 
@@ -134,114 +174,140 @@ private class ReportPainter {
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = GRID
         style = Paint.Style.STROKE
-        strokeWidth = 2f
+        strokeWidth = 0.8f
     }
     private val targetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AMBER
-        strokeWidth = 2f
+        strokeWidth = 1f
     }
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        strokeWidth = 3f
+        strokeWidth = 1.6f
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
-    }
-
-    init {
-        newPage()
-    }
-
-    private fun newPage() {
-        val bitmap = Bitmap.createBitmap(PAGE_W, PAGE_H, Bitmap.Config.ARGB_8888)
-        canvas = Canvas(bitmap)
-        canvas.drawColor(BG)
-        canvas.drawRect(0f, 0f, PAGE_W.toFloat(), 5f, barPaint)
-        y = MARGIN.toFloat()
-        pages.add(bitmap)
-    }
-
-    private fun ensure(space: Float) {
-        if (y + space > PAGE_H - MARGIN) newPage()
     }
 
     private fun text(value: String, x: Float, baseline: Float, paint: Paint) {
         canvas.drawText(value, x, baseline, paint)
     }
 
-    fun header(appName: String, dateLine: String) {
-        ensure(200f)
-        text("QSTATS", MARGIN.toFloat(), y, brandPaint)
-        text(
-            "SESSION REPORT",
-            (MARGIN + 118).toFloat(), y, smallPaint
+    /** Keeps long app names and labels inside their column instead of running off. */
+    private fun fitted(value: String, maxWidth: Float, paint: Paint): String {
+        if (paint.measureText(value) <= maxWidth) return value
+        var shortened = value
+        while (shortened.isNotEmpty() && paint.measureText("$shortened…") > maxWidth) {
+            shortened = shortened.dropLast(1)
+        }
+        return "$shortened…"
+    }
+
+    private fun newPage() {
+        if (pageNumber > 0) {
+            drawFooter(canvas, pageNumber)
+            sink.endPage(canvas, pageNumber)
+        }
+        pageNumber++
+        canvas = sink.beginPage(pageNumber)
+        canvas.drawColor(BG)
+        canvas.drawRect(0f, 0f, PAGE_W, 3f, barPaint)
+        y = MARGIN
+        if (pageNumber > 1) {
+            text("QSTATS  ·  CONTINUED", MARGIN, y + 10f, brandPaint)
+            y += 26f
+        }
+    }
+
+    private fun ensure(space: Float) {
+        if (y + space > PAGE_H - MARGIN - 22f) newPage()
+    }
+
+    private fun drawFooter(pageCanvas: Canvas, number: Int) {
+        val baseline = PAGE_H - 14f
+        pageCanvas.drawLine(
+            MARGIN, baseline - 16f, PAGE_W - MARGIN, baseline - 16f, dividerPaint
         )
-        y += 50f
-        text(appName, MARGIN.toFloat(), y + 20, titlePaint)
-        y += 54f
-        text(dateLine, MARGIN.toFloat(), y, subPaint)
-        y += 28f
-        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, barPaint)
-        y += 42f
+        pageCanvas.drawText(
+            "Qstats  ·  real recorded data only  ·  unavailable values shown as --",
+            MARGIN, baseline, footPaint
+        )
+        pageCanvas.drawText("Page $number", PAGE_W - MARGIN, baseline, pagePaint)
+    }
+
+    fun header(appName: String, dateLine: String) {
+        ensure(66f)
+        text("QSTATS", MARGIN, y, brandPaint)
+        text("SESSION REPORT", MARGIN + 58f, y, smallPaint)
+        y += 22f
+        text(fitted(appName, CONTENT_W, titlePaint), MARGIN, y + 12f, titlePaint)
+        y += 22f
+        text(fitted(dateLine, CONTENT_W, subPaint), MARGIN, y + 8f, subPaint)
+        y += 18f
+        canvas.drawLine(MARGIN, y, PAGE_W - MARGIN, y, barPaint)
+        y += 20f
     }
 
     fun section(title: String) {
-        ensure(76f)
-        text(title.uppercase(Locale.US), MARGIN.toFloat(), y, sectionPaint)
-        y += 16f
-        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, dividerPaint)
-        y += 34f
+        ensure(32f)
+        text(title.uppercase(Locale.US), MARGIN, y, sectionPaint)
+        y += 7f
+        canvas.drawLine(MARGIN, y, PAGE_W - MARGIN, y, dividerPaint)
+        y += 17f
     }
 
     /** A plain table reads like a report; glowing cards made the old export look fake. */
     fun statGrid(items: List<ShareStat>, columns: Int = 3) {
         val rows = (items.size + columns - 1) / columns
-        val cellH = 100f
-        ensure(rows * cellH + 12f)
-        val cw = CONTENT_W.toFloat() / columns
+        val cellH = 40f
+        ensure(rows * cellH + 10f)
+        val cw = CONTENT_W / columns
         items.forEachIndexed { index, item ->
             val x = MARGIN + (index % columns) * cw
-            val cy = y + (index / columns) * cellH
-            canvas.drawRect(RectF(x, cy, x + cw, cy + cellH), borderPaint)
-            text(item.label, x + 18f, cy + 34f, labelPaint)
+            val cellY = y + (index / columns) * cellH
+            canvas.drawRect(RectF(x, cellY, x + cw, cellY + cellH), cardPaint)
+            canvas.drawRect(RectF(x, cellY, x + cw, cellY + cellH), borderPaint)
+            text(fitted(item.label, cw - 16f, labelPaint), x + 8f, cellY + 16f, labelPaint)
             valuePaint.color = item.color
-            valuePaint.textSize = if (item.value.length > 10) 25f else 30f
-            text(item.value, x + 18f, cy + 76f, valuePaint)
-            valuePaint.textSize = 30f
+            valuePaint.textSize = if (item.value.length > 10) 11f else 13f
+            text(fitted(item.value, cw - 16f, valuePaint), x + 8f, cellY + 32f, valuePaint)
+            valuePaint.textSize = 13f
         }
-        y += rows * cellH + 16f
+        y += rows * cellH + 10f
     }
 
     fun metricRow(label: String, value: String, color: Int = PRIMARY) {
-        ensure(56f)
+        ensure(24f)
         metricLabelPaint.color = MUTED
-        text(label, MARGIN.toFloat(), y + 18, metricLabelPaint)
+        text(fitted(label, CONTENT_W * 0.55f, metricLabelPaint), MARGIN, y + 11f, metricLabelPaint)
         metricValuePaint.color = color
-        text(value, (PAGE_W - MARGIN).toFloat(), y + 18, metricValuePaint)
-        y += 30f
-        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, dividerPaint)
-        y += 18f
+        text(
+            fitted(value, CONTENT_W * 0.42f, metricValuePaint),
+            PAGE_W - MARGIN, y + 11f, metricValuePaint
+        )
+        y += 16f
+        canvas.drawLine(MARGIN, y, PAGE_W - MARGIN, y, dividerPaint)
+        y += 8f
     }
 
     fun paragraph(value: String) {
         labelPaint.color = PRIMARY
-        val maxW = CONTENT_W - 16f
+        val maxW = CONTENT_W
         var line = ""
         for (word in value.split(Regex("\\s+")).filter { it.isNotEmpty() }) {
             val trial = if (line.isEmpty()) word else "$line $word"
             if (labelPaint.measureText(trial) <= maxW) {
                 line = trial
             } else {
-                ensure(30f)
-                text(line, (MARGIN + 8).toFloat(), y + 16, labelPaint)
-                y += 26f
+                ensure(15f)
+                text(line, MARGIN, y + 10f, labelPaint)
+                y += 15f
                 line = word
             }
         }
         if (line.isNotEmpty()) {
-            ensure(30f)
-            text(line, (MARGIN + 8).toFloat(), y + 16, labelPaint)
-            y += 26f
+            ensure(15f)
+            text(line, MARGIN, y + 10f, labelPaint)
+            y += 15f
         }
-        y += 8f
+        y += 4f
     }
 
     fun chart(
@@ -251,24 +317,17 @@ private class ReportPainter {
         unit: String,
         target: Float? = null
     ) {
-        val height = 340f
+        val height = 156f
         ensure(height)
         val top = y
-        canvas.drawRect(
-            RectF(MARGIN.toFloat(), top, (PAGE_W - MARGIN).toFloat(), top + height - 8f),
-            cardPaint
-        )
-        canvas.drawRect(
-            RectF(MARGIN.toFloat(), top, (PAGE_W - MARGIN).toFloat(), top + height - 8f),
-            borderPaint
-        )
-        chartTitlePaint.color = PRIMARY
-        text(title, (MARGIN + 20).toFloat(), top + 40, chartTitlePaint)
+        canvas.drawRect(RectF(MARGIN, top, PAGE_W - MARGIN, top + height - 6f), cardPaint)
+        canvas.drawRect(RectF(MARGIN, top, PAGE_W - MARGIN, top + height - 6f), borderPaint)
+        text(title, MARGIN + 10f, top + 19f, chartTitlePaint)
 
-        val x0 = (MARGIN + 24).toFloat()
-        val x1 = (PAGE_W - MARGIN - 24).toFloat()
-        val cy0 = top + 70f
-        val cy1 = top + 252f
+        val x0 = MARGIN + 12f
+        val x1 = PAGE_W - MARGIN - 12f
+        val cy0 = top + 32f
+        val cy1 = top + 116f
         for (i in 0..3) {
             val gy = cy0 + (cy1 - cy0) * i / 3f
             canvas.drawLine(x0, gy, x1, gy, gridPaint)
@@ -291,8 +350,7 @@ private class ReportPainter {
             fun py(value: Float) = cy1 - (cy1 - cy0) * (value - low) / range
 
             if (target != null) {
-                val ty = py(target)
-                canvas.drawLine(x0, ty, x1, ty, targetPaint)
+                canvas.drawLine(x0, py(target), x1, py(target), targetPaint)
             }
             linePaint.color = color
             var prevX = px(0)
@@ -314,34 +372,24 @@ private class ReportPainter {
         text(
             "MIN ${fmt(points.minOrNull(), 1)}   AVG ${fmt(average, 1)}   " +
                 "MAX ${fmt(points.maxOrNull(), 1)} $unit",
-            (MARGIN + 20).toFloat(), top + 296, smallPaint
+            MARGIN + 10f, top + 137f, smallPaint
         )
         y += height
     }
 
-    /** Drawn on every page, including the ones that were filled before the last one. */
+    fun start() {
+        newPage()
+    }
+
     fun finish() {
-        pages.forEachIndexed { index, bitmap ->
-            val pageCanvas = Canvas(bitmap)
-            val baseline = (PAGE_H - MARGIN + 22).toFloat()
-            pageCanvas.drawLine(
-                MARGIN.toFloat(), baseline - 30f, (PAGE_W - MARGIN).toFloat(),
-                baseline - 30f, dividerPaint
-            )
-            pageCanvas.drawText(
-                "Qstats  ·  real recorded data only  ·  unavailable values shown as --",
-                MARGIN.toFloat(), baseline, footPaint
-            )
-            pageCanvas.drawText(
-                "${index + 1} / ${pages.size}",
-                (PAGE_W - MARGIN).toFloat(), baseline, pagePaint
-            )
-        }
+        drawFooter(canvas, pageNumber)
+        sink.endPage(canvas, pageNumber)
     }
 }
 
-private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
-    val painter = ReportPainter()
+private fun renderReport(session: SessionRecord, threshold: Int, sink: PageSink) {
+    val painter = ReportRenderer(sink)
+    painter.start()
     val formatter = SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault())
     val appName = session.appLabel.ifBlank {
         session.appPackage.ifBlank { "Unknown app" }
@@ -418,7 +466,9 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
     session.avgPowerW?.let { painter.metricRow("Average power", fmt(it, 2) + " W") }
 
     painter.section("Device load")
-    session.avgCpu?.let { painter.metricRow("Average CPU", fmt(it, 1) + " %") }
+    painter.metricRow("Average CPU", fmt(session.avgCpu, 1) + " %", CYAN)
+    val cpuLoad = session.cpuSeries.mapNotNull { it.finiteOrNull()?.takeIf { v -> v > 0f } }
+    painter.metricRow("CPU samples", cpuLoad.size.toString(), CYAN)
     if (session.batterySeries.isNotEmpty()) {
         painter.metricRow(
             "Battery",
@@ -478,7 +528,7 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
     )
     painter.chart("Frame time (ms)", session.frameTimeSeries, AMBER, "ms")
     painter.chart(
-        "CPU load (%)", session.cpuSeries.mapNotNull { it.finiteOrNull() }, CYAN, "%"
+        "CPU load (%)", cpuLoad, CYAN, "%"
     )
     painter.chart(
         "Temperature (°C)",
@@ -506,7 +556,6 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
     painter.metricRow("Battery", beforeAfterValue(session.batterySeries, 0, "%"))
 
     painter.finish()
-    return painter.pages
 }
 
 private fun safeName(session: SessionRecord): String =
@@ -517,17 +566,11 @@ private fun safeName(session: SessionRecord): String =
 object SessionShare {
     fun shareAsPdf(context: Context, session: SessionRecord, threshold: Int) {
         runCatching {
-            val pages = renderPages(session, threshold)
             val dir = File(context.filesDir, "exports").apply { mkdirs() }
             val file = File(dir, "Qstats_${safeName(session)}_${session.id}.pdf")
             val document = PdfDocument()
             try {
-                pages.forEachIndexed { index, bitmap ->
-                    val info = PdfDocument.PageInfo.Builder(595, 842, index + 1).create()
-                    val page = document.startPage(info)
-                    page.canvas.drawBitmap(bitmap, null, Rect(0, 0, 595, 842), null)
-                    document.finishPage(page)
-                }
+                renderReport(session, threshold, PdfPageSink(document))
                 FileOutputStream(file).use { output -> document.writeTo(output) }
             } finally {
                 document.close()
@@ -547,10 +590,11 @@ object SessionShare {
 
     fun shareAsImage(context: Context, session: SessionRecord, threshold: Int) {
         runCatching {
-            val pages = renderPages(session, threshold)
+            val sink = BitmapPageSink()
+            renderReport(session, threshold, sink)
             val dir = File(context.filesDir, "exports").apply { mkdirs() }
             val uris = ArrayList<Uri>()
-            pages.forEachIndexed { index, bitmap ->
+            sink.pages.forEachIndexed { index, bitmap ->
                 val file = File(
                     dir, "Qstats_${safeName(session)}_${session.id}_p${index + 1}.png"
                 )

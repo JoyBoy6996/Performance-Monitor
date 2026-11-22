@@ -24,6 +24,9 @@ class SystemSampler(private val hub: ShellHub) {
     private var lastCpu: LongArray? = null
     /** Kept separate from the batch reader so the two deltas never interfere. */
     private var lastFastCpu: LongArray? = null
+    private var lastDirectCpu: LongArray? = null
+    private var directCpuStalls = 0
+    private var lastFastCpuSource = ""
     private var lastCpuCores: Map<Int, LongArray>? = null
     private var lastGpuBusy: Pair<Long, Long>? = null
     private var lastGroupNames: List<String> = emptyList()
@@ -33,26 +36,44 @@ class SystemSampler(private val hub: ShellHub) {
     fun resetDeltas() {
         sceneCollectors.reset()
         lastFastCpu = null
+        lastDirectCpu = null
+        directCpuStalls = 0
+        lastFastCpuSource = ""
+        lastGpuBusy = null
     }
 
     /**
-     * Reads only the aggregate CPU load, straight from `/proc/stat`.
+     * Reads only the aggregate CPU load, on its own fast clock.
      *
-     * The full batch also asks for SurfaceFlinger, thermals and every thread of the
-     * game. Under load that batch can take seconds, and a late batch used to throw
-     * the CPU reading away with it - which is why a finished match recorded 0% CPU.
-     * `/proc/stat` is world readable, so this read needs no shell at all and can
-     * never be delayed by the other counters.
+     * The direct app read is tried first, but on newer Android releases the kernel can
+     * hide it or hand back a counter that never moves. Both cases fall through to the
+     * privileged shell. This keeps real CPU samples flowing even when the heavy batch
+     * is slow, without ever turning a missing reading into a fake zero.
      */
     suspend fun sampleCpu(): Float? {
-        val dump = try {
+        val direct = runCatching {
             File("/proc/stat").bufferedReader().use { it.readText() }
-        } catch (_: Exception) {
-            // A few ROMs hide /proc/stat from the app process. The shell can still
-            // read it, so fall back instead of losing the CPU reading.
+        }.getOrDefault("")
+        val directParsed = Parsers.parseCpuStat(direct)
+        if (directParsed != null) {
+            directCpuStalls = if (
+                lastDirectCpu != null && directParsed.contentEquals(lastDirectCpu!!)
+            ) directCpuStalls + 1 else 0
+            lastDirectCpu = directParsed
+        }
+
+        val useDirect = directParsed != null && directCpuStalls < 3
+        val source = if (useDirect) "direct" else "shell"
+        val dump = if (useDirect) {
+            direct
+        } else {
             hub.execOrNull(ShellCommands.cpuStat(), 1_500L)?.out.orEmpty()
         }
-        val current = Parsers.parseCpuStat(dump).takeIf { it != null } ?: return null
+        val current = Parsers.parseCpuStat(dump) ?: return null
+        // A delta between two different providers is not a measurement. Drop the
+        // baseline on a source switch, then start again from the next real pair.
+        if (lastFastCpuSource != source) lastFastCpu = null
+        lastFastCpuSource = source
         val value = cpuPercentBetween(lastFastCpu, current)
         lastFastCpu = current
         return value
@@ -124,7 +145,10 @@ class SystemSampler(private val hub: ShellHub) {
         record(availability, sources, SystemMetric.GPU_FREQ_MHZ, gpuFreq != null, "GPU_FREQ_MHZ", "privileged GPU frequency node")
         record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "privileged thermalservice")
         record(availability, sources, SystemMetric.CPU_TEMP_C, cpuTemp != null, "CPU_TEMP_C", "named CPU/SoC thermal sensor")
-        record(availability, sources, SystemMetric.GPU_PERCENT, gpuPercent != null, "GPU_PERCENT", "GPU busy/total counters")
+        record(
+            availability, sources, SystemMetric.GPU_PERCENT, gpuPercent != null,
+            "GPU_PERCENT", "GPU busy counters (Mali/KGSL/devfreq)"
+        )
         record(availability, sources, SystemMetric.CPU_CORES, scene.cpuCoreLoadPct.any { it != null }, "CPU_CORES", "per-core /proc/stat")
         record(availability, sources, SystemMetric.DDR_FREQ_MHZ, scene.ddrFreqMHz != null, "DDR_FREQ_MHZ", "memory devfreq")
         record(availability, sources, SystemMetric.THREAD_LOAD, scene.threadLoads.isNotEmpty(), "THREAD_LOAD", "per-thread /proc/<pid>/task")
@@ -217,8 +241,16 @@ class SystemSampler(private val hub: ShellHub) {
         "CPU ${cores.first()}~${cores.last()}"
     }
 
-    /** GPU load from busy/total ticks; a device without counters gets null. */
+    /**
+     * GPU load from a real counter. Mali-style devices publish the percentage
+     * directly; others publish busy/total ticks that need a delta between polls.
+     * A device with neither gets null, never a fake zero.
+     */
     private fun gpuPercent(dump: String): Float? {
+        Parsers.parseGpuPercentDirect(dump)?.let { percent ->
+            lastGpuBusy = null
+            return percent.coerceIn(0f, 100f)
+        }
         val now = Parsers.parseGpuBusy(dump) ?: run {
             lastGpuBusy = null
             return null

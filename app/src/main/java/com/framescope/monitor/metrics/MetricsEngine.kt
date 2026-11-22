@@ -358,7 +358,7 @@ class MetricsEngine(
         val sources = (native.sources + privileged.sources).toMutableMap()
         if (cpuPercent != null && _cpuPercent.value != null) {
             availability[SystemMetric.CPU_PERCENT] = MetricAvailability.AVAILABLE
-            sources[SystemMetric.CPU_PERCENT] = "fast /proc/stat"
+            sources[SystemMetric.CPU_PERCENT] = "CPU counter (app read or privileged shell)"
         }
         val merged = SystemMetrics(
             cpuPercent = cpuPercent,

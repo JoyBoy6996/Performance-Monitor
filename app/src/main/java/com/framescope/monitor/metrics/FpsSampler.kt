@@ -766,25 +766,30 @@ class FpsSampler(
      * at a rate that is not one of these steps is published as measured.
      */
     internal fun settleToGameCap(fps: Float, displayHz: Float?): Float {
-        val ceiling = displayHz?.takeIf { it > 0f } ?: return fps
-        // The device-wide counter also sees the overlay and status bar, so a 120 fps
-        // match can read 133. No screen can present more frames than it refreshes:
-        // hold any small overshoot at the ceiling and never publish it as a higher
-        // frame rate. An absurd reading is left alone so the plausibility check
-        // rejects it instead of turning it into a plausible looking number.
-        if (fps > ceiling * 1.02f && fps <= ceiling * 1.5f) return ceiling
+        val ceiling = displayHz?.takeIf { it > 0f }
+        if (ceiling != null && fps > ceiling * 1.02f && fps <= ceiling * 1.5f) {
+            // The device-wide counter also sees the overlay and status bar, so a
+            // 120 fps match can read 133. No screen presents more frames than it
+            // refreshes: hold that overshoot at the ceiling, never above it. An
+            // absurd reading is left for the plausibility check to reject.
+            return ceiling
+        }
         // Only real game rates belong here. Fractional panel multipliers such as
         // 0.8 × 144 = 115.2 used to pull a genuine 120 down to 115.2 and a 90 down
         // to 86.4 on a 144 Hz screen, which was a measurement error, not a cap.
+        // Some ROMs do not report the current refresh rate at all, so the standard
+        // rates are also the fallback ceiling: 133 sits just above 120 and is a
+        // compositor overshoot, while a genuine 144 is left untouched.
         val caps = buildList {
             addAll(listOf(30f, 45f, 60f, 72f, 90f, 120f, 144f, 165f))
-            add(ceiling)
+            if (ceiling != null) add(ceiling)
         }
-            .filter { it <= ceiling * 1.02f }
+            .filter { cap -> ceiling == null || cap <= ceiling * 1.02f }
             .distinct()
             .sortedDescending()
         for (cap in caps) {
-            if (fps > cap && fps <= cap * 1.08f) return cap
+            val tolerance = if (cap >= 120f) 1.12f else 1.08f
+            if (fps > cap && fps <= cap * tolerance) return cap
         }
         return fps
     }
@@ -966,18 +971,21 @@ class FpsSampler(
         // The timestamps themselves are the frames, so they are the reading. A
         // rolling counter that only sees a few new frames per dump underreports
         // a game running at 90-120 as 24, which is what the overlay showed.
-        val fps = ownStats.fps
+        val rawFps = ownStats.fps
         // An idle UI surface presents a handful of frames a second. Calling
         // that the game produced 4 fps was wrong; it is not a frame rate of
         // the game and is refused instead of replacing a real reading.
-        if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) {
+        if (rawFps < MIN_GAME_FPS || !isPlausibleFps(rawFps)) {
             pendingWarmUpReason = "Waiting for ${target.name} to present frames"
             return null
         }
+        // The presentation timestamps are exact, but this path used to bypass the
+        // cap and let the overlay show 133 on a 120 Hz screen.
+        val fps = settleToGameCap(rawFps, refreshRateHz())
 
         publish(
             fps = fps,
-            frameTimeMs = ownStats.frameTimeMs,
+            frameTimeMs = if (fps == rawFps) ownStats.frameTimeMs else 1000f / fps,
             source = "SurfaceFlinger latency",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = target.name,
@@ -1221,12 +1229,12 @@ class FpsSampler(
         gfxCounter.frameBudgetNs = frameBudgetNs(targetFps)
 
         val result = gfxCounter.onSample(pkg, timestamps, nowUptime)
-        val fps = result.recentFps
+        val rawFps = result.recentFps
         // A number that no screen can show is a timestamp that was read wrong,
         // not a frame rate. The 144 Hz panel cannot present 298 frames, and
         // that is what the interface showed before this check.
-        if (fps != null && fps > 0f && !isPlausibleFps(fps)) return null
-        if (fps == null || fps <= 0f) {
+        if (rawFps != null && rawFps > 0f && !isPlausibleFps(rawFps)) return null
+        if (rawFps == null || rawFps <= 0f) {
             return publishUnavailable(
                 source = "gfxinfo",
                 kind = FpsSourceKind.GFXINFO,
@@ -1235,10 +1243,13 @@ class FpsSampler(
                 nowUptime = nowUptime
             )
         }
+        // This path also used to publish the raw reading, so the overlay could
+        // show more than the screen refreshes even after the other paths were fixed.
+        val fps = settleToGameCap(rawFps, refreshRateHz())
 
         publish(
             fps = fps,
-            frameTimeMs = result.frameTimeMs ?: (1000f / fps),
+            frameTimeMs = if (fps == rawFps) (result.frameTimeMs ?: (1000f / fps)) else 1000f / fps,
             source = "gfxinfo (app UI thread)",
             kind = FpsSourceKind.GFXINFO,
             layer = pkg,

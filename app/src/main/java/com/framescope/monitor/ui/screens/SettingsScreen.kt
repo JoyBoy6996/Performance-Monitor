@@ -301,21 +301,28 @@ fun SettingsScreen(
                     )
                     Spacer(Modifier.height(Space.sm))
                     Text(
-                        text = "No Wi-Fi and no Shizuku? Connect the phone to a PC with a USB cable once and " +
-                            "run 'adb tcpip 5555' on the PC, then unplug. Tap Set up bridge here, approve the " +
-                            "“Allow USB debugging?” prompt, and the key is saved. After that it reconnects on " +
-                            "127.0.0.1 by itself — no PC, no Wi-Fi, no Shizuku. Shizuku and wireless debugging " +
-                            "are other ways to open the same port.",
+                        text = "Easiest: keep Shizuku-Next running with Qstats granted permission. It gives " +
+                            "live FPS with no ADB key and no Wi-Fi. Turn on “Start on boot” so it comes back " +
+                            "after every restart — that is the whole one-time setup. No Shizuku? Connect the " +
+                            "phone to a PC with USB once, run 'adb tcpip 5555', unplug, then tap Set up bridge " +
+                            "here and approve the “Allow USB debugging?” prompt. Wireless debugging is another " +
+                            "way to open the same port.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(Space.md))
+                    val shizukuActive = status.state == AccessState.READY &&
+                        status.shellSource == "Shizuku"
                     val adbLine = when {
+                        shizukuActive ->
+                            "Shizuku is active — Qstats has shell access and reads live FPS. No ADB key is " +
+                                "needed. Keep Shizuku “Start on boot” ON; it reconnects by itself after every " +
+                                "restart."
                         status.adbReady && status.adbAuthorised ->
                             "Bridge: connected on 127.0.0.1:5555. Key saved — auto-reconnect is on."
                         status.adbReady ->
                             "Bridge: connected on 127.0.0.1:5555 — live FPS works now. Key not saved. " +
-                                "Start Shizuku-Next, grant Qstats permission, then tap “Install key” once."
+                                "Start Shizuku-Next and grant Qstats permission; then no key is needed."
                         adbAuth == AdbAuthState.PROMPT_SENT ->
                             "Bridge: waiting for the “Allow USB debugging?” prompt on your phone. " +
                                 "Tick “Always allow”, tap Allow, then Reconnect."
@@ -335,17 +342,19 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Spacer(Modifier.height(Space.xs))
-                    val fingerprint = status.adbFingerprint
-                    Text(
-                        text = if (fingerprint.isBlank()) {
-                            "Key fingerprint: --"
-                        } else {
-                            "Key fingerprint: $fingerprint"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (!shizukuActive) {
+                        Spacer(Modifier.height(Space.xs))
+                        val fingerprint = status.adbFingerprint
+                        Text(
+                            text = if (fingerprint.isBlank()) {
+                                "Key fingerprint: --"
+                            } else {
+                                "Key fingerprint: $fingerprint"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     val message = adbMessage
                     if (message != null) {
                         Spacer(Modifier.height(Space.sm))
@@ -395,7 +404,7 @@ fun SettingsScreen(
                             Text("Reconnect")
                         }
                     }
-                    if (status.adbReady && !status.adbAuthorised) {
+                    if (!shizukuActive && status.adbReady && !status.adbAuthorised) {
                         Spacer(Modifier.height(Space.xs))
                         FilledTonalButton(
                             enabled = !checking,

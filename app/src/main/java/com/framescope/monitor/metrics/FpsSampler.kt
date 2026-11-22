@@ -635,7 +635,7 @@ class FpsSampler(
         activeSource = FpsSourceKind.TIMESTATS
         measuredLayer = reading.layer
         val ageMs = (SystemClock.elapsedRealtime() - reading.readAtElapsedMs).coerceAtLeast(0L)
-        return publish(
+        publish(
             fps = reading.fps,
             frameTimeMs = reading.frameTimeMs,
             source = "SurfaceFlinger presented frames",
@@ -648,6 +648,7 @@ class FpsSampler(
             appPackage = reading.appPackage,
             nowUptime = reading.nowUptime
         )
+        return _state.value
     }
 
     /** Reads and immediately publishes the device-wide presented-frame counter. */

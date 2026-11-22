@@ -72,9 +72,6 @@ class FpsSampler(
     var foregroundApp: String? = null
         private set
 
-    /** Whether the previous target was a game, so a game number is never carried home. */
-    private var lastTargetWasGame = false
-
     /** Cached answer about whether the current target owns a game-style surface. */
     private var gameCheckPackage: String? = null
     private var gameCheckResult = false
@@ -267,7 +264,6 @@ class FpsSampler(
         globalCounterUnavailable = false
         currentThermalStatus = null
         capTracker.reset()
-        lastTargetWasGame = false
         gameCheckPackage = null
         gameCheckResult = false
         gameCheckAtMs = 0L
@@ -386,11 +382,10 @@ class FpsSampler(
             looksLikeGameTarget(pkg, nowMs)
 
         if (pkg != foregroundApp) {
-            // Only a game number is forbidden on another target. Clearing the
-            // device-wide baseline here used to reset it every time the pill
-            // took focus, leaving the home screen forever "warming up".
-            onTargetChanged(pkg, clearFps = lastTargetWasGame || gameTarget)
-            lastTargetWasGame = gameTarget
+            // Reset only the per-layer baselines. Never blank the published FPS
+            // here: usage access is approximate and flips between the game and
+            // the launcher, and every flip used to blank the pill to "--".
+            onTargetChanged()
         }
         foregroundApp = pkg
         if (detectedGame) {
@@ -405,41 +400,37 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // The device-wide counter counts EVERY surface: the game, Qstats' pill and
-        // anything else the compositor presents. It is the live screen FPS for home
-        // and other apps, but never for a game - that is how dragging the pill used
-        // to turn a 90 fps match into 144. It is tried FIRST for a non-game so the
-        // pill never waits for slow per-layer probes and then shows nothing.
-        if (!gameTarget) {
-            // TimeStats prints nothing until it is switched on. Make sure the
-            // device-wide counter exists before asking for its totalFrames line.
-            counters.ensureReady()
-            val fromGlobal = sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
-            if (fromGlobal != null) return fromGlobal
+        // TimeStats prints nothing until it is switched on. Make sure the
+        // device-wide counter exists before asking for its totalFrames line.
+        counters.ensureReady()
 
-            // A short window is only a delay; the next poll must arrive quickly
-            // so the window can finish. Do not start second-long layer probes
-            // here, they used to push the next poll past the window forever.
-            if (globalWindowPending && !globalCounterUnavailable) {
-                return publishUnavailable(
-                    source = "SurfaceFlinger presented frames",
-                    kind = FpsSourceKind.TIMESTATS,
-                    reason = "Waiting for the next frame window of $pkg",
-                    availability = MetricAvailability.WARMING_UP,
-                    nowUptime = nowUptime
-                )
-            }
+        // The device-wide counter counts every surface the compositor presents.
+        // On the home screen and other apps it IS the live screen FPS, so it is
+        // tried first: it cannot be blocked by a slow per-layer probe.
+        val fromGlobalEarly = if (!gameTarget) {
+            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
+        } else null
+        if (fromGlobalEarly != null) return fromGlobalEarly
+
+        // A short window is only a delay; the next poll must arrive quickly so
+        // the window can finish. Do not start second-long layer probes here,
+        // they used to push the next poll past the window forever.
+        if (!gameTarget && globalWindowPending && !globalCounterUnavailable) {
+            return publishUnavailable(
+                source = "SurfaceFlinger presented frames",
+                kind = FpsSourceKind.TIMESTATS,
+                reason = "Waiting for the next frame window of $pkg",
+                availability = MetricAvailability.WARMING_UP,
+                nowUptime = nowUptime
+            )
         }
 
         // Scene measures the target from the frames of its own layer. A game's
-        // layer is the only honest source for its FPS; on the home screen this
-        // is a fallback for builds where the device-wide counter is missing.
+        // layer is the honest source for its FPS and is tried first for a game;
+        // on other screens these are only a fallback to the device-wide counter.
         val fromScene = sampleFromSceneLatency(pkg, nowUptime)
         if (fromScene != null) return fromScene
 
-        // TimeStats counters are the fallback when a build keeps no present
-        // timestamps for the layer. They are selected by package/uid, so an
-        // overlay counter can never win this step.
         val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
         if (fromCounters != null) return fromCounters
 
@@ -451,6 +442,15 @@ class FpsSampler(
 
         val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
         if (fromGfx != null) return fromGfx
+
+        // A game's own layer can stop answering entirely (many ROMs keep no
+        // present counter for the game's buffer). Without this fallback the pill
+        // blanks to "--" mid-match and restarts, which is the gap the user sees.
+        // The counter is labelled honestly as SurfaceFlinger presented frames.
+        val fromGlobalLate = if (gameTarget) {
+            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
+        } else null
+        if (fromGlobalLate != null) return fromGlobalLate
 
         // A layer was found and it is still warming up - that is a better answer
         // than "no source".
@@ -1323,7 +1323,7 @@ class FpsSampler(
     }
 
     /** Starts the per-layer counters again because the app in front changed. */
-    private fun onTargetChanged(pkg: String?, clearFps: Boolean) {
+    private fun onTargetChanged() {
         latencyCounter.reset()
         gfxCounter.reset()
         resetSceneCounters()
@@ -1338,19 +1338,9 @@ class FpsSampler(
         history.clear()
         sweepNextAttemptAt = 0L
         idleSweepNextAt = 0L
-        // The device-wide counter is continuous. Clearing its baseline whenever
-        // the pill briefly took focus left only one sample and the home screen
-        // showed "--" forever. Its samples are timestamped and stale ones are
-        // dropped when the counter is read.
-        if (clearFps && pkg != null) {
-            // Only a game's number may not be carried onto another target.
-            // Switching between non-game screens keeps the live reading, which
-            // is then replaced by the device-wide counter on the next poll.
-            _state.value = FpsState(
-                availability = MetricAvailability.WARMING_UP,
-                reason = "Waiting for $pkg to present frames"
-            )
-        }
+        // The published FPS is deliberately left untouched. The device-wide
+        // counter is continuous and replaces it within one poll; blanking here
+        // made the pill show "--" on every approximate foreground flip.
     }
 
     /** Publishes a measurement. */

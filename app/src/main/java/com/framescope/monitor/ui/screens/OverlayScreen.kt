@@ -134,9 +134,6 @@ fun OverlayScreen(
                         HudPreview(
                             fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
                             frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
-                            refreshText = system.refreshHz.finiteOrNull()?.let {
-                                "DISPLAY ${it.toInt()} Hz"
-                            } ?: "DISPLAY -- Hz",
                             cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
                             history = fps.history,
                             style = styleOption.name,
@@ -151,9 +148,6 @@ fun OverlayScreen(
                     HudPreview(
                         fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
                         frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
-                        refreshText = system.refreshHz.finiteOrNull()?.let {
-                            "DISPLAY ${it.toInt()} Hz"
-                        } ?: "DISPLAY -- Hz",
                         cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
                         history = fps.history,
                         style = style,
@@ -381,7 +375,6 @@ fun OverlayScreen(
 private fun HudPreview(
     fpsText: String,
     frameText: String,
-    refreshText: String = "DISPLAY -- Hz",
     cpuText: String,
     history: List<Float>,
     style: String,
@@ -395,7 +388,6 @@ private fun HudPreview(
         PillPreview(
             fpsText = fpsText,
             frameText = frameText,
-            refreshText = refreshText,
             label = label,
             caption = caption
         )
@@ -504,7 +496,6 @@ private fun HudPreview(
 private fun PillPreview(
     fpsText: String,
     frameText: String,
-    refreshText: String,
     label: String,
     caption: String
 ) {
@@ -551,13 +542,6 @@ private fun PillPreview(
                             modifier = Modifier.padding(bottom = 1.dp)
                         )
                     }
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = refreshText,
-                        style = MonoBlock.copy(fontSize = 8.sp),
-                        color = HudMuted,
-                        modifier = Modifier.padding(bottom = 2.dp)
-                    )
                 }
             }
             Spacer(Modifier.width(Space.md))

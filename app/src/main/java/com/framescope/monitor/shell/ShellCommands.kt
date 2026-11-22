@@ -266,39 +266,39 @@ object ShellCommands {
      * (KGSL gpubusy, devfreq busy_time/total_time). Only a file that exists and holds
      * plausible numbers is used, so an absent counter stays "--" and never becomes 0.
      */
-    fun gpuBusy(): String = """
-        for f in /sys/class/kgsl/kgsl-*/gpu_busy_percentage \
-                 /sys/class/misc/mali0/device/utilisation \
-                 /sys/class/misc/mali0/device/utilization \
-                 /sys/devices/platform/*.gpu/utilisation \
-                 /sys/class/gpu*/utilization \
-                 /sys/kernel/gpu/gpu_busy; do
-            [ -r "\$f" ] || continue
-            v=\$(cat "\$f" 2>/dev/null)
-            p=\$(printf '%s' "\$v" | tr -cd '0-9.' 2>/dev/null)
-            case "\$p" in ''|*[!0-9.]*) continue ;; esac
-            p=\${p%%.*}
-            [ -n "\$p" ] && echo "GPUPCT=\$p" && break
-        done
-        for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-*/devfreq \
-                 /sys/class/kgsl/kgsl-* /sys/devices/platform/*.gpu/devfreq; do
-            if [ -r "\$d/busy_time" ] && [ -r "\$d/total_time" ]; then
-                b=\$(cat "\$d/busy_time" 2>/dev/null)
-                t=\$(cat "\$d/total_time" 2>/dev/null)
-                case "\$b:\$t" in
-                    *[!0-9:]*) ;;
-                    *:*) [ -n "\$b" ] && [ -n "\$t" ] && echo "GPUBUSY=\$b:\$t" && break ;;
-                esac
-            fi
-            if [ -r "\$d/gpubusy" ]; then
-                v=\$(cat "\$d/gpubusy" 2>/dev/null | tr '\t' ' ')
-                case "\$v" in
-                    *@*) b=\${v%@*}; t=\${v#*@}; echo "GPUBUSY=\$b:\$t"; break ;;
-                    *" "*) b=\${v%% *}; t=\${v##* }; echo "GPUBUSY=\$b:\$t"; break ;;
-                esac
-            fi
-        done
-    """.trimIndent()
+    fun gpuBusy(): String = listOf(
+        "for f in /sys/class/kgsl/kgsl-*/gpu_busy_percentage " +
+            "/sys/class/misc/mali0/device/utilisation " +
+            "/sys/class/misc/mali0/device/utilization " +
+            "/sys/devices/platform/*.gpu/utilisation " +
+            "/sys/class/gpu*/utilization " +
+            "/sys/kernel/gpu/gpu_busy; do",
+        "  [ -r \"\$f\" ] || continue",
+        "  v=\$(cat \"\$f\" 2>/dev/null)",
+        "  p=\$(printf '%s' \"\$v\" | tr -cd '0-9.' 2>/dev/null)",
+        "  case \"\$p\" in ''|*[!0-9.]*) continue ;; esac",
+        "  p=\${p%%.*}",
+        "  [ -n \"\$p\" ] && echo \"GPUPCT=\$p\" && break",
+        "done",
+        "for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-*/devfreq " +
+            "/sys/class/kgsl/kgsl-* /sys/devices/platform/*.gpu/devfreq; do",
+        "  if [ -r \"\$d/busy_time\" ] && [ -r \"\$d/total_time\" ]; then",
+        "    b=\$(cat \"\$d/busy_time\" 2>/dev/null)",
+        "    t=\$(cat \"\$d/total_time\" 2>/dev/null)",
+        "    case \"\$b:\$t\" in",
+        "      *[!0-9:]*) ;;",
+        "      *:*) [ -n \"\$b\" ] && [ -n \"\$t\" ] && echo \"GPUBUSY=\$b:\$t\" && break ;;",
+        "    esac",
+        "  fi",
+        "  if [ -r \"\$d/gpubusy\" ]; then",
+        "    v=\$(cat \"\$d/gpubusy\" 2>/dev/null | tr '\\t' ' ')",
+        "    case \"\$v\" in",
+        "      *@*) b=\${v%@*}; t=\${v#*@}; echo \"GPUBUSY=\$b:\$t\"; break ;;",
+        "      *\" \"*) b=\${v%% *}; t=\${v##* }; echo \"GPUBUSY=\$b:\$t\"; break ;;",
+        "    esac",
+        "  fi",
+        "done"
+    ).joinToString("\n")
 
     fun displayInfo(): String =
         "dumpsys display 2>/dev/null | grep -m3 -E 'refreshRate|fps=' ; " +

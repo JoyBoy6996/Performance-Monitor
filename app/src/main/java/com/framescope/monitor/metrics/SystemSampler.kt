@@ -9,6 +9,7 @@ import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
+import java.io.File
 
 /**
  * The device metrics that need a privileged shell.
@@ -35,17 +36,23 @@ class SystemSampler(private val hub: ShellHub) {
     }
 
     /**
-     * Reads only the aggregate CPU load, in its own tiny shell call.
+     * Reads only the aggregate CPU load, straight from `/proc/stat`.
      *
      * The full batch also asks for SurfaceFlinger, thermals and every thread of the
      * game. Under load that batch can take seconds, and a late batch used to throw
      * the CPU reading away with it - which is why a finished match recorded 0% CPU.
-     * `/proc/stat` alone is instant, so CPU load is captured no matter how slow the
-     * other counters are.
+     * `/proc/stat` is world readable, so this read needs no shell at all and can
+     * never be delayed by the other counters.
      */
     suspend fun sampleCpu(): Float? {
-        val dump = hub.execOrNull(ShellCommands.cpuStat(), FAST_CPU_TIMEOUT_MS)?.out.orEmpty()
-        val current = Parsers.parseCpuStat(dump) ?: return null
+        val dump = try {
+            File("/proc/stat").bufferedReader().use { it.readText() }
+        } catch (_: Exception) {
+            // A few ROMs hide /proc/stat from the app process. The shell can still
+            // read it, so fall back instead of losing the CPU reading.
+            hub.execOrNull(ShellCommands.cpuStat(), 1_500L)?.out.orEmpty()
+        }
+        val current = Parsers.parseCpuStat(dump).takeIf { it != null } ?: return null
         val value = cpuPercentBetween(lastFastCpu, current)
         lastFastCpu = current
         return value
@@ -269,8 +276,4 @@ class SystemSampler(private val hub: ShellHub) {
         return usage.toFloat().coerceIn(0f, 100f)
     }
 
-    companion object {
-        /** `/proc/stat` is instant; this only guards against a wedged shell. */
-        private const val FAST_CPU_TIMEOUT_MS = 1_500L
-    }
 }

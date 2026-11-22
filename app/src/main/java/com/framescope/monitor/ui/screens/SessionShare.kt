@@ -44,15 +44,16 @@ private const val PAGE_H = 1754
 private const val MARGIN = 60
 private const val CONTENT_W = PAGE_W - 2 * MARGIN
 
-private val BG = Color.parseColor("#0B1220")
-private val CARD = Color.parseColor("#152139")
-private val PRIMARY = Color.parseColor("#E8EEF7")
-private val MUTED = Color.parseColor("#9AA9BF")
-private val GREEN = Color.parseColor("#22C55E")
-private val AMBER = Color.parseColor("#F59E0B")
-private val RED = Color.parseColor("#EF4444")
-private val CYAN = Color.parseColor("#38BDF8")
-private val GRID = Color.parseColor("#26354D")
+private val BG = Color.parseColor("#FFFFFF")
+private val CARD = Color.parseColor("#F6F8FB")
+private val PRIMARY = Color.parseColor("#111827")
+private val MUTED = Color.parseColor("#5B6472")
+private val GREEN = Color.parseColor("#0F766E")
+private val AMBER = Color.parseColor("#B45309")
+private val RED = Color.parseColor("#B91C1C")
+private val CYAN = Color.parseColor("#0369A1")
+private val GRID = Color.parseColor("#DDE3EB")
+private val BRAND = Color.parseColor("#111827")
 
 private data class ShareStat(val label: String, val value: String, val color: Int)
 
@@ -109,23 +110,32 @@ private class ReportPainter {
         this.color = color
     }
 
-    private val titlePaint = paint(46f, Typeface.BOLD, PRIMARY)
-    private val subPaint = paint(22f, Typeface.NORMAL, MUTED)
-    private val sectionPaint = paint(27f, Typeface.BOLD, GREEN)
-    private val labelPaint = paint(20f, Typeface.NORMAL, MUTED)
-    private val valuePaint = paint(32f, Typeface.BOLD, PRIMARY)
-    private val metricLabelPaint = paint(21f, Typeface.NORMAL, MUTED)
-    private val metricValuePaint = paint(21f, Typeface.BOLD, PRIMARY).apply {
+    private val brandPaint = paint(21f, Typeface.BOLD, BRAND)
+    private val titlePaint = paint(52f, Typeface.BOLD, PRIMARY)
+    private val subPaint = paint(23f, Typeface.NORMAL, MUTED)
+    private val sectionPaint = paint(28f, Typeface.BOLD, BRAND)
+    private val labelPaint = paint(22f, Typeface.NORMAL, MUTED)
+    private val valuePaint = paint(30f, Typeface.BOLD, PRIMARY)
+    private val metricLabelPaint = paint(23f, Typeface.NORMAL, MUTED)
+    private val metricValuePaint = paint(23f, Typeface.BOLD, PRIMARY).apply {
         textAlign = Paint.Align.RIGHT
     }
-    private val chartTitlePaint = paint(21f, Typeface.BOLD, PRIMARY)
-    private val smallPaint = paint(18f, Typeface.NORMAL, MUTED)
-    private val footPaint = paint(17f, Typeface.NORMAL, MUTED)
+    private val chartTitlePaint = paint(24f, Typeface.BOLD, PRIMARY)
+    private val smallPaint = paint(21f, Typeface.NORMAL, MUTED)
+    private val footPaint = paint(19f, Typeface.NORMAL, MUTED)
+    private val pagePaint = paint(19f, Typeface.NORMAL, MUTED).apply {
+        textAlign = Paint.Align.RIGHT
+    }
 
-    private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = GREEN }
+    private val barPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = BRAND }
     private val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = CARD }
     private val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = GRID }
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = GRID }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = GRID
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+    }
     private val targetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AMBER
         strokeWidth = 2f
@@ -144,7 +154,7 @@ private class ReportPainter {
         val bitmap = Bitmap.createBitmap(PAGE_W, PAGE_H, Bitmap.Config.ARGB_8888)
         canvas = Canvas(bitmap)
         canvas.drawColor(BG)
-        canvas.drawRect(0f, 0f, PAGE_W.toFloat(), 8f, barPaint)
+        canvas.drawRect(0f, 0f, PAGE_W.toFloat(), 5f, barPaint)
         y = MARGIN.toFloat()
         pages.add(bitmap)
     }
@@ -158,55 +168,57 @@ private class ReportPainter {
     }
 
     fun header(appName: String, dateLine: String) {
-        ensure(170f)
-        text(appName, MARGIN.toFloat(), y + 50, titlePaint)
-        y += 82f
+        ensure(200f)
+        text("QSTATS", MARGIN.toFloat(), y, brandPaint)
+        text(
+            "SESSION REPORT",
+            (MARGIN + 118).toFloat(), y, smallPaint
+        )
+        y += 50f
+        text(appName, MARGIN.toFloat(), y + 20, titlePaint)
+        y += 54f
         text(dateLine, MARGIN.toFloat(), y, subPaint)
-        y += 26f
-        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, dividerPaint)
-        y += 40f
+        y += 28f
+        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, barPaint)
+        y += 42f
     }
 
     fun section(title: String) {
-        ensure(70f)
-        canvas.drawRect(MARGIN.toFloat(), y - 22f, (MARGIN + 6).toFloat(), y + 6f, barPaint)
-        text(title, (MARGIN + 22).toFloat(), y + 4, sectionPaint)
-        y += 46f
+        ensure(76f)
+        text(title.uppercase(Locale.US), MARGIN.toFloat(), y, sectionPaint)
+        y += 16f
+        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, dividerPaint)
+        y += 34f
     }
 
+    /** A plain table reads like a report; glowing cards made the old export look fake. */
     fun statGrid(items: List<ShareStat>, columns: Int = 3) {
         val rows = (items.size + columns - 1) / columns
-        val cellH = 116f
-        val gap = 12f
-        ensure(rows * cellH + 8f)
-        val cw = (CONTENT_W - gap * (columns - 1)) / columns
+        val cellH = 100f
+        ensure(rows * cellH + 12f)
+        val cw = CONTENT_W.toFloat() / columns
         items.forEachIndexed { index, item ->
-            val x = MARGIN + (index % columns) * (cw + gap)
+            val x = MARGIN + (index % columns) * cw
             val cy = y + (index / columns) * cellH
-            canvas.drawRoundRect(
-                RectF(x, cy, x + cw, cy + cellH - gap), 14f, 14f, cardPaint
-            )
-            labelPaint.color = MUTED
-            text(item.label, x + 16f, cy + 30f, labelPaint)
+            canvas.drawRect(RectF(x, cy, x + cw, cy + cellH), borderPaint)
+            text(item.label, x + 18f, cy + 34f, labelPaint)
             valuePaint.color = item.color
-            valuePaint.textSize = if (item.value.length > 8) 25f else 32f
-            text(item.value, x + 16f, cy + 78f, valuePaint)
-            valuePaint.textSize = 32f
+            valuePaint.textSize = if (item.value.length > 10) 25f else 30f
+            text(item.value, x + 18f, cy + 76f, valuePaint)
+            valuePaint.textSize = 30f
         }
-        y += rows * cellH
+        y += rows * cellH + 16f
     }
 
     fun metricRow(label: String, value: String, color: Int = PRIMARY) {
-        ensure(48f)
+        ensure(56f)
         metricLabelPaint.color = MUTED
-        text(label, (MARGIN + 8).toFloat(), y + 16, metricLabelPaint)
+        text(label, MARGIN.toFloat(), y + 18, metricLabelPaint)
         metricValuePaint.color = color
-        text(value, (PAGE_W - MARGIN - 8).toFloat(), y + 16, metricValuePaint)
-        y += 24f
-        canvas.drawLine(
-            (MARGIN + 8).toFloat(), y, (PAGE_W - MARGIN - 8).toFloat(), y, dividerPaint
-        )
-        y += 14f
+        text(value, (PAGE_W - MARGIN).toFloat(), y + 18, metricValuePaint)
+        y += 30f
+        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, dividerPaint)
+        y += 18f
     }
 
     fun paragraph(value: String) {
@@ -239,20 +251,24 @@ private class ReportPainter {
         unit: String,
         target: Float? = null
     ) {
-        val height = 300f
+        val height = 340f
         ensure(height)
         val top = y
-        canvas.drawRoundRect(
-            RectF(MARGIN.toFloat(), top, (PAGE_W - MARGIN).toFloat(), top + height - 12f),
-            16f, 16f, cardPaint
+        canvas.drawRect(
+            RectF(MARGIN.toFloat(), top, (PAGE_W - MARGIN).toFloat(), top + height - 8f),
+            cardPaint
+        )
+        canvas.drawRect(
+            RectF(MARGIN.toFloat(), top, (PAGE_W - MARGIN).toFloat(), top + height - 8f),
+            borderPaint
         )
         chartTitlePaint.color = PRIMARY
-        text(title, (MARGIN + 20).toFloat(), top + 34, chartTitlePaint)
+        text(title, (MARGIN + 20).toFloat(), top + 40, chartTitlePaint)
 
         val x0 = (MARGIN + 24).toFloat()
         val x1 = (PAGE_W - MARGIN - 24).toFloat()
-        val cy0 = top + 56f
-        val cy1 = top + 208f
+        val cy0 = top + 70f
+        val cy1 = top + 252f
         for (i in 0..3) {
             val gy = cy0 + (cy1 - cy0) * i / 3f
             canvas.drawLine(x0, gy, x1, gy, gridPaint)
@@ -298,20 +314,29 @@ private class ReportPainter {
         text(
             "MIN ${fmt(points.minOrNull(), 1)}   AVG ${fmt(average, 1)}   " +
                 "MAX ${fmt(points.maxOrNull(), 1)} $unit",
-            (MARGIN + 20).toFloat(), top + 252, smallPaint
+            (MARGIN + 20).toFloat(), top + 296, smallPaint
         )
         y += height
     }
 
-    fun footer() {
-        ensure(60f)
-        y += 8f
-        canvas.drawLine(MARGIN.toFloat(), y, (PAGE_W - MARGIN).toFloat(), y, dividerPaint)
-        y += 28f
-        text(
-            "FrameScope  ·  real recorded data only  ·  unavailable values shown as --",
-            MARGIN.toFloat(), y, footPaint
-        )
+    /** Drawn on every page, including the ones that were filled before the last one. */
+    fun finish() {
+        pages.forEachIndexed { index, bitmap ->
+            val pageCanvas = Canvas(bitmap)
+            val baseline = (PAGE_H - MARGIN + 22).toFloat()
+            pageCanvas.drawLine(
+                MARGIN.toFloat(), baseline - 30f, (PAGE_W - MARGIN).toFloat(),
+                baseline - 30f, dividerPaint
+            )
+            pageCanvas.drawText(
+                "Qstats  ·  real recorded data only  ·  unavailable values shown as --",
+                MARGIN.toFloat(), baseline, footPaint
+            )
+            pageCanvas.drawText(
+                "${index + 1} / ${pages.size}",
+                (PAGE_W - MARGIN).toFloat(), baseline, pagePaint
+            )
+        }
     }
 }
 
@@ -480,7 +505,7 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
     )
     painter.metricRow("Battery", beforeAfterValue(session.batterySeries, 0, "%"))
 
-    painter.footer()
+    painter.finish()
     return painter.pages
 }
 
@@ -494,7 +519,7 @@ object SessionShare {
         runCatching {
             val pages = renderPages(session, threshold)
             val dir = File(context.filesDir, "exports").apply { mkdirs() }
-            val file = File(dir, "FrameScope_${safeName(session)}_${session.id}.pdf")
+            val file = File(dir, "Qstats_${safeName(session)}_${session.id}.pdf")
             val document = PdfDocument()
             try {
                 pages.forEachIndexed { index, bitmap ->
@@ -513,7 +538,7 @@ object SessionShare {
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "application/pdf"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_SUBJECT, "FrameScope - ${safeName(session)} session")
+                putExtra(Intent.EXTRA_SUBJECT, "Qstats - ${safeName(session)} session")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             context.startActivity(Intent.createChooser(send, "Share session PDF"))
@@ -527,7 +552,7 @@ object SessionShare {
             val uris = ArrayList<Uri>()
             pages.forEachIndexed { index, bitmap ->
                 val file = File(
-                    dir, "FrameScope_${safeName(session)}_${session.id}_p${index + 1}.png"
+                    dir, "Qstats_${safeName(session)}_${session.id}_p${index + 1}.png"
                 )
                 FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
                 uris.add(FileProvider.getUriForFile(context, "${context.packageName}.files", file))
@@ -535,7 +560,7 @@ object SessionShare {
             val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
                 type = "image/png"
                 putExtra(Intent.EXTRA_STREAM, uris)
-                putExtra(Intent.EXTRA_SUBJECT, "FrameScope - ${safeName(session)} session")
+                putExtra(Intent.EXTRA_SUBJECT, "Qstats - ${safeName(session)} session")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             context.startActivity(Intent.createChooser(send, "Share session images"))
@@ -555,7 +580,7 @@ fun SessionShareDialog(
         title = { Text("Share session") },
         text = {
             Text(
-                "Share the full Scene-style breakdown with charts for this match. " +
+                "Share the full Qstats breakdown with charts for this match. " +
                     "Pick PDF for one document, or Image for the same pages as pictures."
             )
         },

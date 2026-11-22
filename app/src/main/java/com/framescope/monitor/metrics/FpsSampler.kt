@@ -13,6 +13,7 @@ import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Samples real frame timings from SurfaceFlinger and system graphics pipelines.
@@ -372,6 +373,11 @@ class FpsSampler(
             )
         }
 
+        // TimeStats prints nothing until it is switched on. Do this before the
+        // game-layer check below: that check reads the same dump, and a first
+        // poll that saw an empty dump cached "not a game" for ten seconds.
+        counters.ensureReady()
+
         // A game is measured only from its own layer. Scene FPS Meter does the same:
         // it reads the present timestamps of the surface the game draws into, so a
         // moving overlay or a status-bar update cannot add frames to the reading.
@@ -400,10 +406,6 @@ class FpsSampler(
 
         pendingWarmUpReason = null
 
-        // TimeStats prints nothing until it is switched on. Make sure the
-        // device-wide counter exists before asking for its totalFrames line.
-        counters.ensureReady()
-
         // The device-wide counter counts every surface the compositor presents.
         // On the home screen and other apps it IS the live screen FPS, so it is
         // tried first: it cannot be blocked by a slow per-layer probe.
@@ -411,6 +413,14 @@ class FpsSampler(
             sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
         } else null
         if (fromGlobalEarly != null) return fromGlobalEarly
+
+        // For a game, warm the device-wide baseline with one quick read before
+        // the slow layer probes. Their dumps can take longer than the two-second
+        // baseline window, which used to clear it on every poll and leave the
+        // fallback with no window to measure at all.
+        val earlyGlobalReading = if (gameTarget) {
+            readGlobalFrames(pkg, nowUptime, appPackage = pkg)
+        } else null
 
         // A short window is only a delay; the next poll must arrive quickly so
         // the window can finish. Do not start second-long layer probes here,
@@ -428,29 +438,46 @@ class FpsSampler(
         // Scene measures the target from the frames of its own layer. A game's
         // layer is the honest source for its FPS and is tried first for a game;
         // on other screens these are only a fallback to the device-wide counter.
-        val fromScene = sampleFromSceneLatency(pkg, nowUptime)
-        if (fromScene != null) return fromScene
+        suspend fun readOwnLayer(): FpsState? =
+            sampleFromSceneLatency(pkg, nowUptime)
+                ?: sampleFromCounters(pkg, targetFps, nowUptime)
+                // Fallbacks for a game whose own counter entry is frozen. The
+                // unnamed "active layer" probe is not used: while the pill is
+                // dragged it answers for Qstats' own surface at 144 Hz.
+                ?: sampleFromLatency(pkg, targetFps, nowUptime)
+                ?: sampleFromGfxInfo(pkg, targetFps, nowUptime)
 
-        val fromCounters = sampleFromCounters(pkg, targetFps, nowUptime)
-        if (fromCounters != null) return fromCounters
-
-        // Fallbacks for a game whose own counter entry is frozen. The unnamed
-        // "active layer" probe was removed: while the pill is dragged it answers
-        // for Qstats' own surface at 144 Hz, which is not the game's FPS.
-        val fromLatency = sampleFromLatency(pkg, targetFps, nowUptime)
-        if (fromLatency != null) return fromLatency
-
-        val fromGfx = sampleFromGfxInfo(pkg, targetFps, nowUptime)
-        if (fromGfx != null) return fromGfx
+        // The game path still owns the first attempt, but it has a budget that
+        // leaves room for the honest device-wide fallback inside the sample
+        // timeout. A cancelled layer dump must not consume the whole poll.
+        val fromOwnLayer = if (gameTarget) {
+            withTimeoutOrNull(OWN_LAYER_BUDGET_MS) { readOwnLayer() }
+        } else {
+            readOwnLayer()
+        }
+        if (fromOwnLayer != null) return fromOwnLayer
 
         // A game's own layer can stop answering entirely (many ROMs keep no
         // present counter for the game's buffer). Without this fallback the pill
         // blanks to "--" mid-match and restarts, which is the gap the user sees.
         // The counter is labelled honestly as SurfaceFlinger presented frames.
-        val fromGlobalLate = if (gameTarget) {
-            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
-        } else null
-        if (fromGlobalLate != null) return fromGlobalLate
+        if (gameTarget) {
+            // Read again while the baseline is warm: this number is current.
+            val fromGlobalLate = sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
+            if (fromGlobalLate != null) return fromGlobalLate
+            // If the second read failed, the early window is still real. Show it
+            // with its true age instead of blanking the pill.
+            if (earlyGlobalReading != null) return publishGlobalFrames(earlyGlobalReading)
+            if (globalWindowPending && !globalCounterUnavailable) {
+                return publishUnavailable(
+                    source = "SurfaceFlinger presented frames",
+                    kind = FpsSourceKind.TIMESTATS,
+                    reason = "Waiting for the next frame window of $pkg",
+                    availability = MetricAvailability.WARMING_UP,
+                    nowUptime = nowUptime
+                )
+            }
+        }
 
         // A layer was found and it is still warming up - that is a better answer
         // than "no source".
@@ -501,8 +528,20 @@ class FpsSampler(
         return samples
     }
 
+    /** One usable device-wide frame-count window, kept until it is published. */
+    private data class GlobalFpsReading(
+        val fps: Float,
+        val frameTimeMs: Float,
+        val layer: String,
+        val totalFrames: Long,
+        val elapsedMs: Long,
+        val appPackage: String?,
+        val nowUptime: Long,
+        val readAtElapsedMs: Long = SystemClock.elapsedRealtime()
+    )
+
     /**
-     * The frames SurfaceFlinger counted while the current app was in front.
+     * Reads the device-wide counter and advances its baseline without publishing.
      *
      * The per-layer counter of a game can stay frozen while the game keeps
      * presenting frames; on this device the total at the top of the timestats
@@ -510,12 +549,17 @@ class FpsSampler(
      * running at 120). The growth over the one-second window is the reading, and
      * it cannot pick a wrong layer because it names no layer. That also makes it
      * the live screen FPS of the home screen or any non-game app.
+     *
+     * The read is separated from the publish so a game can keep this baseline
+     * warm while it tries its own layers first. Previously the slow layer dumps
+     * made every poll older than the two-second window, so the baseline was
+     * cleared and the fallback never had a window to measure.
      */
-    private suspend fun sampleFromGlobalCounter(
+    private suspend fun readGlobalFrames(
         pkg: String,
         nowUptime: Long,
         appPackage: String? = pkg
-    ): FpsState? {
+    ): GlobalFpsReading? {
         val dump = hub.execOrNull(
             ShellCommands.surfaceTotalFrames(),
             GLOBAL_COUNTER_TIMEOUT_MS
@@ -574,23 +618,46 @@ class FpsSampler(
         // match to 129. Hold the number at the cap it just crossed; never push a
         // reading upward, and leave every other source untouched.
         val settledFps = settleToGameCap(fps, displayHz)
-
-        activeSource = FpsSourceKind.TIMESTATS
-        measuredLayer = "the frames presented while $pkg was in front"
-        publish(
+        return GlobalFpsReading(
             fps = settledFps,
             frameTimeMs = 1_000f / settledFps,
+            layer = "the frames presented while $pkg was in front",
+            totalFrames = frames - baseline.second,
+            elapsedMs = elapsedMs,
+            appPackage = appPackage,
+            nowUptime = nowUptime,
+            readAtElapsedMs = nowMs
+        )
+    }
+
+    /** Publishes a device-wide window read on this poll or held as a fallback. */
+    private fun publishGlobalFrames(reading: GlobalFpsReading): FpsState {
+        activeSource = FpsSourceKind.TIMESTATS
+        measuredLayer = reading.layer
+        val ageMs = (SystemClock.elapsedRealtime() - reading.readAtElapsedMs).coerceAtLeast(0L)
+        return publish(
+            fps = reading.fps,
+            frameTimeMs = reading.frameTimeMs,
             source = "SurfaceFlinger presented frames",
             kind = FpsSourceKind.TIMESTATS,
-            layer = measuredLayer,
-            totalFrames = frames - baseline.second,
+            layer = reading.layer,
+            totalFrames = reading.totalFrames,
             jankFrames = 0L,
-            sampleAgeMs = 0L,
-            windowMs = elapsedMs,
-            appPackage = appPackage,
-            nowUptime = nowUptime
+            sampleAgeMs = ageMs,
+            windowMs = reading.elapsedMs,
+            appPackage = reading.appPackage,
+            nowUptime = reading.nowUptime
         )
-        return _state.value
+    }
+
+    /** Reads and immediately publishes the device-wide presented-frame counter. */
+    private suspend fun sampleFromGlobalCounter(
+        pkg: String,
+        nowUptime: Long,
+        appPackage: String? = pkg
+    ): FpsState? {
+        val reading = readGlobalFrames(pkg, nowUptime, appPackage) ?: return null
+        return publishGlobalFrames(reading)
     }
 
     /**
@@ -1560,6 +1627,13 @@ class FpsSampler(
 
         /** How long the device-wide counter may take to answer. */
         private const val GLOBAL_COUNTER_TIMEOUT_MS = 3_000L
+
+        /**
+         * How long a game's own layer sources get before the honest device-wide
+         * fallback is used. The rest of the sample budget is left for that
+         * fallback, so a slow layer dump can no longer blank the overlay.
+         */
+        private const val OWN_LAYER_BUDGET_MS = 4_500L
 
         /** How long a game-surface check may take, and how long it is trusted. */
         private const val GAME_CHECK_TIMEOUT_MS = 3_000L

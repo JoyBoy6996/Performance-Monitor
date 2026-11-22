@@ -138,12 +138,14 @@ class SystemSampler(private val hub: ShellHub) {
             }
             .mapNotNull { it.value.plausibleTempC(MAX_CHIP_TEMP_C) }
             .maxOrNull()
-        val maxThermal = (zones.mapNotNull(::zoneCelsius) +
+        // The matched chip zone is used for BOTH cpuTempC and socTempC. A generic
+        // "all sensors" maximum can be a battery skin reading and must not win.
+        val maxThermal = chipTemps.maxOrNull() ?: (zones.mapNotNull(::zoneCelsius) +
             thermals.values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) })
             .maxOrNull()
         val thermalStatus = Parsers.parseThermalStatus(part(3))
         val identity = Parsers.parseDeviceIdentity(part(10))
-        val detail = telemetryDetail(part(10), part(6) + "\n" + part(1), chipZones, cpuGroups)
+        val detail = telemetryDetail(part(10), identity.first, chipZones, cpuGroups)
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
         record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
@@ -200,37 +202,28 @@ class SystemSampler(private val hub: ShellHub) {
         return celsius.plausibleTempC(MAX_CHIP_TEMP_C)
     }
 
-    /** What actually answered the batch, written verbatim into the session Shell Logs. */
+    /**
+     * The exact identity line stored at the START of every recorded session and
+     * repeated in its Shell Logs card. Values come from the same batched Shizuku
+     * answer as the telemetry, never from Build.* guesses.
+     */
     private fun telemetryDetail(
         identityDump: String,
-        gpuDump: String,
+        platform: String?,
         chipZones: List<Parsers.ThermalZoneReading>,
         groups: List<CpuGroupMetric>
     ): String {
-        val uid = Parsers.parseShellUid(identityDump)
-        val transport = hub.telemetryShell.value
-        val shellLabel = if (transport == "None") "None" else if (uid != null) {
-            "$transport (uid=$uid)"
-        } else transport
-        val zone = chipZones.firstOrNull()
-        val zoneText = if (zone == null) {
+        val uid = Parsers.parseShellUid(identityDump) ?: "--"
+        val board = platform ?: "--"
+        val zone = chipZones.firstOrNull()?.path ?: "--"
+        val clusters = if (groups.isEmpty()) {
             "--"
         } else {
-            val raw = zone.raw
-            val value = raw?.let { if (it > 1_000f) it / 1_000f else it }
-            "${zone.path} (${zone.type}) = " +
-                (value?.let { String.format(Locale.US, "%.1f", it) } ?: "--") + "C"
+            groups.joinToString(", ") { group ->
+                "${group.name}:${group.freqMHz?.let { "$it" } ?: "--"}MHz"
+            }
         }
-        val clusterText = if (groups.isEmpty()) "--" else groups.joinToString(", ") { group ->
-            "${group.name}: ${group.freqMHz?.let { "$it MHz" } ?: "--"}"
-        }
-        return buildString {
-            appendLine("active shell: $shellLabel")
-            appendLine("shell user: ${Parsers.parseShellUser(identityDump) ?: "--"}")
-            appendLine("thermal zone: $zoneText")
-            appendLine("gpu sysfs path: ${Parsers.parseGpuPath(gpuDump) ?: "--"}")
-            appendLine("cluster mapping: $clusterText")
-        }.trimEnd()
+        return "shell_uid=$uid | platform=$board | thermal_zone=$zone | clusters=$clusters"
     }
 
     /** Source label for the extra Scene-style collectors, for the diagnostics report. */

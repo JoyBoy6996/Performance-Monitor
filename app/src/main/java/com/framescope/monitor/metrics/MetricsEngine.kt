@@ -469,7 +469,13 @@ class MetricsEngine(
         systemSampler.resetDeltas()
         _cpuPercent.value = null
         publishSystem()
-        sessionLogger.start(target, label, _system.value.batteryLevel, deviceSnapshot())
+        sessionLogger.start(
+            packageName = target,
+            label = label,
+            initialBattery = _system.value.batteryLevel,
+            device = deviceSnapshot(),
+            initialShellLog = telemetryHeaderLine()
+        )
         // A recording is its own heat story: start the peak from the temperature at
         // the moment Record was pressed, not from a hot session earlier today.
         val atStart = _system.value.deviceTemperatureC()
@@ -489,18 +495,15 @@ class MetricsEngine(
         return record
     }
 
+    /** Identity line captured the moment Record was pressed. */
+    private fun telemetryHeaderLine(): String =
+        _system.value.telemetryDetail.trim().takeIf { it.isNotBlank() }
+            ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
+
     /** A short, real collector snapshot stored with the run for its Shell Logs card. */
     private fun sessionShellLogs(): String = buildString {
         appendLine("captured_from=${lastMeasuredPackage.value ?: "(none)"} " +
             "at=${android.os.SystemClock.uptimeMillis()}")
-        // The identity recorded here is the one that actually answered the hardware
-        // batch, not the generic access status the UI happens to display.
-        val detail = _system.value.telemetryDetail.trim()
-        if (detail.isNotBlank()) {
-            appendLine(detail)
-        } else {
-            appendLine("active shell: ${hub.status.value.shellSource}")
-        }
         appendLine("--- window manager ---")
         appendLine(lastForegroundOutput().take(3_000).trim().ifBlank { "--" })
         appendLine("--- frame counters ---")

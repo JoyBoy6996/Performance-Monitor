@@ -1,6 +1,10 @@
 package com.framescope.monitor.ui.screens
 
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -16,7 +20,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -27,10 +38,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -65,9 +79,6 @@ private object Scene {
     val host = Color(0xFF4A90E2)
     val os = Color(0xFF3DDC84)
     val profile = Color(0xFFFF6B35)
-    val power = Color(0xFF2962FF)
-    val capacity = Color(0xFF90CAF9)
-    val cpuTemp = Color(0xFF81D4FA)
     val cluster = listOf(
         Color(0xFF9C27B0), Color(0xFF00BFA5), Color(0xFF2979FF), Color(0xFFFF9100)
     )
@@ -78,6 +89,7 @@ private fun sfmt(value: Float?, decimals: Int): String {
     return String.format(Locale.US, "%.${decimals}f", number)
 }
 
+/** Spaced form used in the "Long:" subtitle. */
 private fun sDuration(ms: Long): String {
     val total = ms / 1000
     val h = total / 3600
@@ -87,14 +99,35 @@ private fun sDuration(ms: Long): String {
     else String.format(Locale.US, "%dm %02ds", m, s)
 }
 
+/** Compact form used for the six chart ticks: 0, 1m7s, 2m14s ... */
+private fun sTick(ms: Long): String {
+    val total = ms / 1000
+    if (total <= 0L) return "0"
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return when {
+        h > 0 -> "${h}h${m}m${s}s"
+        m > 0 -> "${m}m${s}s"
+        else -> "${s}s"
+    }
+}
+
+private fun timeTicks(session: SessionRecord): List<String> =
+    (0..5).map { index -> sTick(session.durationMs * index / 5L) }
+
 private fun sPositive(values: List<Float>): List<Float> =
     values.mapNotNull { it.finiteOrNull()?.takeIf { v -> v > 0f } }
 
-private fun sPlausible(values: List<Float>): List<Float> =
-    values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
-
 private fun sChipTemperatures(values: List<Float>): List<Float> =
     values.mapNotNull { it.plausibleTempC(110f) }
+
+/** The named CPU/SoC sensor, with honest legacy fallbacks. Never battery skin. */
+private fun sTemperatureSeries(session: SessionRecord): List<Float> = sChipTemperatures(
+    session.cpuTempSeries.ifEmpty {
+        session.socTempSeries.ifEmpty { session.tempSeries }
+    }
+)
 
 private fun sColumns(values: List<List<Float?>>, index: Int): List<Float> =
     values.mapNotNull { it.getOrNull(index)?.finiteOrNull() }
@@ -107,6 +140,9 @@ private val tnumSmall = MonoInline.copy(
 )
 private val tnumAxis = MonoInline.copy(
     fontFeatureSettings = "tnum", fontSize = 9.sp, color = Scene.muted
+)
+private val tnumTick = MonoInline.copy(
+    fontFeatureSettings = "tnum", fontSize = 8.sp, color = Scene.muted
 )
 private val tnumValue = MonoInline.copy(
     fontFeatureSettings = "tnum", fontSize = 18.sp, fontWeight = FontWeight.Bold,
@@ -140,10 +176,7 @@ private fun SceneNumber(value: String) {
 /** One of the eight equal cells of the 2 x 4 KPI grid. */
 @Composable
 private fun RowScope.KpiCell(label: String, value: String, unit: String) {
-    Column(
-        Modifier.weight(1f),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
+    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = label, style = tnumSmall.copy(fontSize = 9.sp), maxLines = 1)
         SceneNumber(value)
         Text(text = unit, style = tnumSmall, maxLines = 1)
@@ -176,17 +209,18 @@ private data class ChartLineUi(
 )
 
 /**
- * Scene-style vector chart. Axis labels are passed top-to-bottom, so the largest
- * value is always drawn at the top and the smallest at the bottom.
+ * Full 160dp vector chart. Grid and all six time ticks are always drawn, even
+ * when a legacy session has no samples for a series.
  */
 @Composable
 private fun SceneLineChart(
     lines: List<ChartLineUi>,
     leftLabels: List<String>,
     rightLabels: List<String> = emptyList(),
-    height: Dp = 150.dp
+    timeLabels: List<String>,
+    height: Dp = 160.dp
 ) {
-    val plotHeight = height - 20.dp
+    val plotHeight = height - 24.dp
     val leftWidth = 34.dp
     val rightWidth = if (rightLabels.isEmpty()) 6.dp else 38.dp
     Box(Modifier.fillMaxWidth().height(height)) {
@@ -203,8 +237,8 @@ private fun SceneLineChart(
                 val y = bottom * index / lastTick
                 drawLine(Scene.border, Offset(0f, y), Offset(size.width, y), 1f)
             }
-            repeat(5) { index ->
-                val x = size.width * index / 4f
+            repeat(6) { index ->
+                val x = size.width * index / 5f
                 drawLine(Scene.border, Offset(x, 0f), Offset(x, bottom), 1f)
             }
             lines.forEach { line ->
@@ -234,10 +268,7 @@ private fun SceneLineChart(
             }
         }
         Column(
-            Modifier
-                .align(Alignment.TopStart)
-                .width(leftWidth)
-                .height(plotHeight),
+            Modifier.align(Alignment.TopStart).width(leftWidth).height(plotHeight),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.End
         ) {
@@ -245,15 +276,81 @@ private fun SceneLineChart(
         }
         if (rightLabels.isNotEmpty()) {
             Column(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .width(rightWidth)
-                    .height(plotHeight),
+                Modifier.align(Alignment.TopEnd).width(rightWidth).height(plotHeight),
                 verticalArrangement = Arrangement.SpaceBetween,
                 horizontalAlignment = Alignment.Start
             ) {
                 rightLabels.forEach { Text(text = it, style = tnumAxis, maxLines = 1) }
             }
+        }
+        Row(
+            Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .height(24.dp)
+                .padding(start = leftWidth, end = rightWidth),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            timeLabels.take(6).forEach {
+                Text(text = it, style = tnumTick, maxLines = 1)
+            }
+        }
+    }
+}
+
+/** Crisp 22dp Material vector icons, never coloured squares. */
+@Composable
+private fun DeviceIcon(kind: Int, tint: Color) {
+    val vector = when (kind) {
+        0 -> Icons.Filled.Memory
+        1 -> Icons.Filled.Smartphone
+        2 -> Icons.Filled.Android
+        else -> Icons.Filled.Speed
+    }
+    Icon(
+        imageVector = vector,
+        contentDescription = null,
+        tint = tint,
+        modifier = Modifier.size(22.dp)
+    )
+}
+
+private fun Drawable.toSquareBitmap(size: Int): Bitmap? = runCatching {
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(bitmap)
+    setBounds(0, 0, size, size)
+    draw(canvas)
+    bitmap
+}.getOrNull()
+
+/** Recorded game icon, with a clean gamepad fallback when the app is gone. */
+@Composable
+private fun AppIcon(packageName: String) {
+    val context = LocalContext.current
+    val bitmap = remember(packageName) {
+        runCatching { context.packageManager.getApplicationIcon(packageName) }
+            .getOrNull()?.toSquareBitmap(76)
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = null,
+            modifier = Modifier.size(38.dp).clip(RoundedCornerShape(8.dp))
+        )
+    } else {
+        Box(
+            Modifier
+                .size(38.dp)
+                .background(Scene.card, RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Filled.SportsEsports,
+                contentDescription = null,
+                tint = Scene.blue,
+                modifier = Modifier.size(22.dp)
+            )
         }
     }
 }
@@ -265,14 +362,11 @@ fun SceneSessionCards(
     threshold: Int,
     onUpdateNote: (String) -> Unit
 ) {
-    val peakSoc = listOfNotNull(session.maxTempC, session.tempSeries.maxOrNull())
+    val temperatures = sTemperatureSeries(session)
+    val peakSoc = listOfNotNull(session.maxTempC, temperatures.maxOrNull())
         .mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
         .maxOrNull()
-    val secondsAbove90 = session.tempSeries.count {
-        (it.plausibleTempC(MAX_HOTSPOT_TEMP_C) ?: 0f) >= 90f
-    }
-    var showCpuInOverview by remember(session.id) { mutableStateOf(true) }
-    var showGpuInOverview by remember(session.id) { mutableStateOf(true) }
+    val secondsAbove90 = temperatures.count { it >= 90f }
 
     Column(
         Modifier.fillMaxWidth().background(Scene.background),
@@ -297,29 +391,38 @@ fun SceneSessionCards(
             }
         }
 
-        // Card 2 - device info.
+        // Card 2 - device info with real vector icons.
         SceneCard {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                DeviceColumn("Platform", session.device.platform?.uppercase(Locale.US) ?: "--", Scene.platform)
-                DeviceColumn("Host", session.device.model ?: "--", Scene.host)
                 DeviceColumn(
-                    "OS",
-                    session.device.osVersion?.substringBefore(" (") ?: "--",
-                    Scene.os
+                    "Platform", session.device.platform?.uppercase(Locale.US) ?: "--",
+                    0, Scene.platform
                 )
-                DeviceColumn("Profile", session.device.profile ?: "Balanced", Scene.profile)
+                DeviceColumn(
+                    "Host",
+                    session.device.model?.replace(Regex("^vivo\\s+", RegexOption.IGNORE_CASE), "")
+                        ?: "--",
+                    1, Scene.host
+                )
+                DeviceColumn(
+                    "OS", session.device.osVersion?.substringBefore(" (") ?: "--",
+                    2, Scene.os
+                )
+                DeviceColumn("Profile", session.device.profile ?: "Balanced", 3, Scene.profile)
             }
         }
 
         // Card 3 - editable note.
         SceneNoteCard(session, onUpdateNote)
 
-        // Card 4 - game header and the complete 2 x 4 KPI grid.
+        // Card 4 - launcher icon, game title and the complete 2 x 4 KPI grid.
         SceneCard {
             val timestamp = remember(session.id) {
                 SimpleDateFormat("yyyy-MM-dd  HH:mm:ss", Locale.getDefault())
             }.format(Date(session.startedAt))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                AppIcon(session.appPackage)
+                Spacer(Modifier.size(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
                         session.appLabel.ifBlank { session.appPackage.substringAfterLast('.') },
@@ -334,7 +437,6 @@ fun SceneSessionCards(
             val jitter = session.jitterMs?.let { value ->
                 session.avgFrameTimeMs.takeIf { it > 0f }?.let { value / it * 100f }
             }
-            val chargerTemp = sPlausible(session.tempSeries)
             Row(Modifier.fillMaxWidth()) {
                 KpiCell("MAX", sfmt(session.maxFps, 1), "FPS")
                 KpiCell("MIN", sfmt(session.minFps, 1), "FPS")
@@ -344,64 +446,66 @@ fun SceneSessionCards(
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth()) {
                 KpiCell("1% LOW", sfmt(session.low1Percent, 1), "FPS")
-                KpiCell(
-                    "AVG",
-                    sfmt(sPlausible(session.tempSeries).avgOrNull(), 1),
-                    "SOC(°C)"
-                )
-                KpiCell("MAX", sfmt(chargerTemp.maxOrNull(), 1), "Battery(°C)")
-                KpiCell("AVG", sfmt(session.powerSeries.avgOrNull(), 2), "Power(W)")
+                KpiCell("AVG", sfmt(temperatures.avgOrNull(), 1), "SOC(°C)")
+                KpiCell("MAX", sfmt(temperatures.maxOrNull(), 1), "SOC(°C)")
+                KpiCell("AVG", sfmt(session.cpuSeries.avgOrNull(), 0), "CPU(%)")
             }
         }
 
-        // Card 5 - FPS and temperature.
+        // Card 5 - FPS + temperature on the right axis + CPU/GPU. One legend only.
         SceneCard {
             Text("FPS & Temperature(°C)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
             val fpsCeil = (sPositive(session.fpsSeries).maxOrNull() ?: 120f)
                 .let { if (it > 130f) 144f else 120f }
-            val lines = mutableListOf(
+            val lines = listOf(
                 ChartLineUi(session.fpsSeries, Scene.fps, 0f, fpsCeil),
-                ChartLineUi(sChipTemperatures(session.tempSeries), Scene.temp, 40f, 110f)
+                ChartLineUi(
+                    temperatures.map { it.coerceIn(0f, 110f) },
+                    Scene.temp, 0f, 110f, strokeWidth = 1.5f
+                ),
+                ChartLineUi(sPositive(session.cpuSeries), Scene.cpu, 0f, 100f),
+                ChartLineUi(sPositive(session.gpuPercentSeries), Scene.gpu, 0f, 100f)
             )
-            if (showCpuInOverview) {
-                lines.add(ChartLineUi(sPositive(session.cpuSeries), Scene.cpu, 0f, 100f))
-            }
-            if (showGpuInOverview) {
-                lines.add(ChartLineUi(sPositive(session.gpuPercentSeries), Scene.gpu, 0f, 100f))
-            }
             SceneLineChart(
                 lines = lines,
-                leftLabels = listOf(fpsCeil, fpsCeil * 0.8f, fpsCeil * 0.6f, fpsCeil * 0.4f,
-                    fpsCeil * 0.2f, 0f).map { sfmt(it, 0) },
-                rightLabels = listOf("110", "88", "66", "44", "22", "0")
+                leftLabels = listOf(
+                    fpsCeil, fpsCeil * 0.8f, fpsCeil * 0.6f,
+                    fpsCeil * 0.4f, fpsCeil * 0.2f, 0f
+                ).map { sfmt(it, 0) },
+                rightLabels = listOf("110", "88", "66", "44", "22", "0"),
+                timeLabels = timeTicks(session)
+            )
+            Legend(
+                "FPS" to Scene.fps,
+                "TEMP(°C)" to Scene.temp,
+                "CPU(%)" to Scene.cpu,
+                "GPU(%)" to Scene.gpu
             )
             Text(
-                "0                                        ${sDuration(session.durationMs)}",
-                style = tnumAxis, textAlign = TextAlign.Center,
+                "TEMP MAX: ${sfmt(temperatures.maxOrNull(), 1)}°C   " +
+                    "MIN: ${sfmt(temperatures.minOrNull(), 1)}°C   " +
+                    "AVG: ${sfmt(temperatures.avgOrNull(), 1)}°C",
+                style = tnumSmall, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                TextButton(onClick = { showCpuInOverview = !showCpuInOverview }) {
-                    Text("CPU(%)", style = tnumSmall, color = Scene.cpu)
-                }
-                TextButton(onClick = { showGpuInOverview = !showGpuInOverview }) {
-                    Text("GPU(%)", style = tnumSmall, color = Scene.gpu)
-                }
-            }
-            Legend("FPS" to Scene.fps, "TEMP" to Scene.temp, "CPU" to Scene.cpu, "GPU" to Scene.gpu)
         }
 
-        // Card 6 - frame time spikes.
+        // Card 6 - sharp 1.5dp frame-time spikes.
         SceneCard {
             Text("Frame Time(ms)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
             val maxFrame = (sPositive(session.frameTimeSeries).maxOrNull() ?: 100f)
                 .coerceAtLeast(100f)
             SceneLineChart(
-                lines = listOf(ChartLineUi(session.frameTimeSeries, Scene.frame, 0f, maxFrame,
-                    spikes = true, strokeWidth = 1.4f)),
-                leftLabels = (4 downTo 0).map { sfmt(maxFrame * it / 4f, 0) }
+                lines = listOf(
+                    ChartLineUi(
+                        session.frameTimeSeries, Scene.frame, 0f, maxFrame,
+                        spikes = true, strokeWidth = 1.5f
+                    )
+                ),
+                leftLabels = (5 downTo 0).map { sfmt(maxFrame * it / 5f, 0) },
+                timeLabels = timeTicks(session)
             )
             Text(
                 "MAX: ${sfmt(session.maxFrameTimeMs, 0)}ms",
@@ -414,106 +518,143 @@ fun SceneSessionCards(
         SceneCard {
             Text("CPU Usage(%)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
-            val groups = session.cpuGroupNames.mapIndexed { index, name ->
+            val groupLines = session.cpuGroupNames.mapIndexed { index, name ->
                 ChartLineUi(
                     sColumns(session.cpuGroupSeries, index),
                     Scene.cluster[index % Scene.cluster.size], 0f, 100f
                 )
             }
-            val lines = listOf(ChartLineUi(session.cpuSeries, Scene.total, 0f, 100f)) + groups
             SceneLineChart(
-                lines = lines,
-                leftLabels = listOf("100", "80", "60", "40", "20", "0")
+                lines = listOf(ChartLineUi(session.cpuSeries, Scene.total, 0f, 100f)) + groupLines,
+                leftLabels = listOf("100", "80", "60", "40", "20", "0"),
+                timeLabels = timeTicks(session)
             )
-            Legend(*((listOf("Total" to Scene.total) +
-                session.cpuGroupNames.mapIndexed { index, name ->
-                    name to Scene.cluster[index % Scene.cluster.size]
-                }).toTypedArray()))
+            Legend(
+                *((listOf("Total" to Scene.total) +
+                    session.cpuGroupNames.mapIndexed { index, name ->
+                        name to Scene.cluster[index % Scene.cluster.size]
+                    }).toTypedArray())
+            )
         }
 
-        // Card 8 - CPU frequency, one line per detected cluster.
+        // Card 8 - CPU frequency. Always a full grid, even for an empty legacy run.
         SceneCard {
             Text("CPU Frequency(MHz)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
-            val ceiling = maxOf(
-                4000f,
-                (session.cpuGroupFreqSeries.flatMap { row -> row.mapNotNull { it?.finiteOrNull() } }
-                    .maxOrNull() ?: 0f) * 1.05f
+            val allFreq = sPositive(
+                session.cpuGroupFreqSeries.flatMap { row -> row.mapNotNull { it?.finiteOrNull() } }
             )
-            val groups = session.cpuGroupNames.mapIndexed { index, name ->
+            val ceiling = maxOf(4000f, (allFreq.maxOrNull() ?: 0f) * 1.05f)
+            val groupLines = session.cpuGroupNames.mapIndexed { index, name ->
                 ChartLineUi(
                     sPositive(sColumns(session.cpuGroupFreqSeries, index)),
                     Scene.cluster[index % Scene.cluster.size], 0f, ceiling
                 )
             }
-            if (groups.isEmpty()) {
-                Text("No samples recorded", style = tnumSmall)
+            SceneLineChart(
+                lines = groupLines,
+                leftLabels = (5 downTo 0).map { sfmt(ceiling * it / 5f, 0) },
+                timeLabels = timeTicks(session)
+            )
+            Legend(
+                *(session.cpuGroupNames.ifEmpty { listOf("CPU") }
+                    .mapIndexed { index, name ->
+                        name to Scene.cluster[index % Scene.cluster.size]
+                    }.toTypedArray())
+            )
+            Text(
+                "MAX: ${sfmt(allFreq.maxOrNull(), 0)}MHz   " +
+                    "MIN: ${sfmt(allFreq.minOrNull(), 0)}MHz   " +
+                    "AVG: ${sfmt(allFreq.avgOrNull(), 0)}MHz",
+                style = tnumSmall, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Card 9 - per-core CPU detail.
+        SceneCard(radius = 10) {
+            Text("CPU Detail", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+            Spacer(Modifier.height(8.dp))
+            val loads = session.perCoreLoadSeries
+            val clocks = session.perCoreFreqSeries
+            val cores = maxOf(loads.size, clocks.size)
+            if (cores == 0) {
+                Text("Per-core: --", style = tnumSmall)
             } else {
-                SceneLineChart(
-                    lines = groups,
-                    leftLabels = (4 downTo 0).map { sfmt(ceiling * it / 4f, 0) }
-                )
+                repeat(cores) { core ->
+                    val load = sColumns(loads, core).avgOrNull()
+                    val clock = sPositive(
+                        sColumns(clocks.map { row -> row.map { it?.toFloat() } }, core)
+                    ).avgOrNull()
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("CPU $core", style = tnumSmall)
+                        Text(
+                            "${sfmt(load, 0)}%  ${sfmt(clock, 0)} MHz",
+                            style = tnumSmall.copy(color = Scene.text)
+                        )
+                    }
+                }
             }
-            Legend(*(session.cpuGroupNames.mapIndexed { index, name ->
-                name to Scene.cluster[index % Scene.cluster.size]
-            }.toTypedArray()))
         }
 
-        // Card 9 - power and capacity, dual axis, with a real chart.
-        SceneCard {
-            Text("Power(W) & Capacity(%)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+        // Card 10 - GPU and busiest threads.
+        SceneCard(radius = 10) {
+            Text("GPU & Threads", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
-            val power = sPositive(session.powerSeries)
-            val capacity = sPositive(session.batterySeries)
-            SceneLineChart(
-                lines = listOf(
-                    ChartLineUi(power, Scene.power, 0f, 8f),
-                    ChartLineUi(capacity, Scene.capacity, 0f, 100f)
-                ),
-                leftLabels = (8 downTo 0).map { it.toString() },
-                rightLabels = (100 downTo 0 step 20).map { it.toString() }
-            )
-            Legend("Power(W)" to Scene.power, "Capacity(%)" to Scene.capacity)
-            Text(
-                "MAX: ${sfmt(power.maxOrNull(), 2)}W   " +
-                    "MIN: ${sfmt(power.minOrNull(), 2)}W   " +
-                    "AVG: ${sfmt(power.avgOrNull(), 2)}W",
-                style = tnumSmall, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
+            val gpuLoad = sPositive(session.gpuPercentSeries)
+            val gpuClock = sPositive(session.gpuFreqSeries)
+            listOf(
+                "GPU LOAD AVG" to sfmt(gpuLoad.avgOrNull(), 1),
+                "GPU LOAD MAX" to sfmt(gpuLoad.maxOrNull(), 1),
+                "GPU CLOCK AVG" to sfmt(gpuClock.avgOrNull(), 0),
+                "GPU CLOCK MAX" to sfmt(gpuClock.maxOrNull(), 0),
+                "DDR CLOCK" to if (session.ddrFreqSeries.isEmpty()) "--"
+                else sfmt(session.ddrFreqSeries.average().toFloat(), 0)
+            ).forEach { row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(row.first, style = tnumSmall)
+                    Text(row.second, style = tnumSmall.copy(color = Scene.text))
+                }
+            }
+            if (session.threadNames.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text("Top threads", style = tnumSmall)
+                session.threadNames.take(6).forEachIndexed { index, name ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(name, style = tnumSmall, maxLines = 1)
+                        Text(
+                            sfmt(session.threadAvgLoads.getOrElse(index) { 0f }, 1) + "%",
+                            style = tnumSmall.copy(color = Scene.text)
+                        )
+                    }
+                }
+            }
         }
 
-        // Card 10 - real chip temperature with a real chart.
-        SceneCard {
-            Text("CPU Temperature(°C)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+        // Card 11 - exact start identity and the raw collector snapshot.
+        SceneCard(radius = 10) {
+            val identity = session.shellLogs.lineSequence()
+                .firstOrNull { it.startsWith("shell_uid=") }
+                ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
+            Text("Shell Logs", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
-            val cpuTemps = sChipTemperatures(
-                session.cpuTempSeries.ifEmpty { session.socTempSeries }
-            )
-            SceneLineChart(
-                lines = listOf(ChartLineUi(cpuTemps, Scene.cpuTemp, 0f, 110f, strokeWidth = 1.4f)),
-                leftLabels = (110 downTo 0 step 10).map { it.toString() }
-            )
+            Text(identity, style = tnumSmall.copy(color = Scene.blue))
+            Spacer(Modifier.height(6.dp))
             Text(
-                "MAX: ${sfmt(cpuTemps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${sfmt(cpuTemps.minOrNull(), 1)}°C   " +
-                    "AVG: ${sfmt(cpuTemps.avgOrNull(), 1)}°C",
-                style = tnumSmall, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
+                session.shellLogs.ifBlank { "--" },
+                style = tnumSmall.copy(fontSize = 9.sp),
+                maxLines = 14
             )
         }
-
-        // Card 11 - device detail and expandable shell logs.
-        DeviceDetailCard(session)
     }
 }
 
 @Composable
-private fun RowScope.DeviceColumn(label: String, value: String, color: Color) {
+private fun RowScope.DeviceColumn(label: String, value: String, icon: Int, color: Color) {
     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
         Text(text = label, style = tnumSmall, maxLines = 1)
         Spacer(Modifier.size(6.dp))
-        Box(Modifier.size(20.dp).background(color, RoundedCornerShape(6.dp)))
+        DeviceIcon(icon, color)
         Spacer(Modifier.size(6.dp))
         Text(text = value, style = tnumBody.copy(fontWeight = FontWeight.Bold), maxLines = 1)
     }
@@ -558,77 +699,5 @@ private fun SceneNoteCard(session: SessionRecord, onUpdateNote: (String) -> Unit
                 TextButton(onClick = { editing = false }) { Text("Cancel") }
             }
         )
-    }
-}
-
-@Composable
-private fun DeviceDetailCard(session: SessionRecord) {
-    var expanded by remember(session.id) { mutableStateOf(false) }
-    val cpuClock = sPositive(session.cpuFreqSeries)
-    val gpuLoad = sPositive(session.gpuPercentSeries)
-    val gpuClock = sPositive(session.gpuFreqSeries)
-    SceneCard(radius = 10) {
-        Row(
-            Modifier.fillMaxWidth().clickable { expanded = !expanded },
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text("Device Detail", style = tnumBody.copy(fontWeight = FontWeight.Bold))
-            Text(if (expanded) "Hide" else "Expand", style = tnumSmall, color = Scene.blue)
-        }
-        if (expanded) {
-            Spacer(Modifier.height(8.dp))
-            listOf(
-                "CPU CLOCK AVG" to sfmt(cpuClock.avgOrNull(), 0),
-                "CPU CLOCK MAX" to sfmt(cpuClock.maxOrNull(), 0),
-                "GPU LOAD AVG" to sfmt(gpuLoad.avgOrNull(), 1),
-                "GPU LOAD MAX" to sfmt(gpuLoad.maxOrNull(), 1),
-                "GPU CLOCK AVG" to sfmt(gpuClock.avgOrNull(), 0),
-                "GPU CLOCK MAX" to sfmt(gpuClock.maxOrNull(), 0)
-            ).forEach { row ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(row.first, style = tnumSmall)
-                    Text(row.second, style = tnumSmall.copy(color = Scene.text))
-                }
-            }
-            val loads = session.perCoreLoadSeries
-            val clocks = session.perCoreFreqSeries
-            val cores = maxOf(loads.size, clocks.size)
-            if (cores > 0) {
-                Spacer(Modifier.height(8.dp))
-                Text("Per-core (0-${cores - 1})", style = tnumSmall)
-                repeat(cores) { core ->
-                    val load = sColumns(loads, core).avgOrNull()
-                    val clock = sColumns(clocks.map { row -> row.map { it?.toFloat() } }, core)
-                        .avgOrNull()
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("CPU $core", style = tnumSmall)
-                        Text(
-                            "${sfmt(load, 0)}%  ${sfmt(clock, 0)} MHz",
-                            style = tnumSmall.copy(color = Scene.text)
-                        )
-                    }
-                }
-            }
-            if (session.threadNames.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                Text("Top threads", style = tnumSmall)
-                session.threadNames.take(6).forEachIndexed { index, name ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(name, style = tnumSmall, maxLines = 1)
-                        Text(
-                            sfmt(session.threadAvgLoads.getOrElse(index) { 0f }, 1) + "%",
-                            style = tnumSmall.copy(color = Scene.text)
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("Shell Logs", style = tnumSmall, color = Scene.muted)
-            Text(
-                session.shellLogs.ifBlank { "--" },
-                style = tnumSmall.copy(fontSize = 9.sp),
-                maxLines = 12
-            )
-        }
     }
 }

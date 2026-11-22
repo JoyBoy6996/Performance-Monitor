@@ -97,6 +97,8 @@ class SessionLogger(private val store: SessionStore) {
     private var startedAt = 0L
     private var startBattery: Int? = null
     private var deviceInfo = SessionDeviceInfo()
+    /** Real shell identity captured at the exact second Record was pressed. */
+    private var initialShellLog: String = ""
 
     private val samples = ArrayList<SessionSample>()
     private val secondBuckets = ArrayList<SecondBucket>()
@@ -161,7 +163,8 @@ class SessionLogger(private val store: SessionStore) {
         packageName: String,
         label: String,
         initialBattery: Int?,
-        device: SessionDeviceInfo = SessionDeviceInfo()
+        device: SessionDeviceInfo = SessionDeviceInfo(),
+        initialShellLog: String = ""
     ) {
         currentSessionId = UUID.randomUUID().toString()
         currentPackage = packageName
@@ -169,6 +172,7 @@ class SessionLogger(private val store: SessionStore) {
         startedAt = System.currentTimeMillis()
         startBattery = initialBattery
         deviceInfo = device
+        this.initialShellLog = initialShellLog.trim()
         isRecording = true
 
         samples.clear()
@@ -738,7 +742,10 @@ class SessionLogger(private val store: SessionStore) {
             avgCurrentMa = avgCurrent,
             voltageMv = voltage,
             batteryCycles = cycles,
-            shellLogs = shellLogs,
+            shellLogs = buildString {
+                if (initialShellLog.isNotBlank()) appendLine(initialShellLog)
+                if (shellLogs.isNotBlank()) appendLine(shellLogs.trim())
+            }.trimEnd(),
             displayHz = displayHzSeen
         )
 

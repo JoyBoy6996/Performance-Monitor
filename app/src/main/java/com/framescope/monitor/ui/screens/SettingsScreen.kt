@@ -314,8 +314,8 @@ fun SettingsScreen(
                         status.adbReady && status.adbAuthorised ->
                             "Bridge: connected on 127.0.0.1:5555. Key saved — auto-reconnect is on."
                         status.adbReady ->
-                            "Bridge: connected on 127.0.0.1:5555 — live FPS works now. Key not saved; " +
-                                "repeat setup once after reboot or USB toggle. Tick “Always allow” to save it."
+                            "Bridge: connected on 127.0.0.1:5555 — live FPS works now. Key not saved. " +
+                                "Start Shizuku-Next, grant Qstats permission, then tap “Install key” once."
                         adbAuth == AdbAuthState.PROMPT_SENT ->
                             "Bridge: waiting for the “Allow USB debugging?” prompt on your phone. " +
                                 "Tick “Always allow”, tap Allow, then Reconnect."
@@ -393,6 +393,29 @@ fun SettingsScreen(
                             }
                         ) {
                             Text("Reconnect")
+                        }
+                    }
+                    if (status.adbReady && !status.adbAuthorised) {
+                        Spacer(Modifier.height(Space.xs))
+                        FilledTonalButton(
+                            enabled = !checking,
+                            onClick = {
+                                checking = true
+                                adbMessage = "Installing Qstats' key with Shizuku..."
+                                scope.launch {
+                                    val result = runCatching { container.hub.installKeyWithShizuku() }
+                                        .getOrElse { it.describe() }
+                                    val refreshed = runCatching { container.hub.refresh() }
+                                        .getOrNull()
+                                    if (refreshed?.adbAuthorised == true) {
+                                        settings.setupCompleted.value = true
+                                    }
+                                    adbMessage = result
+                                    checking = false
+                                }
+                            }
+                        ) {
+                            Text("Install key")
                         }
                     }
                     Spacer(Modifier.height(Space.sm))

@@ -265,11 +265,13 @@ private class SceneReportRenderer(private val sink: PageSink) {
 
     fun deviceRow(session: SessionRecord) {
         card(168f) { x0, y0, x1, _ ->
-            val entries = listOf(
-                "Platform" to session.device.platform?.uppercase(Locale.US)?.ifBlank { "--" }?.let { it } ?: "--",
-                "Host" to session.device.model?.ifBlank { "--" } ?: "--",
-                "OS" to session.device.osVersion?.substringBefore(" (")?.ifBlank { "--" } ?: "--",
-                "Profile" to session.device.profile?.ifBlank { "--" } ?: "Balanced"
+            fun clean(value: String?, fallback: String = "--"): String =
+                value?.takeIf { it.isNotBlank() } ?: fallback
+            val entries: List<Pair<String, String>> = listOf(
+                Pair("Platform", clean(session.device.platform?.uppercase(Locale.US))),
+                Pair("Host", clean(session.device.model)),
+                Pair("OS", clean(session.device.osVersion?.substringBefore(" ("))),
+                Pair("Profile", clean(session.device.profile, "Balanced"))
             )
             val columnWidth = (x1 - x0) / 4f
             val colors = intArrayOf(

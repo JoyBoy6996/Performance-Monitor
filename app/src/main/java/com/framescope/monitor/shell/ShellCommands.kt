@@ -184,7 +184,8 @@ object ShellCommands {
             "for f in /sys/class/devfreq/*gpu*/cur_freq /sys/class/devfreq/*gpu*/gpu_clock " +
             "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq /sys/class/kgsl/kgsl-3d0/gpu_clock " +
             "/sys/devices/platform/*.gpu/devfreq/cur_freq; do " +
-            "[ -r \"\$f\" ] && echo \"GPUFREQ=\$(cat \$f)\" && break; done"
+            "[ -r \"\$f\" ] && echo \"GPUFREQPATH=\$f\" && " +
+            "echo \"GPUFREQ=\$(cat \$f)\" && break; done"
 
     // The fastest core is the useful number on big.LITTLE chips. Reading only cpu0
     // would show a small efficiency core while the performance cores are busy.
@@ -280,7 +281,7 @@ object ShellCommands {
         "  p=\$(printf '%s' \"\$v\" | tr -cd '0-9.' 2>/dev/null)",
         "  case \"\$p\" in ''|*[!0-9.]*) continue ;; esac",
         "  p=\${p%%.*}",
-        "  [ -n \"\$p\" ] && echo \"GPUPCT=\$p\" && break",
+        "  [ -n \"\$p\" ] && echo \"GPUPATH=\$f\" && echo \"GPUPCT=\$p\" && break",
         "done",
         "for d in /sys/class/devfreq/*gpu* /sys/class/kgsl/kgsl-*/devfreq " +
             "/sys/class/kgsl/kgsl-* /sys/devices/platform/*.gpu/devfreq; do",
@@ -289,14 +290,17 @@ object ShellCommands {
         "    t=\$(cat \"\$d/total_time\" 2>/dev/null)",
         "    case \"\$b:\$t\" in",
         "      *[!0-9:]*) ;;",
-        "      *:*) [ -n \"\$b\" ] && [ -n \"\$t\" ] && echo \"GPUBUSY=\$b:\$t\" && break ;;",
+        "      *:*) [ -n \"\$b\" ] && [ -n \"\$t\" ] && " +
+            "echo \"GPUPATH=\$d/busy_time\" && echo \"GPUBUSY=\$b:\$t\" && break ;;",
         "    esac",
         "  fi",
         "  if [ -r \"\$d/gpubusy\" ]; then",
         "    v=\$(cat \"\$d/gpubusy\" 2>/dev/null | tr '\\t' ' ')",
         "    case \"\$v\" in",
-        "      *@*) b=\${v%@*}; t=\${v#*@}; echo \"GPUBUSY=\$b:\$t\"; break ;;",
-        "      *\" \"*) b=\${v%% *}; t=\${v##* }; echo \"GPUBUSY=\$b:\$t\"; break ;;",
+        "      *@*) b=\${v%@*}; t=\${v#*@}; echo \"GPUPATH=\$d/gpubusy\"; " +
+            "echo \"GPUBUSY=\$b:\$t\"; break ;;",
+        "      *\" \"*) b=\${v%% *}; t=\${v##* }; echo \"GPUPATH=\$d/gpubusy\"; " +
+            "echo \"GPUBUSY=\$b:\$t\"; break ;;",
         "    esac",
         "  fi",
         "done"
@@ -310,11 +314,24 @@ object ShellCommands {
         "getprop ro.product.model; getprop ro.board.platform; getprop ro.hardware; getprop ro.build.version.release"
 
     /**
-     * Identity and performance profile for a recorded run. One extra line in the
-     * telemetry batch, so it costs no separate shell round trip.
+     * Every thermal zone with its kernel name and raw value. `dumpsys thermalservice`
+     * is often empty on newer builds, so the named sysfs zones are the real source.
+     */
+    fun thermalSysfs(): String =
+        "for f in /sys/class/thermal/thermal_zone*/type; do " +
+            "[ -r \"\$f\" ] || continue; " +
+            "z=\${f%/type}; t=\$(cat \"\$f\" 2>/dev/null); " +
+            "v=\$(cat \"\$z/temp\" 2>/dev/null); " +
+            "echo \"TZLINE=\$z|\$t|\$v\"; done"
+
+    /**
+     * Identity, real shell uid and performance profile for a recorded run. All in the
+     * same batched shell read as the rest of the telemetry, so it costs no extra tick.
      */
     fun telemetryIdentity(): String =
-        "echo PLATFORM=\$(getprop ro.board.platform 2>/dev/null); " +
+        "echo SHELLUID=\$(id -u 2>/dev/null); " +
+            "echo SHELLUSER=\$(id -un 2>/dev/null); " +
+            "echo PLATFORM=\$(getprop ro.board.platform 2>/dev/null); " +
             "echo PROFILE=\$(settings get system power_save_type 2>/dev/null); " +
             "echo GAMEMODE=\$(getprop sys.vivo.game.mode 2>/dev/null); " +
             "echo GAMEMODE2=\$(getprop persist.sys.game.mode 2>/dev/null)"
@@ -456,19 +473,45 @@ object Parsers {
      * example SUN). A profile is only claimed when a device actually publishes
      * one; otherwise the report falls back to "Balanced" instead of "--".
      */
+    private fun lineValue(dump: String, key: String): String? = dump.lineSequence()
+        .firstOrNull { it.trim().startsWith("$key=") }
+        ?.substringAfter("=")?.trim()
+        ?.takeIf { it.isNotBlank() && !it.equals("null", true) }
+
+    fun parseShellUid(dump: String): String? = lineValue(dump, "SHELLUID")
+    fun parseShellUser(dump: String): String? = lineValue(dump, "SHELLUSER")
+
+    data class ThermalZoneReading(val path: String, val type: String, val raw: Float?)
+
+    /** Real named thermal zones found in sysfs, with their unparsed raw values. */
+    fun parseThermalZones(dump: String): List<ThermalZoneReading> = dump.lineSequence()
+        .mapNotNull { line ->
+            val trimmed = line.trim()
+            if (!trimmed.startsWith("TZLINE=")) return@mapNotNull null
+            val cols = trimmed.removePrefix("TZLINE=").split("|", limit = 3)
+            if (cols.size < 3) return@mapNotNull null
+            ThermalZoneReading(cols[0], cols[1], cols[2].toFloatOrNull())
+        }.toList()
+
+    /** The sysfs counter that actually answered, for the Shell Logs diagnostics. */
+    fun parseGpuPath(dump: String): String? {
+        val line = dump.lineSequence().firstOrNull {
+            it.trim().startsWith("GPUPATH=") || it.trim().startsWith("GPUFREQPATH=")
+        } ?: return null
+        return line.substringAfter("=").trim().takeIf { it.isNotBlank() }
+    }
+
     fun parseDeviceIdentity(dump: String): Pair<String?, String?> {
-        fun value(key: String): String? = dump.lineSequence()
-            .firstOrNull { it.trim().startsWith("$key=") }
-            ?.substringAfter("=")?.trim()
-            ?.takeIf { it.isNotBlank() && !it.equals("null", true) }
-        val platform = value("PLATFORM")?.uppercase(Locale.US)
-        val mode = listOfNotNull(value("GAMEMODE"), value("GAMEMODE2"), value("PROFILE"))
-            .joinToString(" ").lowercase(Locale.US)
+        val platform = lineValue(dump, "PLATFORM")?.uppercase(Locale.US)
+        val mode = listOfNotNull(
+            lineValue(dump, "GAMEMODE"), lineValue(dump, "GAMEMODE2"), lineValue(dump, "PROFILE")
+        ).joinToString(" ").lowercase(Locale.US)
         val profile = when {
             mode.contains("monster") || mode.contains("performance") ||
                 mode.contains("game") || mode.contains("high") -> "Monster"
-            mode.contains("balanced") || mode.contains("normal") || mode.contains("0") -> "Balanced"
-            else -> null
+            // The report must never show "--" for the profile: an idle device is
+            // running its normal balanced profile.
+            else -> "Balanced"
         }
         return platform to profile
     }

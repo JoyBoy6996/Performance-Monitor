@@ -10,14 +10,17 @@ import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
 import java.io.File
+import java.util.Locale
+
+/** A chip sensor may legitimately read above the 85 C hotspot warning threshold. */
+private const val MAX_CHIP_TEMP_C = 110f
 
 /**
  * The device metrics that need a privileged shell.
  *
- * These are the readings a normal app cannot get: the CPU frequency node, the GPU clock
- * and the detailed thermal sensors. They are only available while Shizuku is connected,
- * and each one reports its own state so that a command which fails does not take the
- * others down with it.
+ * Every procfs/sysfs read goes through [ShellHub.execTelemetry], which uses the
+ * SAME uid=2000 Shizuku UserService as the SurfaceFlinger frame probe. The app's
+ * own shell cannot read these nodes on Android 16 and would answer with zeros.
  */
 class SystemSampler(private val hub: ShellHub) {
 
@@ -43,15 +46,12 @@ class SystemSampler(private val hub: ShellHub) {
     }
 
     /**
-     * Reads only the aggregate CPU load, on its own fast clock.
-     *
-     * The direct app read is tried first, but on newer Android releases the kernel can
-     * hide it or hand back a counter that never moves. Both cases fall through to the
-     * privileged shell. This keeps real CPU samples flowing even when the heavy batch
-     * is slow, without ever turning a missing reading into a fake zero.
+     * Aggregate CPU load on its own fast clock. While Shizuku is connected the
+     * counter is read by the privileged shell only - never by the app process.
      */
     suspend fun sampleCpu(): Float? {
-        val direct = runCatching {
+        val privileged = hub.hasPrivilegedShell()
+        val direct = if (privileged) "" else runCatching {
             File("/proc/stat").bufferedReader().use { it.readText() }
         }.getOrDefault("")
         val directParsed = Parsers.parseCpuStat(direct)
@@ -62,12 +62,13 @@ class SystemSampler(private val hub: ShellHub) {
             lastDirectCpu = directParsed
         }
 
-        val useDirect = directParsed != null && directCpuStalls < 3
+        val useDirect = !privileged && directParsed != null && directCpuStalls < 3
         val source = if (useDirect) "direct" else "shell"
         val dump = if (useDirect) {
             direct
         } else {
-            hub.execOrNull(ShellCommands.cpuStat(), 1_500L)?.out.orEmpty()
+            runCatching { hub.execTelemetry(ShellCommands.cpuStat(), 1_500L) }
+                .getOrNull()?.out.orEmpty()
         }
         val current = Parsers.parseCpuStat(dump) ?: return null
         // A delta between two different providers is not a measurement. Drop the
@@ -80,12 +81,8 @@ class SystemSampler(private val hub: ShellHub) {
     }
 
     /**
-     * Reads the privileged metrics.
-     *
-     * The result always describes every metric, including the ones that could not be
-     * read. It never returns null: the caller merges this over whatever the native
-     * collectors produced and keeps the native values for everything that is missing
-     * here.
+     * One batched privileged read per tick. Every hardware value in a session comes
+     * from this single answer, so the report cannot mix two different shell identities.
      */
     suspend fun sample(packageName: String = "", timeoutMs: Long = 8_000L): SystemMetrics {
         val now = android.os.SystemClock.elapsedRealtimeNanos()
@@ -93,19 +90,20 @@ class SystemSampler(private val hub: ShellHub) {
         val sources = mutableMapOf<SystemMetric, String>()
 
         val script = ShellCommands.batch(
-            ShellCommands.cpuStat(),
-            ShellCommands.gpuInfo(),
-            ShellCommands.cpuFreq(),
-            ShellCommands.thermal(),
-            ShellCommands.cpuCoreDump(),
-            ShellCommands.cpuCoreFreq(),
-            ShellCommands.gpuBusy(),
-            ShellCommands.ddrFreq(),
-            ShellCommands.threadStat(packageName),
-            ShellCommands.clockTicks(),
-            ShellCommands.telemetryIdentity()
+            ShellCommands.cpuStat(),          // 0
+            ShellCommands.gpuInfo(),          // 1
+            ShellCommands.cpuFreq(),          // 2
+            ShellCommands.thermal(),          // 3
+            ShellCommands.cpuCoreDump(),      // 4
+            ShellCommands.cpuCoreFreq(),      // 5
+            ShellCommands.gpuBusy(),          // 6
+            ShellCommands.ddrFreq(),          // 7
+            ShellCommands.threadStat(packageName), // 8
+            ShellCommands.clockTicks(),       // 9
+            ShellCommands.telemetryIdentity(), // 10
+            ShellCommands.thermalSysfs()      // 11
         )
-        val result = hub.execOrNull(script, timeoutMs)
+        val result = runCatching { hub.execTelemetry(script, timeoutMs) }.getOrNull()
 
         val parts = if (result != null) ShellCommands.split(result.out) else emptyList()
         fun part(index: Int): String = parts.getOrElse(index) { "" }
@@ -127,29 +125,35 @@ class SystemSampler(private val hub: ShellHub) {
 
         val gpuName = Parsers.parseGpuName(gpu)
         val gpuFreq = Parsers.parseGpuFreq(gpu)
-        // Some devices expose placeholder sensors at 99.9 or impossible hotspots.
-        // Neither is the temperature of the phone the user is holding, so reject
-        // them before taking the maximum.
-        val maxThermal = thermals.values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) }.maxOrNull()
-        val cpuTemp = thermals.entries
-            .filter { (name, value) ->
+
+        // Named kernel sensors are the real chip temperature. `dumpsys thermalservice`
+        // stays as a fallback for devices that do not expose named sysfs zones.
+        val zones = Parsers.parseThermalZones(part(11))
+        val chipZones = zones.filter(::isChipZone)
+        val chipTemps = chipZones.mapNotNull(::zoneCelsius)
+        val cpuTemp = chipTemps.maxOrNull() ?: thermals.entries
+            .filter { (name, _) ->
                 name.contains("cpu", true) || name.contains("soc", true) ||
                     name.contains("cluster", true)
             }
-            .mapNotNull { it.value.plausibleTempC(MAX_HOTSPOT_TEMP_C) }
+            .mapNotNull { it.value.plausibleTempC(MAX_CHIP_TEMP_C) }
+            .maxOrNull()
+        val maxThermal = (zones.mapNotNull(::zoneCelsius) +
+            thermals.values.mapNotNull { it.plausibleTempC(MAX_HOTSPOT_TEMP_C) })
             .maxOrNull()
         val thermalStatus = Parsers.parseThermalStatus(part(3))
         val identity = Parsers.parseDeviceIdentity(part(10))
+        val detail = telemetryDetail(part(10), part(6) + "\n" + part(1), chipZones, cpuGroups)
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
         record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
         record(availability, sources, SystemMetric.GPU_NAME, gpuName != null, "GPU_NAME", "privileged SurfaceFlinger")
         record(availability, sources, SystemMetric.GPU_FREQ_MHZ, gpuFreq != null, "GPU_FREQ_MHZ", "privileged GPU frequency node")
-        record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "privileged thermalservice")
-        record(availability, sources, SystemMetric.CPU_TEMP_C, cpuTemp != null, "CPU_TEMP_C", "named CPU/SoC thermal sensor")
+        record(availability, sources, SystemMetric.THERMAL_MAX_C, maxThermal != null, "THERMAL_MAX_C", "named thermal zones")
+        record(availability, sources, SystemMetric.CPU_TEMP_C, cpuTemp != null, "CPU_TEMP_C", "named CPU/SoC thermal zone")
         record(
             availability, sources, SystemMetric.GPU_PERCENT, gpuPercent != null,
-            "GPU_PERCENT", "GPU busy counters (Mali/KGSL/devfreq)"
+            "GPU_PERCENT", "GPU busy counters (KGSL/Mali/devfreq)"
         )
         record(availability, sources, SystemMetric.CPU_CORES, scene.cpuCoreLoadPct.any { it != null }, "CPU_CORES", "per-core /proc/stat")
         record(availability, sources, SystemMetric.DDR_FREQ_MHZ, scene.ddrFreqMHz != null, "DDR_FREQ_MHZ", "memory devfreq")
@@ -172,11 +176,61 @@ class SystemSampler(private val hub: ShellHub) {
             thermalStatus = thermalStatus,
             platform = identity.first,
             performanceProfile = identity.second,
+            telemetryDetail = detail,
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,
             measuredAtElapsedNanos = now
         )
+    }
+
+    /** Only a CPU/GPU/SoC sensor counts as chip temperature; battery sensors never do. */
+    private fun isChipZone(zone: Parsers.ThermalZoneReading): Boolean {
+        val name = zone.type.lowercase(Locale.US)
+        val excluded = listOf("battery", "bms", "skin", "usb", "qi", "charger", "cam", "pa")
+        if (excluded.any { name.contains(it) }) return false
+        val included = listOf("cpu", "soc", "apss", "tsens", "gold", "prime", "cluster")
+        return included.any { name.contains(it) }
+    }
+
+    /** Kernel values are millidegrees on most nodes, degrees on a few. */
+    private fun zoneCelsius(zone: Parsers.ThermalZoneReading): Float? {
+        val raw = zone.raw ?: return null
+        val celsius = if (raw > 1_000f) raw / 1_000f else raw
+        return celsius.plausibleTempC(MAX_CHIP_TEMP_C)
+    }
+
+    /** What actually answered the batch, written verbatim into the session Shell Logs. */
+    private fun telemetryDetail(
+        identityDump: String,
+        gpuDump: String,
+        chipZones: List<Parsers.ThermalZoneReading>,
+        groups: List<CpuGroupMetric>
+    ): String {
+        val uid = Parsers.parseShellUid(identityDump)
+        val transport = hub.telemetryShell.value
+        val shellLabel = if (transport == "None") "None" else if (uid != null) {
+            "$transport (uid=$uid)"
+        } else transport
+        val zone = chipZones.firstOrNull()
+        val zoneText = if (zone == null) {
+            "--"
+        } else {
+            val raw = zone.raw
+            val value = raw?.let { if (it > 1_000f) it / 1_000f else it }
+            "${zone.path} (${zone.type}) = " +
+                (value?.let { String.format(Locale.US, "%.1f", it) } ?: "--") + "C"
+        }
+        val clusterText = if (groups.isEmpty()) "--" else groups.joinToString(", ") { group ->
+            "${group.name}: ${group.freqMHz?.let { "$it MHz" } ?: "--"}"
+        }
+        return buildString {
+            appendLine("active shell: $shellLabel")
+            appendLine("shell user: ${Parsers.parseShellUser(identityDump) ?: "--"}")
+            appendLine("thermal zone: $zoneText")
+            appendLine("gpu sysfs path: ${Parsers.parseGpuPath(gpuDump) ?: "--"}")
+            appendLine("cluster mapping: $clusterText")
+        }.trimEnd()
     }
 
     /** Source label for the extra Scene-style collectors, for the diagnostics report. */
@@ -289,12 +343,7 @@ class SystemSampler(private val hub: ShellHub) {
         }
     }
 
-    /**
-     * The CPU load between two readings of `/proc/stat`.
-     *
-     * A single reading is not enough: the counters only say how much time was used in
-     * total, so the load is the difference between two of them.
-     */
+    /** The CPU load between two readings of `/proc/stat`. */
     private fun cpuPercent(cpuDump: String): Float? {
         val current = Parsers.parseCpuStat(cpuDump) ?: return null
         val previous = lastCpu
@@ -311,5 +360,4 @@ class SystemSampler(private val hub: ShellHub) {
         val usage = (1.0 - idleDelta.toDouble() / totalDelta.toDouble()) * 100.0
         return usage.toFloat().coerceIn(0f, 100f)
     }
-
 }

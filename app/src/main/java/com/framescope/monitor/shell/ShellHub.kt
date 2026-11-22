@@ -82,6 +82,14 @@ class ShellHub(
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
+    /** Which transport answered the last hardware (procfs/sysfs) telemetry read. */
+    private val _telemetryShell = MutableStateFlow("None")
+    val telemetryShell: StateFlow<String> = _telemetryShell.asStateFlow()
+
+    /** True while the privileged AIDL UserService is connected. */
+    fun hasPrivilegedShell(): Boolean =
+        shizukuRunner.connectionState.value == ShizukuRunner.ConnectionState.READY
+
     private val _adbReady = MutableStateFlow(false)
     private val _adbReason = MutableStateFlow("")
     val adbAuthState: StateFlow<AdbAuthState> = adb.authState
@@ -477,6 +485,59 @@ class ShellHub(
 
         val reason = shizukuRunner.errorMessage.value?.takeIf { it.isNotBlank() }
             ?: "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
+        _lastError.value = reason
+        throw ShellUnavailable(reason)
+    }
+
+    /**
+     * Runs a hardware telemetry read on the same privileged (`uid=2000`) shell that
+     * serves SurfaceFlinger. Android 16 hides procfs/sysfs CPU, thermal and GPU nodes
+     * from the app's own process, so while Shizuku is connected it is the ONLY
+     * transport used here - an unprivileged answer of zero is worse than no answer.
+     */
+    suspend fun execTelemetry(command: String, timeoutMs: Long = 8_000): ShellResult = withContext(Dispatchers.IO) {
+        if (hasPrivilegedShell()) {
+            _telemetryShell.value = "Shizuku"
+            try {
+                val result = shizukuRunner.exec(command, timeoutMs)
+                _lastError.value = null
+                return@withContext result
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _lastError.value = e.message ?: "Shizuku telemetry read failed"
+                throw e
+            }
+        }
+
+        if (_adbReady.value || adb.authorisationStored) {
+            _telemetryShell.value = "Local ADB bridge"
+            try {
+                val result = adb.exec(command, timeoutMs)
+                _adbReady.value = true
+                _lastError.value = null
+                return@withContext result
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _adbReady.value = false
+                _lastError.value = e.message ?: "Local ADB bridge did not answer"
+                throw e
+            }
+        }
+
+        if (hasDumpPermission()) {
+            _telemetryShell.value = "App shell (DUMP)"
+            val local = execLocalShell(command, timeoutMs)
+            if (local.ok && local.out.isNotBlank()) {
+                _lastError.value = null
+                return@withContext local
+            }
+        }
+
+        _telemetryShell.value = "None"
+        val reason = shizukuRunner.errorMessage.value?.takeIf { it.isNotBlank() }
+            ?: "No privileged shell is connected. Start Shizuku to read hardware telemetry."
         _lastError.value = reason
         throw ShellUnavailable(reason)
     }

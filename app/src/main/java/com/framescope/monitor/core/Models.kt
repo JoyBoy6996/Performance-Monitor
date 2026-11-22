@@ -108,6 +108,8 @@ data class SystemMetrics(
     val platform: String? = null,
     /** Active performance profile reported by the device, when it publishes one. */
     val performanceProfile: String? = null,
+    /** Real shell identity and the hardware paths the privileged batch actually read. */
+    val telemetryDetail: String = "",
     /** Warmest temperature seen since monitoring began (or since the current recording). */
     val tempPeakC: Float? = null,
     /** How far the phone has cooled from that peak, in °C. */

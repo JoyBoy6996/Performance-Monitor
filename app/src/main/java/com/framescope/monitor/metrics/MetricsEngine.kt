@@ -383,6 +383,9 @@ class MetricsEngine(
             ddrFreqMHz = privileged.ddrFreqMHz,
             threadLoads = privileged.threadLoads,
             thermalStatus = privileged.thermalStatus,
+            platform = privileged.platform,
+            performanceProfile = privileged.performanceProfile,
+            telemetryDetail = privileged.telemetryDetail,
             refreshHz = native.refreshHz,
             updatedAt = maxOf(native.updatedAt, privileged.updatedAt),
             availability = availability,
@@ -424,12 +427,8 @@ class MetricsEngine(
     /** Captures the test setup once, so an old session still shows its real device. */
     private fun deviceSnapshot(): SessionDeviceInfo {
         val ctx = androidContext ?: return SessionDeviceInfo()
-        val model = listOf(android.os.Build.MANUFACTURER, android.os.Build.MODEL)
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .distinct()
-            .joinToString(" ")
-            .takeIf { it.isNotBlank() }
+        // The device card shows the real model (I2405), not a vendor-prefixed guess.
+        val model = android.os.Build.MODEL.trim().takeIf { it.isNotBlank() }
         val platform = android.os.Build.HARDWARE
             .takeIf { it.isNotBlank() && !it.equals("unknown", true) }
         val metrics = android.util.DisplayMetrics()
@@ -446,8 +445,7 @@ class MetricsEngine(
             model = model,
             platform = platform,
             resolution = resolution,
-            osVersion = "Android ${android.os.Build.VERSION.RELEASE} " +
-                "(SDK ${android.os.Build.VERSION.SDK_INT})"
+            osVersion = "Android ${android.os.Build.VERSION.RELEASE}"
         )
     }
 
@@ -495,7 +493,14 @@ class MetricsEngine(
     private fun sessionShellLogs(): String = buildString {
         appendLine("captured_from=${lastMeasuredPackage.value ?: "(none)"} " +
             "at=${android.os.SystemClock.uptimeMillis()}")
-        appendLine("active shell: ${hub.status.value.shellSource}")
+        // The identity recorded here is the one that actually answered the hardware
+        // batch, not the generic access status the UI happens to display.
+        val detail = _system.value.telemetryDetail.trim()
+        if (detail.isNotBlank()) {
+            appendLine(detail)
+        } else {
+            appendLine("active shell: ${hub.status.value.shellSource}")
+        }
         appendLine("--- window manager ---")
         appendLine(lastForegroundOutput().take(3_000).trim().ifBlank { "--" })
         appendLine("--- frame counters ---")
@@ -540,8 +545,8 @@ class MetricsEngine(
         /** How often the native device metrics are read. */
         private const val NATIVE_INTERVAL_MS = 1_000L
 
-        /** How often the privileged device metrics are read. */
-        private const val PRIVILEGED_INTERVAL_MS = 3_000L
+        /** One batched privileged hardware read per second, as required by telemetry. */
+        private const val PRIVILEGED_INTERVAL_MS = 1_000L
 
         /**
          * The big batch asks for SurfaceFlinger, every thermal sensor and every game

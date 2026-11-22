@@ -21,13 +21,35 @@ import com.framescope.monitor.shell.ShellHub
 class SystemSampler(private val hub: ShellHub) {
 
     private var lastCpu: LongArray? = null
+    /** Kept separate from the batch reader so the two deltas never interfere. */
+    private var lastFastCpu: LongArray? = null
     private var lastCpuCores: Map<Int, LongArray>? = null
     private var lastGpuBusy: Pair<Long, Long>? = null
     private var lastGroupNames: List<String> = emptyList()
     private val sceneCollectors = SceneCollectors()
 
     /** Forgets the per-core and per-thread deltas when a new run begins. */
-    fun resetDeltas() = sceneCollectors.reset()
+    fun resetDeltas() {
+        sceneCollectors.reset()
+        lastFastCpu = null
+    }
+
+    /**
+     * Reads only the aggregate CPU load, in its own tiny shell call.
+     *
+     * The full batch also asks for SurfaceFlinger, thermals and every thread of the
+     * game. Under load that batch can take seconds, and a late batch used to throw
+     * the CPU reading away with it - which is why a finished match recorded 0% CPU.
+     * `/proc/stat` alone is instant, so CPU load is captured no matter how slow the
+     * other counters are.
+     */
+    suspend fun sampleCpu(): Float? {
+        val dump = hub.execOrNull(ShellCommands.cpuStat(), FAST_CPU_TIMEOUT_MS)?.out.orEmpty()
+        val current = Parsers.parseCpuStat(dump) ?: return null
+        val value = cpuPercentBetween(lastFastCpu, current)
+        lastFastCpu = current
+        return value
+    }
 
     /**
      * Reads the privileged metrics.
@@ -37,7 +59,7 @@ class SystemSampler(private val hub: ShellHub) {
      * collectors produced and keeps the native values for everything that is missing
      * here.
      */
-    suspend fun sample(packageName: String = ""): SystemMetrics {
+    suspend fun sample(packageName: String = "", timeoutMs: Long = 8_000L): SystemMetrics {
         val now = android.os.SystemClock.elapsedRealtimeNanos()
         val availability = mutableMapOf<SystemMetric, MetricAvailability>()
         val sources = mutableMapOf<SystemMetric, String>()
@@ -54,7 +76,7 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.threadStat(packageName),
             ShellCommands.clockTicks()
         )
-        val result = hub.execOrNull(script)
+        val result = hub.execOrNull(script, timeoutMs)
 
         val parts = if (result != null) ShellCommands.split(result.out) else emptyList()
         fun part(index: Int): String = parts.getOrElse(index) { "" }
@@ -234,11 +256,21 @@ class SystemSampler(private val hub: ShellHub) {
         val current = Parsers.parseCpuStat(cpuDump) ?: return null
         val previous = lastCpu
         lastCpu = current
+        return cpuPercentBetween(previous, current)
+    }
+
+    /** Difference of two cumulative `/proc/stat` snapshots into a busy percentage. */
+    private fun cpuPercentBetween(previous: LongArray?, current: LongArray): Float? {
         if (previous == null) return null
         val totalDelta = current[0] - previous[0]
         val idleDelta = current[1] - previous[1]
         if (totalDelta <= 0L) return null
         val usage = (1.0 - idleDelta.toDouble() / totalDelta.toDouble()) * 100.0
         return usage.toFloat().coerceIn(0f, 100f)
+    }
+
+    companion object {
+        /** `/proc/stat` is instant; this only guards against a wedged shell. */
+        private const val FAST_CPU_TIMEOUT_MS = 1_500L
     }
 }

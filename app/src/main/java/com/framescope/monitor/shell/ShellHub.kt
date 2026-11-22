@@ -88,6 +88,8 @@ class ShellHub(
 
     private val statusScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val adbSetupMutex = Mutex()
+    /** Only one shell command at a time, whichever transport answers it. */
+    private val execMutex = Mutex()
 
     // Shizuku often becomes READY a moment after the permission popup is closed.
     // Refresh() alone cannot open the bridge then, because the key is not stored
@@ -433,6 +435,7 @@ class ShellHub(
     }
 
     suspend fun exec(command: String, timeoutMs: Long = 8_000): ShellResult = withContext(Dispatchers.IO) {
+        execMutex.withLock {
         // The app's own shell is tried first when it holds the DUMP permission.
         // A command that is not there takes the whole answer with it, so a
         // shell that answers nothing falls through to the next transport.
@@ -479,6 +482,7 @@ class ShellHub(
             ?: "No privileged shell is connected. Start Shizuku or set up the local ADB bridge."
         _lastError.value = reason
         throw ShellUnavailable(reason)
+        }
     }
 
     suspend fun execOrNull(command: String, timeoutMs: Long = 8_000): ShellResult? =

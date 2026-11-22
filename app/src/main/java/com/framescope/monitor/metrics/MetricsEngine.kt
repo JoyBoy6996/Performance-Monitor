@@ -83,6 +83,13 @@ class MetricsEngine(
     /** The metrics that do need one. */
     private val _privileged = MutableStateFlow(SystemMetrics())
 
+    /**
+     * CPU load from its own tiny shell call. The heavy privileged batch can run
+     * late under a game; this keeps the CPU percentage flowing into the session
+     * even when that batch is discarded.
+     */
+    private val _cpuPercent = MutableStateFlow<Float?>(null)
+
     private val _foregroundApp = MutableStateFlow<String?>(null)
     val foregroundApp: StateFlow<String?> = _foregroundApp.asStateFlow()
 
@@ -109,21 +116,47 @@ class MetricsEngine(
     private var fpsJob: Job? = null
     private var nativeJob: Job? = null
     private var privilegedJob: Job? = null
+    private var cpuJob: Job? = null
 
     fun start() {
         if (fpsJob?.isActive == true) return
         fpsJob = scope.launch { fpsLoop() }
         nativeJob = scope.launch { nativeLoop() }
         privilegedJob = scope.launch { privilegedLoop() }
+        cpuJob = scope.launch { cpuLoop() }
     }
 
     fun stop() {
         fpsJob?.cancel()
         nativeJob?.cancel()
         privilegedJob?.cancel()
+        cpuJob?.cancel()
         fpsJob = null
         nativeJob = null
         privilegedJob = null
+        cpuJob = null
+    }
+
+    /**
+     * The CPU load, on its own fast clock.
+     *
+     * It deliberately does not wait for the big privileged batch: one slow dumpsys
+     * must never erase the CPU percentage from a recorded match.
+     */
+    private suspend fun cpuLoop() {
+        while (scope.isActive) {
+            try {
+                kotlinx.coroutines.withTimeoutOrNull(CPU_LOOP_TIMEOUT_MS) {
+                    systemSampler.sampleCpu()
+                }?.let {
+                    _cpuPercent.value = it
+                    publishSystem()
+                }
+            } catch (_: Exception) {
+                // A failed read keeps the last real percentage.
+            }
+            delay(CPU_INTERVAL_MS)
+        }
     }
 
     /**
@@ -229,8 +262,11 @@ class MetricsEngine(
             if (hub.status.value.state == AccessState.READY) {
                 try {
                     val measured = _foregroundApp.value ?: lastMeasuredPackage.value.orEmpty()
-                    kotlinx.coroutines.withTimeoutOrNull(2_500L) {
-                        systemSampler.sample(measured)
+                    // The batch asks SurfaceFlinger, the thermals and every game
+                    // thread. Under load it can take several seconds; 2.5 s threw
+                    // the whole answer away and left every privileged metric blank.
+                    kotlinx.coroutines.withTimeoutOrNull(PRIVILEGED_SAMPLE_TIMEOUT_MS) {
+                        systemSampler.sample(measured, PRIVILEGED_SHELL_TIMEOUT_MS)
                     }?.let { _privileged.value = it }
                 } catch (e: Exception) {
                     // Keep the last reading; it is marked stale below.
@@ -317,8 +353,15 @@ class MetricsEngine(
     private fun publishSystem() {
         val native = _native.value
         val privileged = _privileged.value
+        val cpuPercent = _cpuPercent.value ?: privileged.cpuPercent
+        val availability = (native.availability + privileged.availability).toMutableMap()
+        val sources = (native.sources + privileged.sources).toMutableMap()
+        if (cpuPercent != null && _cpuPercent.value != null) {
+            availability[SystemMetric.CPU_PERCENT] = MetricAvailability.AVAILABLE
+            sources[SystemMetric.CPU_PERCENT] = "fast /proc/stat"
+        }
         val merged = SystemMetrics(
-            cpuPercent = privileged.cpuPercent,
+            cpuPercent = cpuPercent,
             cpuFreqMHz = privileged.cpuFreqMHz,
             gpuName = privileged.gpuName,
             gpuFreqMHz = privileged.gpuFreqMHz,
@@ -342,8 +385,8 @@ class MetricsEngine(
             thermalStatus = privileged.thermalStatus,
             refreshHz = native.refreshHz,
             updatedAt = maxOf(native.updatedAt, privileged.updatedAt),
-            availability = native.availability + privileged.availability,
-            sources = native.sources + privileged.sources,
+            availability = availability,
+            sources = sources,
             measuredAtElapsedNanos = maxOf(
                 native.measuredAtElapsedNanos,
                 privileged.measuredAtElapsedNanos
@@ -426,6 +469,8 @@ class MetricsEngine(
         // Per-core and per-thread loads are differences between two reads. Starting a
         // new run with the old counters would report the idle time before Record.
         systemSampler.resetDeltas()
+        _cpuPercent.value = null
+        publishSystem()
         sessionLogger.start(target, label, _system.value.batteryLevel, deviceSnapshot())
         // A recording is its own heat story: start the peak from the temperature at
         // the moment Record was pressed, not from a hot session earlier today.
@@ -497,6 +542,20 @@ class MetricsEngine(
 
         /** How often the privileged device metrics are read. */
         private const val PRIVILEGED_INTERVAL_MS = 3_000L
+
+        /**
+         * The big batch asks for SurfaceFlinger, every thermal sensor and every game
+         * thread. Games make it slow; it gets enough time to finish instead of being
+         * cancelled and throwing away all of its readings.
+         */
+        private const val PRIVILEGED_SAMPLE_TIMEOUT_MS = 9_000L
+        private const val PRIVILEGED_SHELL_TIMEOUT_MS = 8_500L
+
+        /** The little `/proc/stat` read is independent of the heavy batch. */
+        private const val CPU_INTERVAL_MS = 1_000L
+        // Shell calls are serialised, so the fast read may wait behind a slow batch.
+        // It must still get its turn rather than being cancelled before it starts.
+        private const val CPU_LOOP_TIMEOUT_MS = 12_000L
 
         /** The metrics that need a privileged shell. */
         private val PRIVILEGED_METRICS = listOf(

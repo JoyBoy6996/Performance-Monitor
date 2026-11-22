@@ -329,6 +329,8 @@ data class CapChange(
     val toFps: Int,
     /** Android's thermal level at that moment, when the device reported one. */
     val thermalStatus: Int? = null,
+    /** The real battery/SoC temperature at that moment, in °C; null when unavailable. */
+    val temperatureC: Float? = null,
     /** "heat" when mitigation was active and the rate went down, else "measured". */
     val cause: String = "measured"
 )

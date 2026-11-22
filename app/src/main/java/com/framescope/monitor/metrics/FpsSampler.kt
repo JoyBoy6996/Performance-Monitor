@@ -75,6 +75,11 @@ class FpsSampler(
     /** Whether the previous target was a game, so a game number is never carried home. */
     private var lastTargetWasGame = false
 
+    /** Cached answer about whether the current target owns a game-style surface. */
+    private var gameCheckPackage: String? = null
+    private var gameCheckResult = false
+    private var gameCheckAtMs = 0L
+
     /** The layer the current reading was taken from. */
     @Volatile
     var measuredLayer: String? = null
@@ -263,6 +268,9 @@ class FpsSampler(
         currentThermalStatus = null
         capTracker.reset()
         lastTargetWasGame = false
+        gameCheckPackage = null
+        gameCheckResult = false
+        gameCheckAtMs = 0L
         _state.value = FpsState()
     }
 
@@ -340,30 +348,6 @@ class FpsSampler(
         // from its own layer instead of switching to Qstats' own windows.
         val pkg = targetForMeasurement(detected, ownPackage, remembered, rememberedFresh)
 
-        // A game is measured only from its own layer. Scene FPS Meter does the same:
-        // it reads the present timestamps of the surface the game draws into, so a
-        // moving overlay or a status-bar update cannot add frames to the reading.
-        val gameTarget = !pkg.isNullOrBlank() && !isNonGame(pkg) &&
-            (detectedGame || (rememberedFresh && pkg == remembered))
-
-        if (pkg != foregroundApp) {
-            // Only a game number is forbidden on another target. Clearing the
-            // device-wide baseline here used to reset it every time the pill
-            // took focus, leaving the home screen forever "warming up".
-            onTargetChanged(pkg, clearFps = lastTargetWasGame || gameTarget)
-            lastTargetWasGame = gameTarget
-        }
-        foregroundApp = pkg
-        if (detectedGame) {
-            _lastMeasuredPackage.value = detected
-            lastMeasuredAtMs = nowMs
-        } else if (rememberedFresh && remembered != null && pkg == remembered) {
-            // The game is still the measurement target even though the overlay
-            // window holds the input focus. Keep that target fresh while it is
-            // being measured from its own layer.
-            lastMeasuredAtMs = nowMs
-        }
-
         if (pkg.isNullOrBlank()) {
             return publishUnavailable(
                 source = "no source",
@@ -390,6 +374,33 @@ class FpsSampler(
                 availability = MetricAvailability.SHIZUKU_REQUIRED,
                 nowUptime = nowUptime
             )
+        }
+
+        // A game is measured only from its own layer. Scene FPS Meter does the same:
+        // it reads the present timestamps of the surface the game draws into, so a
+        // moving overlay or a status-bar update cannot add frames to the reading.
+        // A normal app (Chrome, a browser, a chat app) is NOT a game just because
+        // it is in front: its own surface can be perfectly still while the screen
+        // is drawing, and the device-wide counter is then the real screen FPS.
+        val gameTarget = (detectedGame || (rememberedFresh && pkg == remembered)) &&
+            looksLikeGameTarget(pkg, nowMs)
+
+        if (pkg != foregroundApp) {
+            // Only a game number is forbidden on another target. Clearing the
+            // device-wide baseline here used to reset it every time the pill
+            // took focus, leaving the home screen forever "warming up".
+            onTargetChanged(pkg, clearFps = lastTargetWasGame || gameTarget)
+            lastTargetWasGame = gameTarget
+        }
+        foregroundApp = pkg
+        if (detectedGame) {
+            _lastMeasuredPackage.value = detected
+            lastMeasuredAtMs = nowMs
+        } else if (rememberedFresh && remembered != null && pkg == remembered) {
+            // The game is still the measurement target even though the overlay
+            // window holds the input focus. Keep that target fresh while it is
+            // being measured from its own layer.
+            lastMeasuredAtMs = nowMs
         }
 
         pendingWarmUpReason = null
@@ -793,6 +804,32 @@ class FpsSampler(
     private fun isNonGame(pkg: String): Boolean {
         val p = pkg.lowercase()
         return p.contains("launcher") || p == "com.android.systemui"
+    }
+
+    /**
+     * True only when the app owns a game-style drawing surface.
+     *
+     * The foreground name alone is not enough: Chrome or a chat app is not a
+     * game, even though usage access reports it in front. SurfaceFlinger names
+     * a game's buffer `SurfaceView[package/Activity](BLAST)`; normal apps use
+     * names like `ChromeChildSurface` and are measured with the screen-wide
+     * counter instead. The answer is cached briefly because the dump is large.
+     */
+    private suspend fun looksLikeGameTarget(pkg: String, nowMs: Long): Boolean {
+        if (isNonGame(pkg)) return false
+        if (gameCheckPackage == pkg && nowMs - gameCheckAtMs < GAME_CHECK_TTL_MS) {
+            return gameCheckResult
+        }
+        val dump = hub.execOrNull(
+            ShellCommands.surfaceTimeStatsDumpOf(pkg), GAME_CHECK_TIMEOUT_MS
+        )?.out.orEmpty()
+        val game = TimeStats.readAllUnfiltered(dump).any { reading ->
+            TimeStats.belongsTo(reading, pkg) && FpsSampler.isGameLayerName(reading.layer)
+        }
+        gameCheckPackage = pkg
+        gameCheckResult = game
+        gameCheckAtMs = nowMs
+        return game
     }
 
     /**
@@ -1484,6 +1521,16 @@ class FpsSampler(
             else -> detected
         }
 
+        /** Generic game-surface names; no game or package is written into the code. */
+        internal fun isGameLayerName(layer: String): Boolean {
+            val name = layer.lowercase()
+            return (name.contains("surfaceview[") && name.contains("/")) ||
+                name.contains("gameactivity") ||
+                name.contains("unityplayeractivity") ||
+                name.contains("glsurfaceview") ||
+                name.contains("ue4")
+        }
+
         /**
          * How long a known app in front is trusted.
          *
@@ -1523,6 +1570,10 @@ class FpsSampler(
 
         /** How long the device-wide counter may take to answer. */
         private const val GLOBAL_COUNTER_TIMEOUT_MS = 3_000L
+
+        /** How long a game-surface check may take, and how long it is trusted. */
+        private const val GAME_CHECK_TIMEOUT_MS = 3_000L
+        private const val GAME_CHECK_TTL_MS = 10_000L
 
         /** The counter difference is taken over about one second, not one poll. */
         private const val GLOBAL_COUNTER_WINDOW_MS = 1_000L

@@ -366,8 +366,15 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
         if (cap == null) "--" else fmt(cap, 0) + " fps" +
             if (session.thermalCapSeconds > 0) " (heat)" else ""
     )
-    if (session.capChanges.isNotEmpty()) {
-        painter.metricRow("Cap changes", session.capChanges.size.toString())
+    session.capChanges.forEach { change ->
+        val temp = change.temperatureC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let {
+            " at ${fmt(it, 1)} °C"
+        }.orEmpty()
+        painter.metricRow(
+            "Cap at ${change.second + 1}s",
+            "${fmt(change.toFps.toFloat(), 0)} fps$temp" +
+                if (change.cause == "heat") " · heat" else ""
+        )
     }
 
     painter.section("Heat & power")

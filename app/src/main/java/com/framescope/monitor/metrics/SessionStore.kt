@@ -98,6 +98,9 @@ private fun JSONArray?.toCapChanges(): List<CapChange> {
                 fromFps = if (item.isNull("fromFps")) null else item.optInt("fromFps").takeIf { it > 0 },
                 toFps = to,
                 thermalStatus = if (item.isNull("thermalStatus")) null else item.optInt("thermalStatus"),
+                temperatureC = if (item.isNull("temperatureC")) null else {
+                    item.optDouble("temperatureC").takeIf { it.isFinite() }?.toFloat()
+                },
                 cause = item.optString("cause").takeIf { it == "heat" } ?: "measured"
             )
         )
@@ -272,6 +275,7 @@ class SessionStore(context: Context) {
                 put("fromFps", change.fromFps ?: JSONObject.NULL)
                 put("toFps", change.toFps)
                 put("thermalStatus", change.thermalStatus ?: JSONObject.NULL)
+                put("temperatureC", change.temperatureC?.toDouble() ?: JSONObject.NULL)
                 put("cause", change.cause)
             }
         }))
@@ -707,6 +711,7 @@ class SessionStore(context: Context) {
                         put("fromFps", change.fromFps ?: JSONObject.NULL)
                         put("toFps", change.toFps)
                         put("thermalStatus", change.thermalStatus ?: JSONObject.NULL)
+                        put("temperatureC", change.temperatureC?.toDouble() ?: JSONObject.NULL)
                         put("cause", change.cause)
                     }
                 }).toString())

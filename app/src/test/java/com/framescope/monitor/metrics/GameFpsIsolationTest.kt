@@ -1,7 +1,9 @@
 package com.framescope.monitor.metrics
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -64,5 +66,18 @@ class GameFpsIsolationTest {
         )
 
         assertEquals(gameLayer.layer, selected?.layer)
+    }
+
+    @Test
+    fun anOrdinaryAppIsNotMistakenForAGame() {
+        assertFalse(
+            FpsSampler.isGameLayerName("com.android.chrome/ChromeChildSurface#749670")
+        )
+        assertFalse(FpsSampler.isGameLayerName("home_task_overlay_container"))
+        assertTrue(
+            FpsSampler.isGameLayerName(
+                "bae4750 SurfaceView[$game/com.epicgames.ue4.GameActivity](BLAST)#0"
+            )
+        )
     }
 }

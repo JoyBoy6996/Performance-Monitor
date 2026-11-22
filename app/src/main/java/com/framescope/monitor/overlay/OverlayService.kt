@@ -356,7 +356,8 @@ class OverlayService : Service() {
     private fun populateRows(layout: LinearLayout, settings: AppSettings, isRtss: Boolean) {
         val rows = settings.overlayRows.value.split(",")
             .map { it.trim().uppercase() }
-            .filter { it.isNotEmpty() }
+            // Cap changes belong to a completed session, not to the live pill.
+            .filter { it.isNotEmpty() && it != "CAP" }
 
         val labelColor = if (isRtss) Color.parseColor("#FFA500") else Color.parseColor("#7DD3FC")
         val valColor = if (isRtss) Color.parseColor("#00FF66") else Color.parseColor("#E2E8F0")
@@ -614,19 +615,18 @@ class OverlayService : Service() {
         // A reading that is older than a couple of seconds is not a live reading, and
         // it says so instead of looking like a current number.
         val stale = fpsState.valid && fpsState.sampleAgeMs > STALE_AFTER_MS
-        val capNote = fpsState.detectedCapFps?.let { cap ->
-            " · $cap cap" + if (fpsState.capCause == "heat") " (heat)" else ""
-        }.orEmpty()
 
         fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         fpsText?.setTextColor(
             if (stale) STALE_COLOR else OverlayViews.fpsColor(fpsVal, target)
         )
 
+        // Cap changes are only written into the completed match record; the
+        // live pill shows the measured FPS and frame time, not a cap guess.
         frameText?.text = when {
             !fpsState.valid -> ""
-            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs) + capNote
-            else -> "%.1f ms".format(fpsState.frameTimeMs) + capNote
+            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs)
+            else -> "%.1f ms".format(fpsState.frameTimeMs)
         }
 
         // The panel rate is a separate fact. A 90 fps game on a 144 Hz screen
@@ -646,12 +646,10 @@ class OverlayService : Service() {
             "FRAMESCOPE"
         }
 
-        // Support every selectable row, including the observed cap and heat pair.
+        // Cap is deliberately absent: it belongs to the saved session detail,
+        // never to the live overlay.
         rowViews["FPS"]?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         rowViews["FRAME"]?.text = if (fpsState.valid) "%.1f ms".format(fpsState.frameTimeMs) else "--"
-        rowViews["CAP"]?.text = fpsState.detectedCapFps?.let { cap ->
-            "$cap" + if (fpsState.capCause == "heat") " heat" else ""
-        } ?: "--"
         rowViews["CPU"]?.text = system.cpuPercent.finiteOrNull()?.let { "${it.roundToInt()}%" } ?: "--"
         rowViews["CPUF"]?.text = system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
         rowViews["GPU"]?.text = system.gpuFreqMHz?.let { "$it MHz" } ?: (system.gpuName ?: "--")

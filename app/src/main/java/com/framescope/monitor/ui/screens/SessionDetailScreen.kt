@@ -617,6 +617,11 @@ private fun CapChangesPanel(session: SessionRecord) {
                         append(fmt(change.toFps.toFloat(), 0))
                         append(" fps")
                         if (change.cause == "heat") append(" · heat")
+                        change.temperatureC?.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { temp ->
+                            append(" at ")
+                            append(fmt(temp, 1))
+                            append(" °C")
+                        }
                         if (change.thermalStatus != null) {
                             append(" · ")
                             append(thermalStatusLabel(change.thermalStatus))

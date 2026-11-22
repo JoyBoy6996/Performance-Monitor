@@ -263,6 +263,9 @@ class SessionLogger(private val store: SessionStore) {
                     fromFps = lastCapFps,
                     toFps = capFps,
                     thermalStatus = thermalStatus,
+                    // The real temperature of this cap moment, not the peak of
+                    // the whole run and never a guessed "hot" number.
+                    temperatureC = temp.finiteOrNull()?.takeIf { it > 0f },
                     cause = if (capCause == "heat") "heat" else "measured"
                 )
             )

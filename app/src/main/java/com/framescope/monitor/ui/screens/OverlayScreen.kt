@@ -57,7 +57,7 @@ import com.framescope.monitor.ui.theme.status
 import java.util.Locale
 
 private val ALL_ROWS = listOf(
-    "FPS", "FRAME", "CAP", "SRC", "CPU", "CPUF", "GPU", "TEMP", "HEAT", "BAT", "POWER", "MEM", "REFRESH", "APP"
+    "FPS", "FRAME", "SRC", "CPU", "CPUF", "GPU", "TEMP", "HEAT", "BAT", "POWER", "MEM", "REFRESH", "APP"
 )
 
 private val STYLE_LABELS = listOf("Pill", "Compact", "Classic", "Detailed", "RTSS")
@@ -584,9 +584,6 @@ private fun overlayRowValue(
 ): String = when (key.uppercase()) {
     "FPS" -> fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--"
     "FRAME" -> fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "--"
-    "CAP" -> fps.detectedCapFps?.let { cap ->
-        "$cap" + if (fps.capCause == "heat") " heat" else ""
-    } ?: "--"
     "CPU" -> system.cpuPercent.finiteOrNull()?.let { "${it.toInt()}%" } ?: "--"
     "CPUF" -> system.cpuFreqMHz?.let { "$it MHz" } ?: "--"
     "GPU" -> system.gpuFreqMHz?.let { "$it MHz" } ?: system.gpuName?.let { it.take(14) } ?: "--"

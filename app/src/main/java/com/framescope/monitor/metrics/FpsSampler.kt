@@ -1633,7 +1633,7 @@ class FpsSampler(
          * fallback is used. The rest of the sample budget is left for that
          * fallback, so a slow layer dump can no longer blank the overlay.
          */
-        private const val OWN_LAYER_BUDGET_MS = 4_500L
+        private const val OWN_LAYER_BUDGET_MS = 1_800L
 
         /** How long a game-surface check may take, and how long it is trusted. */
         private const val GAME_CHECK_TIMEOUT_MS = 3_000L

@@ -111,6 +111,15 @@ class FpsPollingEngine(
     }
 
     /**
+     * Makes sure the device-wide counter exists before it is read.
+     *
+     * The screen-wide `totalFrames` line is part of the same TimeStats dump the
+     * per-layer counters use. If collection is off after a reboot, asking for
+     * the global counter first reads nothing at all and the pill shows "--".
+     */
+    suspend fun ensureReady(): Boolean = ensureEnabled()
+
+    /**
      * Reads the frames of the app in front.
      *
      * Returns null when the counters are not there - an older Android, a build

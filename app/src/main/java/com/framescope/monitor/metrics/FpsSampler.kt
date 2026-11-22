@@ -191,6 +191,7 @@ class FpsSampler(
     private var sceneTotalFrames = 0L
     private var sceneJankFrames = 0L
     private var sceneLastTimestampNs = 0L
+    private var sceneLastFreshAtMs = 0L
     private var sceneLayerKey = ""
 
     /** Counts the frames of the gfxinfo provider. */
@@ -269,6 +270,7 @@ class FpsSampler(
         sceneTotalFrames = 0L
         sceneJankFrames = 0L
         sceneLastTimestampNs = 0L
+        sceneLastFreshAtMs = 0L
         sceneLayerKey = ""
         sceneCalculatorLayer = ""
         sceneFpsCalculator.reset()
@@ -398,6 +400,9 @@ class FpsSampler(
         // to turn a 90 fps match into 144. It is tried FIRST for a non-game so the
         // pill never waits for slow per-layer probes and then shows nothing.
         if (!gameTarget) {
+            // TimeStats prints nothing until it is switched on. Make sure the
+            // device-wide counter exists before asking for its totalFrames line.
+            counters.ensureReady()
             val fromGlobal = sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
             if (fromGlobal != null) return fromGlobal
 
@@ -1108,15 +1113,12 @@ class FpsSampler(
             if (presents.size < MIN_EXACT_FRAMES) return
             val spanNs = presents.last() - presents.first()
             if (spanNs <= 0L) return
-            // Scene drops to zero as soon as no new frame arrives. A ring buffer
-            // keeps old timestamps long after a screen stopped drawing, so a
-            // reading whose newest frame is older than one second is history,
-            // not the current FPS. Both clocks are tried; a build that stamps
-            // presents on an unmatched clock simply has no reading here.
-            val ageNs = presentationAgeNs(
-                presents.last(), nowUptimeNs, nowElapsedNs, SCENE_STALE_NS
-            ) ?: return
-            val ageMs = ageNs / 1_000_000L
+            // The age is only for the report. Some builds stamp presents on a
+            // clock this process cannot match; throwing the span away then made
+            // a live game read "--". Freshness is checked below by looking for
+            // NEW timestamps since the last poll, which needs no shared clock.
+            val ageNs = presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs)
+            val ageMs = ageNs?.let { it / 1_000_000L } ?: 0L
             val fps = (presents.size - 1) * 1_000_000_000f / spanNs
             // An idle surface presents a handful of frames a second. Calling
             // that the game's FPS would be the wrong number again.
@@ -1161,10 +1163,23 @@ class FpsSampler(
             sceneTotalFrames = 0L
             sceneJankFrames = 0L
             sceneLastTimestampNs = 0L
+            sceneLastFreshAtMs = 0L
         }
         val newPresents = if (sceneLastTimestampNs > 0L) {
             best.presents.filter { it > sceneLastTimestampNs }
         } else best.presents
+        // Scene drops a reading when the surface stops producing NEW frames.
+        // This works even when the device's present timestamps use a clock this
+        // process cannot compare: the ring buffer stops changing, so the FPS is
+        // refused instead of being held forever.
+        val nowElapsedMs = SystemClock.elapsedRealtime()
+        if (newPresents.isEmpty()) {
+            if (sceneLastFreshAtMs == 0L ||
+                nowElapsedMs - sceneLastFreshAtMs > SCENE_STALE_MS
+            ) return null
+        } else {
+            sceneLastFreshAtMs = nowElapsedMs
+        }
         val newDeltas = newPresents.zipWithNext { a, b -> b - a }
         sceneTotalFrames += newPresents.size
         sceneJankFrames += computeFrameStats(newDeltas)?.jank?.toLong() ?: 0L
@@ -1526,11 +1541,12 @@ class FpsSampler(
         private const val MIN_UNATTRIBUTED_FPS = 24f
 
         /**
-         * How long one real reading survives a single missed poll. Past this
-         * point there are no fresh frames to justify it and the number is
-         * blanked, the way Scene drops a stale reading.
+         * How long one real reading survives missed polls. A privileged shell
+         * call can take a couple of seconds under load; three seconds keeps the
+         * last true number through that, then blanks it. It can never look like
+         * the old five-minute "stuck FPS" bug.
          */
-        private const val KEEP_LAST_READING_NS = 1_000_000_000L
+        private const val KEEP_LAST_READING_NS = 3_000_000_000L
 
         /**
          * How long the game that was just in front stays the measurement target
@@ -1548,13 +1564,11 @@ class FpsSampler(
         private const val FRAME_MAX_AGE_NS = 2_000_000_000L
 
         /**
-         * How recent the newest present must be to count as a live FPS.
-         *
-         * Scene's own calculator uses a shorter stale window; one poll of a
-         * privileged shell can take longer, so one second still rejects an old
-         * ring buffer without blanking a live screen between polls.
+         * How long a layer reading stays live when its ring buffer stops
+         * changing. Scene drops stale frames the same way; checking for NEW
+         * timestamps also works on builds whose clocks cannot be compared.
          */
-        private const val SCENE_STALE_NS = 1_000_000_000L
+        private const val SCENE_STALE_MS = 1_000L
 
         /**
          * How long the latency dump of a package's layers may take.

@@ -278,8 +278,16 @@ class MetricsEngine(
         sources[SystemMetric.RAM_PERCENT] = memory.source
 
         val refresh = collectors.refreshRate()
-        availability[SystemMetric.REFRESH_HZ] = refresh.availability
-        sources[SystemMetric.REFRESH_HZ] = refresh.source
+        // DisplayManager reports the rate of this app's window, which can be held
+        // to 120 while the panel runs at 144. SurfaceFlinger measures the panel
+        // itself; only fall back to DisplayManager when no shell is connected.
+        val panelRefreshHz = fpsSampler.displayHz.value?.takeIf { it > 0f }
+        availability[SystemMetric.REFRESH_HZ] = if (panelRefreshHz != null) {
+            MetricAvailability.AVAILABLE
+        } else refresh.availability
+        sources[SystemMetric.REFRESH_HZ] = if (panelRefreshHz != null) {
+            "SurfaceFlinger"
+        } else refresh.source
 
         val batteryValue = battery.value
         val memoryValue = memory.value
@@ -296,7 +304,7 @@ class MetricsEngine(
             ramPercent = memoryValue?.let {
                 if (it.totalBytes > 0L) (it.usedBytes * 100 / it.totalBytes).toInt() else null
             },
-            refreshHz = refresh.value,
+            refreshHz = panelRefreshHz ?: refresh.value,
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,

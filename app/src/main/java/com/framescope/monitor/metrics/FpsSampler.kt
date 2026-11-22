@@ -39,6 +39,22 @@ class FpsSampler(
     private val _state = MutableStateFlow(FpsState())
     val state: StateFlow<FpsState> = _state.asStateFlow()
 
+    /**
+     * The panel's own refresh rate, measured from SurfaceFlinger.
+     *
+     * Kept apart from the frame rate: the panel can run at 144 Hz while the game
+     * presents 90. A display rate has never been a game frame rate, and the two
+     * are shown and stored separately.
+     */
+    private val _displayHz = MutableStateFlow<Float?>(null)
+    val displayHz: StateFlow<Float?> = _displayHz.asStateFlow()
+
+    /** When the shell last answered with a display period, and when to ask again. */
+    @Volatile
+    private var displayHzAtMs = 0L
+    @Volatile
+    private var lastDisplayHzAttemptMs = 0L
+
     private val detector = ForegroundDetector(hub)
 
     /**
@@ -271,6 +287,7 @@ class FpsSampler(
      */
     suspend fun sample(targetFps: Int = 60, thermalStatus: Int? = null): FpsState {
         currentThermalStatus = thermalStatus?.takeIf { it in 0..6 }
+        updateDisplayHzFromShell()
         val nowUptime = SystemClock.uptimeNanos()
         detector.context = context
         val nowMs = SystemClock.elapsedRealtime()
@@ -803,12 +820,36 @@ class FpsSampler(
         return if (frameMs > 0f) 1000f / frameMs else null
     }
 
-    /** The refresh rate of the display that is on, when the system can tell. */
+    /**
+     * The refresh rate of the panel itself, not the rate of this app's window.
+     *
+     * SurfaceFlinger's latency header is the first choice because it measures the
+     * screen the phone is actually presenting. DisplayManager is the fallback for
+     * builds without a privileged shell; it reports the window's rate, which is
+     * why the interface used to stop at 120 on a 144 Hz panel.
+     */
     private fun refreshRateHz(): Float? {
+        _displayHz.value?.takeIf {
+            it > 0f && SystemClock.elapsedRealtime() - displayHzAtMs < DISPLAY_HZ_EXPIRE_MS
+        }?.let { return it }
         val ctx = context ?: return null
-        val collectors = NativeCollectors(ctx.applicationContext)
-        val rate = collectors.refreshRate()
-        return rate.value
+        return NativeCollectors(ctx.applicationContext).refreshRate().value
+    }
+
+    /** Refreshes the panel rate at most once every few seconds. */
+    private suspend fun updateDisplayHzFromShell() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDisplayHzAttemptMs < DISPLAY_HZ_RETRY_MS) return
+        lastDisplayHzAttemptMs = now
+        val dump = hub.execOrNull(
+            ShellCommands.surfaceLatencyDefault(),
+            DISPLAY_HZ_TIMEOUT_MS
+        )?.out.orEmpty()
+        val hz = refreshHzFromLatencyDump(dump)
+        if (hz != null) {
+            displayHzAtMs = now
+            _displayHz.value = hz
+        }
     }
 
     /**
@@ -1446,6 +1487,14 @@ class FpsSampler(
         private const val HISTORY_SIZE = 60
         private const val BASE_BACKOFF_NS = 2_000_000_000L
         private const val DEFAULT_FRAME_BUDGET_NS = 16_666_666L
+
+        /** How often the small latency dump is asked for the panel period. */
+        private const val DISPLAY_HZ_RETRY_MS = 3_000L
+
+        /** How long a shell answer stays fresh. */
+        private const val DISPLAY_HZ_EXPIRE_MS = 15_000L
+
+        private const val DISPLAY_HZ_TIMEOUT_MS = 2_000L
 
         /**
          * How long a known app in front is trusted.

@@ -56,6 +56,8 @@ class OverlayService : Service() {
     private var fpsText: TextView? = null
     private var unitText: TextView? = null
     private var frameText: TextView? = null
+    /** The panel rate, shown beside the game's frame rate and never mixed with it. */
+    private var displayText: TextView? = null
     private var recText: TextView? = null
     private var pillBackground: GradientDrawable? = null
     private var titleText: TextView? = null
@@ -155,6 +157,7 @@ class OverlayService : Service() {
     private fun buildOverlay() {
         graphView = null
         recText = null
+        displayText = null
         pillBackground = null
         if (!Settings.canDrawOverlays(this)) return
 
@@ -235,6 +238,9 @@ class OverlayService : Service() {
             textSize = 9f * currentScale
         }
         frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 11f * currentScale)
+        displayText = OverlayViews.label(this, "DISPLAY -- Hz", Color.parseColor("#7DD3FC")).apply {
+            textSize = 9f * currentScale
+        }
 
         layout.addView(recText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -246,6 +252,10 @@ class OverlayService : Service() {
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { marginStart = OverlayViews.dp(this@OverlayService, 3f) })
         layout.addView(frameText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) })
+        layout.addView(displayText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) })
@@ -618,6 +628,12 @@ class OverlayService : Service() {
             stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs) + capNote
             else -> "%.1f ms".format(fpsState.frameTimeMs) + capNote
         }
+
+        // The panel rate is a separate fact. A 90 fps game on a 144 Hz screen
+        // reads "90.0 FPS ... DISPLAY 144 Hz", never one number pretending to be both.
+        displayText?.text = system.refreshHz.finiteOrNull()?.let {
+            "DISPLAY ${it.roundToInt()} Hz"
+        } ?: "DISPLAY -- Hz"
 
         if (fpsState.history.isNotEmpty()) {
             graphView?.setValues(fpsState.history, target.toFloat())

@@ -305,7 +305,12 @@ data class SessionRecord(
     /** A short raw collector snapshot captured when the run was stopped. */
     val shellLogs: String = "",
     /** A note the user writes for this run. */
-    val note: String = ""
+    val note: String = "",
+    /**
+     * The panel's refresh rate during the run, in Hz, kept apart from the game's
+     * frame rate. Null when no source could report it; never a guessed number.
+     */
+    val displayHz: Float? = null
 )
 
 /** Device facts stored with a run so an old session still shows the right test setup. */

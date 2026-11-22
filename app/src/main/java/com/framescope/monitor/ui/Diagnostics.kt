@@ -27,6 +27,8 @@ object Diagnostics {
             "if [ -n \"\$L\" ]; then dumpsys SurfaceFlinger --latency \"\$L\" 2>/dev/null | head -8; fi",
         "echo '--- latency without a layer name ---'",
         "dumpsys SurfaceFlinger --latency 2>/dev/null | head -5",
+        "echo '--- display refresh period ns (6944444 = 144 Hz) ---'",
+        "dumpsys SurfaceFlinger --latency 2>/dev/null | head -1",
         "echo '--- gfxinfo frame stats ---'",
         "if [ -n \"\$PKG\" ]; then dumpsys gfxinfo \"\$PKG\" framestats 2>/dev/null | " +
             "grep -m4 -E 'Flags,|FrameCompleted' | cut -c1-170; fi",
@@ -69,6 +71,8 @@ object Diagnostics {
             } else {
                 "echo '--- measured layer ---'; echo 'layer=[$layer]'"
             },
+            "echo '--- display refresh period ns (6944444 = 144 Hz) ---'",
+            "dumpsys SurfaceFlinger --latency 2>/dev/null | head -1",
             "echo '--- counters of $app ---'",
             "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null | " +
                 "grep -B 6 -A 14 -F '$app' | head -50",

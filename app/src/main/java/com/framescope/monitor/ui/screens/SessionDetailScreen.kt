@@ -1025,6 +1025,17 @@ private fun AppMetricsCard(session: SessionRecord) {
             StatCell("5% LOW", fmt(session.low5Percent, 1), "FPS", MaterialTheme.status.warn,
                 modifier = Modifier.weight(1f))
         }
+        Spacer(Modifier.height(Space.sm))
+        Row(Modifier.fillMaxWidth()) {
+            // The panel rate belongs beside the frame rate but is not a frame rate.
+            StatCell(
+                "DISPLAY", session.displayHz?.let { fmt(it, 0) } ?: "--", "Hz",
+                MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f).padding(end = Space.sm)
+            )
+            StatCell("1% LOW", fmt(session.low1Percent, 1), "FPS", MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f))
+        }
         Spacer(Modifier.height(Space.md))
         SectionHeader("Device averages")
         Row(Modifier.fillMaxWidth()) {

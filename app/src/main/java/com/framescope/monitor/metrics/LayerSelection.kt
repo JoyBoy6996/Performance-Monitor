@@ -7,6 +7,25 @@ data class LayerSample(
     val presents: List<Long>
 )
 
+/**
+ * The panel's real refresh rate, from the first line of `dumpsys SurfaceFlinger --latency`.
+ *
+ * DisplayManager reports the rate of the calling app's window, which an app can be
+ * held to even while the panel runs faster. SurfaceFlinger prints the period of the
+ * display itself: 6944444 ns is exactly 144 Hz. The period is the only number read
+ * here - no frame timestamp is used, so an idle screen answers just as well.
+ */
+fun refreshHzFromLatencyDump(dump: String): Float? {
+    val periodNs = dump.lineSequence()
+        .mapNotNull { line -> line.trim().split(WHITESPACE).firstOrNull()?.toLongOrNull() }
+        .firstOrNull() ?: return null
+    // Sixteen milliseconds is 60 Hz; fifty is 20 Hz. Anything outside this
+    // range is a different unit or a broken dump, not a display.
+    if (periodNs <= 0L || periodNs > 50_000_000L) return null
+    val hz = 1_000_000_000f / periodNs
+    return hz.takeIf { it in 30f..360f }
+}
+
 /** What kind of surface a layer is. */
 enum class LayerKind {
     /** A buffer queue a renderer draws into - where a game draws. */

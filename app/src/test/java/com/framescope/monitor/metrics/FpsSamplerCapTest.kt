@@ -35,6 +35,12 @@ class FpsSamplerCapTest {
     }
 
     @Test
+    fun a144HzPanelDoesNotTurnOvershootIntoAGameRate() {
+        assertEquals(120f, sampler().settleToGameCap(133f, 144f), 0.01f)
+        assertEquals(144f, sampler().settleToGameCap(144f, 144f), 0.01f)
+    }
+
+    @Test
     fun aReadingBelowTheCapIsNeverInflated() {
         assertEquals(90f, sampler().settleToGameCap(90f, 120f), 0.01f)
         assertEquals(60f, sampler().settleToGameCap(60f, 120f), 0.01f)

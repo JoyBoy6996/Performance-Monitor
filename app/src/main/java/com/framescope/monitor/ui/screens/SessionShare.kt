@@ -356,6 +356,7 @@ private fun renderPages(session: SessionRecord, threshold: Int): List<Bitmap> {
     session.jitterMs?.let { painter.metricRow("Jitter", fmt(it, 2) + " ms") }
 
     painter.section("Target & cap")
+    painter.metricRow("Display refresh", session.displayHz?.let { fmt(it, 0) + " Hz" } ?: "--")
     painter.metricRow(
         "Held $threshold fps target", fmt(shareAtLeast(steadyFps(session), threshold), 1) + " %"
     )

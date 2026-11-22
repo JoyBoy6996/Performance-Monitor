@@ -297,6 +297,7 @@ class SessionStore(context: Context) {
         put("batteryCycles", record.batteryCycles ?: JSONObject.NULL)
         put("shellLogs", record.shellLogs)
         put("note", record.note)
+        put("displayHz", record.displayHz.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
         put("device", JSONObject().apply {
             put("model", record.device.model ?: JSONObject.NULL)
             put("platform", record.device.platform ?: JSONObject.NULL)
@@ -380,6 +381,9 @@ class SessionStore(context: Context) {
             },
             shellLogs = o.optString("shellLogs"),
             note = o.optString("note"),
+            displayHz = if (o.isNull("displayHz")) null else {
+                o.optDouble("displayHz").toFloat().finiteOrNull()
+            },
             device = o.optJSONObject("device").toDeviceInfo()
         )
     }
@@ -535,7 +539,8 @@ class SessionStore(context: Context) {
                     voltage_mv INTEGER,
                     battery_cycles INTEGER,
                     shell_logs TEXT,
-                    note TEXT
+                    note TEXT,
+                    display_hz REAL
                 )
                 """.trimIndent()
             )
@@ -611,6 +616,9 @@ class SessionStore(context: Context) {
                 addColumnIfMissing(db, TABLE_RECORDS, "avg_current_ma", "REAL")
                 addColumnIfMissing(db, TABLE_RECORDS, "voltage_mv", "INTEGER")
                 addColumnIfMissing(db, TABLE_RECORDS, "battery_cycles", "INTEGER")
+            }
+            if (oldVersion < 9) {
+                addColumnIfMissing(db, TABLE_RECORDS, "display_hz", "REAL")
             }
         }
 
@@ -728,6 +736,7 @@ class SessionStore(context: Context) {
                 put("battery_cycles", record.batteryCycles)
                 put("shell_logs", record.shellLogs)
                 put("note", record.note)
+                put("display_hz", record.displayHz.finiteOrNull())
             }
             writableDatabase.insertWithOnConflict(
                 TABLE_RECORDS,
@@ -809,6 +818,7 @@ class SessionStore(context: Context) {
                     val cyclesIdx = c.getColumnIndex("battery_cycles")
                     val shellLogsIdx = c.getColumnIndex("shell_logs")
                     val noteIdx = c.getColumnIndex("note")
+                    val displayHzIdx = c.getColumnIndex("display_hz")
                     list.add(
                         SessionRecord(
                             id = c.getString(c.getColumnIndexOrThrow("id")),
@@ -936,7 +946,10 @@ class SessionStore(context: Context) {
                                 c.getInt(cyclesIdx).takeIf { it >= 0 }
                             } else null,
                             shellLogs = if (shellLogsIdx >= 0) c.getString(shellLogsIdx).orEmpty() else "",
-                            note = if (noteIdx >= 0) c.getString(noteIdx).orEmpty() else ""
+                            note = if (noteIdx >= 0) c.getString(noteIdx).orEmpty() else "",
+                            displayHz = if (displayHzIdx >= 0 && !c.isNull(displayHzIdx)) {
+                                c.getFloat(displayHzIdx).finiteOrNull()
+                            } else null
                         )
                     )
                 }
@@ -967,7 +980,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 8
+            private const val DB_VERSION = 9
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

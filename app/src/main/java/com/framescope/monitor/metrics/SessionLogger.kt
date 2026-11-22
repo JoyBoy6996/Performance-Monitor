@@ -141,6 +141,8 @@ class SessionLogger(private val store: SessionStore) {
     private var low5Seen = Float.MAX_VALUE
     private var minFpsSeen = Float.MAX_VALUE
     private var maxFpsSeen = 0f
+    /** The panel rate, never mixed with the game's frame rate. */
+    private var displayHzSeen: Float? = null
 
     private val segments = ArrayList<SessionSegment>()
     private var segmentPackage = ""
@@ -209,6 +211,7 @@ class SessionLogger(private val store: SessionStore) {
         low5Seen = Float.MAX_VALUE
         minFpsSeen = Float.MAX_VALUE
         maxFpsSeen = 0f
+        displayHzSeen = null
 
         segments.clear()
         segmentPackage = ""
@@ -241,6 +244,12 @@ class SessionLogger(private val store: SessionStore) {
         val thermalStatus = metrics.thermalStatus?.takeIf { it in 0..6 }
         if (thermalStatus != null) lastThermalStatus = thermalStatus
         val bucketStatus = thermalStatus ?: lastThermalStatus
+
+        // The panel's rate is a static fact of the run, not a frame reading.
+        // Keep it separately so a 144 Hz screen is never reported as 144 fps.
+        metrics.refreshHz.finiteOrNull()?.takeIf { it > 0f }?.let { hz ->
+            if (displayHzSeen == null || hz > displayHzSeen!!) displayHzSeen = hz
+        }
 
         // The sampler has already confirmed this rate over several polls. A change
         // here is a real cap change - heat dropping 120 to 90, or the player setting
@@ -716,7 +725,8 @@ class SessionLogger(private val store: SessionStore) {
             avgCurrentMa = avgCurrent,
             voltageMv = voltage,
             batteryCycles = cycles,
-            shellLogs = shellLogs
+            shellLogs = shellLogs,
+            displayHz = displayHzSeen
         )
 
         store.add(record)

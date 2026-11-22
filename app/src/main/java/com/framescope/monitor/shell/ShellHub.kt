@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import com.framescope.monitor.core.AppSettings
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -71,6 +72,7 @@ class ShellHub(
             ?: File(System.getProperty("java.io.tmpdir", "."), "framescope-adb-test"),
         appContext
     )
+    private val settings = appContext?.let { AppSettings(it) }
     private val adb = AdbTcpRunner(port = adbPort, keys = adbKeys)
     private val adbRepairer: AdbBridgeRepairer get() = adb
 
@@ -126,7 +128,12 @@ class ShellHub(
         if (state == ShizukuRunner.ConnectionState.READY) {
             tryGrantDumpPermission()
         }
-        val adbWanted = adb.authorisationStored || _adbReady.value || forceReconnect
+        // A ROM may save the key when the user ticks "Always allow" without the
+        // app being able to write adb_keys itself. In that case the app's own
+        // stamp stays false, so remember that setup once succeeded and keep
+        // trying a silent reconnect instead of asking again every launch.
+        val setupDone = settings?.setupCompleted?.value == true
+        val adbWanted = adb.authorisationStored || _adbReady.value || forceReconnect || setupDone
         val adbOk = if (!adbWanted) {
             false
         } else {
@@ -188,7 +195,16 @@ class ShellHub(
      * any existing local ADB port is moved to the fixed port.
      */
     private suspend fun ensureAdbBridge(allowSetup: Boolean = false): Boolean {
-        if (runCatching { adb.isAvailable() }.getOrDefault(false)) return true
+        // Never offer the key on an automatic reconnect: if the phone really
+        // saved it, the handshake succeeds silently. If it did not, the user
+        // gets an honest status instead of a prompt loop.
+        val silentProbe = !allowSetup && !adb.authorisationStored
+        val live = if (silentProbe) {
+            runCatching { adb.isAvailableSilently() }.getOrDefault(false)
+        } else {
+            runCatching { adb.isAvailable() }.getOrDefault(false)
+        }
+        if (live) return true
 
         val helper = shizukuHelper()
         if (helper != null && runCatching { bootstrapAdbPort(helper) }.getOrDefault(false)) {
@@ -285,14 +301,21 @@ class ShellHub(
         }
 
         publishAdbState(true)
-        val keyStored = adb.authorisationStored || keyInstalledByShell
+        val keyStoredByApp = adb.authorisationStored || keyInstalledByShell
+        // The phone can save the key when "Always allow" is ticked even when the
+        // ROM refuses our in-shell write. Confirm with a second, silent socket
+        // without closing the live bridge, so the saved key is finally recorded.
+        val confirmedByDevice = !keyStoredByApp &&
+            runCatching { adb.confirmSavedKey() }.getOrDefault(false)
+        val keyStored = keyStoredByApp || confirmedByDevice
         return if (keyStored) {
             adbSuccessMessage()
         } else {
             "Local ADB bridge is live on $LOOPBACK:$adbPort — live FPS and telemetry work " +
-                "right now. This phone did not save Qstats' key, so after a reboot or " +
-                "USB debugging toggle repeat once: PC + USB cable, 'adb tcpip 5555', then " +
-                "Set up bridge here and tick “Always allow”. No Shizuku needed."
+                "right now. Qstats will retry silently on every launch. If this ROM still " +
+                "forgets the key after a reboot or USB toggle, tick “Always allow” once, " +
+                "or keep Shizuku with permission granted so the app can reopen port " +
+                "$adbPort by itself."
         }
     }
 

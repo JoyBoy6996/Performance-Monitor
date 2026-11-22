@@ -100,14 +100,19 @@ class AdbTcpRunner(
         closeSession()
     }
 
-    override suspend fun isAvailable(): Boolean = mutex.withLock {
+    override suspend fun isAvailable(): Boolean = probe(allowKeyOffer = true)
+
+    /** Reconnect without ever showing the "Allow USB debugging?" prompt. */
+    suspend fun isAvailableSilently(): Boolean = probe(allowKeyOffer = false)
+
+    private suspend fun probe(allowKeyOffer: Boolean): Boolean = mutex.withLock {
         val current = session
         if (current != null && current.isAlive) {
             return@withLock true
         }
 
         val opened = try {
-            openSession(force = true)
+            openSession(force = true, allowKeyOffer = allowKeyOffer)
         } catch (e: Exception) {
             lastError = e.message
             lastFailureAt = System.currentTimeMillis()
@@ -201,6 +206,34 @@ class AdbTcpRunner(
     }
 
     /**
+     * Confirms the phone kept our key by opening a second silent socket. Unlike
+     * [verifyStoredKey], the live session stays untouched, so a bridge that is
+     * working right now is never thrown away just to prove persistence.
+     */
+    suspend fun confirmSavedKey(): Boolean = mutex.withLock {
+        val opened = try {
+            openSessionAt(
+                host,
+                port,
+                force = true,
+                handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS,
+                allowKeyOffer = false
+            )
+        } catch (e: Exception) {
+            lastError = e.message
+            return@withLock false
+        }
+        val ok = try {
+            opened.exec(PROBE_COMMAND, PROBE_TIMEOUT_MS).out.contains(PROBE_MARK)
+        } catch (e: Exception) {
+            lastError = e.message ?: "The ADB bridge did not answer"
+            false
+        }
+        runCatching { opened.close() }
+        ok
+    }
+
+    /**
      * Installs our public key through a privileged shell that is already
      * available (Shizuku, or the app's own shell with DUMP). Doing this before
      * any ADB socket exists means the phone trusts the key in advance: the
@@ -253,8 +286,8 @@ class AdbTcpRunner(
         }
     }
 
-    private fun openSession(force: Boolean = false): AdbSession =
-        openSessionAt(host, port, force, HANDSHAKE_TIMEOUT_MS)
+    private fun openSession(force: Boolean = false, allowKeyOffer: Boolean = true): AdbSession =
+        openSessionAt(host, port, force, HANDSHAKE_TIMEOUT_MS, allowKeyOffer)
 
     private fun openSessionAt(
         targetHost: String,

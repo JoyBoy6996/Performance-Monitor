@@ -548,14 +548,54 @@ class ShellHub(
     }
 
     /**
+     * The shell of the app itself, while it is there.
+     *
+     * It answers the commands of the app so that a read does not start a
+     * process every time. The process runs with the app's own rights, so it
+     * may be given the permission to read the frame timelines of every app on
+     * the phone.
+     */
+    private var localSession: ShellSession? = null
+
+    /** Closes the shell of the app. */
+    fun closeLocalSession() {
+        localSession?.close()
+        localSession = null
+    }
+
+    /**
      * Runs a command in the app's own shell.
      *
-     * The process runs with the app's own rights, so it may be given the
-     * permission to read the frame timelines of every app on the phone. The
+     * The shell stays open between the commands, so a read does not start a
+     * process while the app that is being measured is trying to draw. The
      * answer is not cut short on the way out, which matters: the dump of a
      * game is bigger than what a binder call may carry.
      */
     private fun execLocalShell(command: String, timeoutMs: Long): ShellResult {
+        val session = localSession?.takeIf { it.isAlive } ?: run {
+            val fresh = runCatching { ShellSession(maxOutputBytes = LOCAL_SESSION_OUTPUT_BYTES) }.getOrNull()
+            localSession = fresh
+            fresh
+        } ?: return execLocalShellOnce(command, timeoutMs)
+        val result = session.run(command, timeoutMs)
+        if (!session.isAlive) localSession = null
+        if (result.status == ShellExecutionStatus.TIMEOUT) {
+            // The shell is stuck in a command that never ends. It is thrown
+            // away and the command runs again in a fresh one.
+            localSession = null
+            return execLocalShellOnce(command, timeoutMs)
+        }
+        _lastError.value = null
+        return result
+    }
+
+    /**
+     * Runs a command in a shell of its own.
+     *
+     * The fallback for a shell that could not be opened or that ran into its
+     * timeout: a process that is started for this one command only.
+     */
+    private fun execLocalShellOnce(command: String, timeoutMs: Long): ShellResult {
         return try {
             val process = ProcessBuilder("sh", "-c", command)
                 .redirectErrorStream(false)
@@ -618,6 +658,7 @@ class ShellHub(
 
     fun cleanup() {
         statusScope.cancel()
+        closeLocalSession()
         adb.cleanup()
         shizukuRunner.cleanup()
     }
@@ -730,5 +771,13 @@ class ShellHub(
         private const val LOOPBACK = "127.0.0.1"
         private const val PROMPT_WATCH_ATTEMPTS = 30
         private const val PROMPT_WATCH_INTERVAL_MS = 2_000L
+
+        /**
+         * How much the shell of the app may print.
+         *
+         * The answer does not travel through a binder here, so it does not have
+         * to fit into a transaction. The dump of a game is bigger than that.
+         */
+        private const val LOCAL_SESSION_OUTPUT_BYTES = 1024 * 1024
     }
 }

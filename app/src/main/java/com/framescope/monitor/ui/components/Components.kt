@@ -771,7 +771,7 @@ fun TerminalBlock(
                 modifier = Modifier.weight(1f)
             )
             if (onCopy != null) {
-                IconButton(onClick = { onCopy() }, modifier = Modifier.size(30.dp)) {
+                IconButton(onClick = { onCopy() }, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = Icons.Rounded.ContentCopy,
                         contentDescription = "Copy",

@@ -343,6 +343,8 @@ private fun SessionCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.Top
         ) {
+            AppIcon(session.appPackage)
+            Spacer(Modifier.width(Space.sm))
             Column(
                 Modifier
                     .weight(1f)
@@ -365,7 +367,7 @@ private fun SessionCard(
             TextButton(onClick = onExportPdf) {
                 Text("PDF")
             }
-            IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onShare, modifier = Modifier.size(44.dp)) {
                 Icon(
                     imageVector = Icons.Rounded.Share,
                     contentDescription = "Export session",
@@ -373,7 +375,7 @@ private fun SessionCard(
                     modifier = Modifier.size(18.dp)
                 )
             }
-            IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
                 Icon(
                     imageVector = Icons.Rounded.Delete,
                     contentDescription = "Delete session",

@@ -351,7 +351,7 @@ private fun appVersion(context: Context, packageName: String): String? = runCatc
 
 /** Real launcher icon at 38dp with 8dp corners, and a gamepad when unavailable. */
 @Composable
-private fun AppIcon(packageName: String) {
+fun AppIcon(packageName: String) {
     val context = LocalContext.current
     val bitmap = remember(packageName) {
         runCatching { context.packageManager.getApplicationIcon(packageName) }

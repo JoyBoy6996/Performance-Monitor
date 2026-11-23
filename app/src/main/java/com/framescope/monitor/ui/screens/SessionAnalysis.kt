@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.ui.components.ChartEvent
+import com.framescope.monitor.ui.components.ChartRange
 import com.framescope.monitor.ui.components.ChartPoint
 import com.framescope.monitor.ui.components.ChartSeries
 import com.framescope.monitor.ui.components.ChipRow
@@ -40,6 +41,7 @@ import com.framescope.monitor.ui.components.TelemetryColumn
 import com.framescope.monitor.ui.components.TelemetryDataTable
 import com.framescope.monitor.ui.components.TelemetryRow
 import com.framescope.monitor.ui.components.chartPoints
+import com.framescope.monitor.ui.components.withinWindow
 import com.framescope.monitor.ui.components.formatElapsed
 import com.framescope.monitor.ui.components.fpsStateColor
 import com.framescope.monitor.ui.components.hasRealTimes
@@ -192,6 +194,42 @@ fun SessionSummaryCard(session: SessionRecord, threshold: Int) {
                 modifier = Modifier.weight(1f)
             )
         }
+        Spacer(Modifier.height(Space.md))
+        Row(Modifier.fillMaxWidth()) {
+            MiniStat(
+                label = "Cap",
+                value = session.capChanges.lastOrNull()?.toFps?.toString()
+                    ?: session.capSeries.lastOrNull()?.takeIf { it > 0f }?.toInt()?.toString()
+                    ?: "--",
+                unit = "fps",
+                color = palette.fps,
+                modifier = Modifier.weight(1f)
+            )
+            MiniStat(
+                label = "Steadiness",
+                value = session.jitterMs?.let { String.format("%.1f", it) } ?: "--",
+                unit = "ms",
+                color = palette.frameTime,
+                modifier = Modifier.weight(1f)
+            )
+            MiniStat(
+                label = "Slow seconds",
+                value = session.dropSeconds.toString(),
+                unit = "s",
+                color = if (session.dropSeconds > 0) {
+                    MaterialTheme.status.warn
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                modifier = Modifier.weight(1f)
+            )
+            MiniStat(
+                label = "Cap changes",
+                value = session.capChanges.size.toString(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -204,10 +242,20 @@ fun SessionSummaryCard(session: SessionRecord, threshold: Int) {
  * what the temperature was at that second.
  */
 @Composable
-fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
+fun SessionChartsPanel(
+    session: SessionRecord,
+    threshold: Int,
+    chartDescription: String = "The graphs of the run. The same numbers are in the table."
+) {
     val palette = MaterialTheme.metric
     val times = session.seriesTimesMs
-    val events = sessionEvents(session, threshold)
+    val runEvents = sessionEvents(session, threshold)
+
+    // A long run is hard to read as a whole, so the user can look at the last
+    // minutes of it. The window ends at the last recorded moment, so "the last
+    // minute" means the last minute of the recording and not of the clock.
+    var range by remember(session.id) { mutableStateOf(ChartRange.FULL) }
+    val ranges = remember(session.durationMs) { ChartRange.availableFor(session.durationMs) }
 
     val charts = buildList {
         add(
@@ -218,12 +266,12 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                         label = "fps",
                         unit = "fps",
                         color = palette.fps,
-                        points = chartPoints(session.fpsSeries, times),
+                        points = chartPoints(session.fpsSeries, times).withinRange(range),
                         min = 0f,
                         target = threshold.toFloat()
                     )
                 ),
-                events = events,
+                events = runEvents.eventsWithin(range),
                 target = threshold.toFloat()
             )
         )
@@ -235,7 +283,7 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                         label = "frame time",
                         unit = "ms",
                         color = palette.frameTime,
-                        points = chartPoints(session.frameTimeSeries, times),
+                        points = chartPoints(session.frameTimeSeries, times).withinRange(range),
                         min = 0f
                     )
                 )
@@ -250,7 +298,7 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                             label = "cpu",
                             unit = "%",
                             color = palette.cpu,
-                            points = chartPoints(session.cpuSeries, times),
+                            points = chartPoints(session.cpuSeries, times).withinRange(range),
                             min = 0f,
                             max = 100f
                         )
@@ -267,7 +315,7 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                             label = "gpu",
                             unit = "%",
                             color = palette.gpu,
-                            points = chartPoints(session.gpuPercentSeries, times),
+                            points = chartPoints(session.gpuPercentSeries, times).withinRange(range),
                             min = 0f,
                             max = 100f
                         )
@@ -285,7 +333,7 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                             label = "temperature",
                             unit = "°C",
                             color = palette.temperature,
-                            points = chartPoints(temperature, times)
+                            points = chartPoints(temperature, times).withinRange(range)
                         )
                     )
                 )
@@ -300,7 +348,7 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                             label = "battery",
                             unit = "%",
                             color = palette.battery,
-                            points = chartPoints(session.batterySeries, times),
+                            points = chartPoints(session.batterySeries, times).withinRange(range),
                             min = 0f,
                             max = 100f
                         )
@@ -322,6 +370,17 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
     }
 
     Panel {
+        if (ranges.size > 1) {
+            ChipRow(
+                options = ranges.map { it.label },
+                selected = setOf(range.label),
+                onToggle = { label ->
+                    val entry = ranges.firstOrNull { it.label == label } ?: return@ChipRow
+                    range = entry
+                }
+            )
+            Spacer(Modifier.height(Space.sm))
+        }
         if (!hasRealTimes(times, session.fpsSeries)) {
             Text(
                 text = "This run was recorded before the app kept the moment of every " +
@@ -331,7 +390,7 @@ fun SessionChartsPanel(session: SessionRecord, threshold: Int) {
                 modifier = Modifier.padding(bottom = Space.sm)
             )
         }
-        LinkedChartGroup(charts = charts, chartHeight = 140.dp)
+        LinkedChartGroup(charts = charts, chartHeight = 140.dp, description = chartDescription)
     }
 }
 
@@ -418,6 +477,31 @@ fun SessionTablePanel(session: SessionRecord, threshold: Int) {
 }
 
 /**
+ * The events that fall inside a range of the run.
+ */
+private fun List<ChartEvent>.eventsWithin(range: ChartRange): List<ChartEvent> {
+    val window = range.windowMs ?: return this
+    if (isEmpty()) return this
+    val end = last().timeMs
+    val start = (end - window).coerceAtLeast(0L)
+    return filter { it.timeMs in start..end }
+}
+
+/**
+ * The part of a series that a range shows.
+ *
+ * The window ends at the last recorded moment of the series, so the last
+ * minute of a run is really the last minute of the recording.
+ */
+fun List<ChartPoint>.withinRange(range: ChartRange): List<ChartPoint> {
+    val window = range.windowMs ?: return this
+    if (size < 2) return this
+    val end = last().timeMs
+    val start = (end - window).coerceAtLeast(0L)
+    return withinWindow(start, end)
+}
+
+/**
  * The moments of a run that are worth pointing at.
  *
  * The events come from the recording itself: a change of the frame rate cap, a
@@ -425,8 +509,8 @@ fun SessionTablePanel(session: SessionRecord, threshold: Int) {
  */
 @Composable
 fun SessionTimelinePanel(session: SessionRecord, threshold: Int) {
-    val events = sessionEvents(session, threshold)
-    if (events.isEmpty()) {
+    val runEvents = sessionEvents(session, threshold)
+    if (runEvents.isEmpty()) {
         Panel {
             Text(
                 text = "Nothing worth pointing at in this run.",
@@ -444,7 +528,7 @@ fun SessionTimelinePanel(session: SessionRecord, threshold: Int) {
             color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(Modifier.height(Space.sm))
-        events.forEach { event ->
+        runEvents.forEach { event ->
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically

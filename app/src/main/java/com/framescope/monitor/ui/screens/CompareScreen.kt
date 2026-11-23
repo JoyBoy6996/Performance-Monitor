@@ -119,6 +119,8 @@ fun compareRuns(a: SessionRecord, b: SessionRecord): List<ComparisonRow> {
     add("Highest second", "fps", a.maxFps, b.maxFps, true)
     add("Average frame time", "ms", a.avgFrameTimeMs, b.avgFrameTimeMs, false)
     add("Longest frame", "ms", a.maxFrameTimeMs, b.maxFrameTimeMs, false)
+    add("Steadiness of the frames", "ms", a.jitterMs, b.jitterMs, false)
+    add("Average GPU", "%", averageOf(a.gpuPercentSeries), averageOf(b.gpuPercentSeries), false)
     add("Jank", "%", jankPercent(a), jankPercent(b), false)
     add("Frames", "", a.totalFrames.toFloat(), b.totalFrames.toFloat(), true, ComparisonFormat.COUNT)
     add("Length", "", a.durationMs / 1000f, b.durationMs / 1000f, null, ComparisonFormat.DURATION)
@@ -139,6 +141,18 @@ enum class ComparisonFormat {
 
     /** A length of time, as minutes and seconds. */
     DURATION
+}
+
+/**
+ * The average of a series, when the series has readings.
+ *
+ * The average is only used when both runs have the series, so the two numbers
+ * are calculated in the same way.
+ */
+private fun averageOf(series: List<Float>): Float? {
+    val values = series.filter { it.isFinite() && it > 0f }
+    if (values.isEmpty()) return null
+    return values.average().toFloat()
 }
 
 /** The share of the frames of a run that were janky, in percent. */
@@ -296,7 +310,8 @@ fun CompareScreen(
         item {
             Panel {
                 Text(
-                    text = "The axis is the time since the start of each run.",
+                    text = "Both runs start at 0:00 on this axis. A shorter run ends " +
+                        "earlier; its line is not stretched to fill the axis.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = Space.sm)

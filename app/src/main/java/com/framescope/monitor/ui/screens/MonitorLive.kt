@@ -67,6 +67,10 @@ enum class DashboardMetric(val key: String, val label: String) {
     POWER("power", "Power");
 
     companion object {
+        /** The stored list of keys, with the empty ones left out. */
+        fun keysOf(stored: String): Set<String> =
+            stored.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+
         /** The cards the dashboard offers. */
         val cards: List<DashboardMetric> = listOf(FPS, CPU, GPU, TEMPERATURE, RAM, POWER)
 

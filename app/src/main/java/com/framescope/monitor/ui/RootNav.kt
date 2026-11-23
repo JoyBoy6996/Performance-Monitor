@@ -2,6 +2,8 @@ package com.framescope.monitor.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -48,6 +50,7 @@ import com.framescope.monitor.ui.screens.SessionsScreen
 import com.framescope.monitor.ui.screens.SettingsScreen
 import com.framescope.monitor.ui.screens.ToolsScreen
 import com.framescope.monitor.ui.theme.AppBackdrop
+import com.framescope.monitor.ui.theme.LocalMotionEnabled
 import com.framescope.monitor.ui.theme.LocalSurfaceColors
 import com.framescope.monitor.ui.theme.Space
 
@@ -145,11 +148,18 @@ fun FrameScopeRoot(
                             )
                         }
                     } else {
+                        val motion = LocalMotionEnabled.current
                         AnimatedContent(
                             targetState = tab,
                             transitionSpec = {
-                                fadeIn(animationSpec = tween(220)) togetherWith
-                                    fadeOut(animationSpec = tween(160))
+                                // The animation follows the system: when the phone
+                                // is set to no animation, the screen changes at once.
+                                if (motion) {
+                                    fadeIn(animationSpec = tween(220)) togetherWith
+                                        fadeOut(animationSpec = tween(160))
+                                } else {
+                                    EnterTransition.None togetherWith ExitTransition.None
+                                }
                             },
                             label = "tab"
                         ) { current ->

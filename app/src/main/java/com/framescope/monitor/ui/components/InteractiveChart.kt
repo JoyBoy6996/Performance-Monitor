@@ -28,6 +28,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -55,7 +57,14 @@ fun InteractiveLineChart(
     events: List<ChartEvent> = emptyList(),
     showTimeAxis: Boolean = true,
     yAxisWidth: Dp = 40.dp,
-    maxDrawnPoints: Int = 600
+    maxDrawnPoints: Int = 600,
+    /**
+     * What a screen reader should say about the graph.
+     *
+     * A drawn line cannot be read out, so the chart says what it is and where
+     * the same numbers can be read as text.
+     */
+    description: String? = null
 ) {
     val usable = remember(series) { series.filter { it.points.size >= 2 } }
     if (usable.isEmpty()) {
@@ -132,6 +141,9 @@ fun InteractiveLineChart(
                 .fillMaxWidth()
                 .fillMaxHeight()
                 .padding(start = yAxisWidth)
+                .semantics {
+                    if (!description.isNullOrBlank()) contentDescription = description
+                }
         ) {
             val width = size.width
             val plotHeight = size.height

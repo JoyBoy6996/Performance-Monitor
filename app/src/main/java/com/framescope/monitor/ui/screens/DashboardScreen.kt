@@ -97,9 +97,9 @@ fun DashboardScreen(
     val liveHistory by container.engine.liveHistory.collectAsState()
     var customising by remember { mutableStateOf(false) }
     val cardKeys = container.settings.dashboardCards.flow.collectAsState().value
-        .split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        .let { DashboardMetric.keysOf(it) }
     val graphKeys = container.settings.dashboardGraphs.flow.collectAsState().value
-        .split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        .let { DashboardMetric.keysOf(it) }
     val scope = rememberCoroutineScope()
     val layer by container.engine.measuredLayer.collectAsState()
     val threshold = container.settings.fpsThreshold.flow.collectAsState().value

@@ -92,6 +92,12 @@ fun SettingsScreen(
     val threshold by settings.fpsThreshold.flow.collectAsState()
     val interval by settings.sampleIntervalMs.flow.collectAsState()
     val extraProtected by settings.protectedApps.flow.collectAsState()
+    val dashboardCards = DashboardMetric.keysOf(
+        settings.dashboardCards.flow.collectAsState().value
+    )
+    val dashboardGraphs = DashboardMetric.keysOf(
+        settings.dashboardGraphs.flow.collectAsState().value
+    )
 
     var installed by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     val pkg = remember {
@@ -682,6 +688,31 @@ fun SettingsScreen(
                         steps = 19
                     )
                 }
+            }
+        }
+
+        item { SectionHeader("Dashboard") }
+
+        item {
+            Panel {
+                Text(
+                    text = "What the Monitor screen shows",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = Space.sm)
+                )
+                DashboardCustomisation(
+                    cards = dashboardCards,
+                    graphs = dashboardGraphs,
+                    onCardsChange = { keys ->
+                        settings.dashboardCards.value =
+                            DashboardMetric.cards.filter { it.key in keys }.joinToString(",") { it.key }
+                    },
+                    onGraphsChange = { keys ->
+                        settings.dashboardGraphs.value =
+                            DashboardMetric.graphs.filter { it.key in keys }.joinToString(",") { it.key }
+                    }
+                )
             }
         }
 

@@ -115,7 +115,9 @@ data class LinkedChart(
 fun LinkedChartGroup(
     charts: List<LinkedChart>,
     modifier: Modifier = Modifier,
-    chartHeight: androidx.compose.ui.unit.Dp = 150.dp
+    chartHeight: androidx.compose.ui.unit.Dp = 150.dp,
+    /** What a screen reader should say about the graphs. */
+    description: String? = null
 ) {
     var selectedTimeMs by remember { mutableStateOf<Long?>(null) }
 
@@ -154,7 +156,8 @@ fun LinkedChartGroup(
                 onSelectTime = { time ->
                     selectedTimeMs = if (time == selectedTimeMs) null else time
                 },
-                events = chart.events
+                events = chart.events,
+                description = description
             )
         }
     }

@@ -128,6 +128,7 @@ fun SessionDetailScreen(
         session.appPackage.ifBlank { "Unknown app" }
     }
     var shareOpen by remember { mutableStateOf(false) }
+    var view by remember { mutableStateOf(SessionView.CHARTS) }
 
     Box(Modifier.fillMaxSize()) {
     FrameScopeScreen(
@@ -156,6 +157,37 @@ fun SessionDetailScreen(
             }
         }
     ) {
+        // The numbers of the run first, then the graphs, then the moments that
+        // are worth looking at, then the details.
+        item {
+            SessionSummaryCard(session = session, threshold = threshold)
+        }
+
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = Space.sm),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SessionViewToggle(view = view, onChange = { view = it })
+            }
+        }
+
+        item {
+            if (view == SessionView.CHARTS) {
+                SessionChartsPanel(session = session, threshold = threshold)
+            } else {
+                SessionTablePanel(session = session, threshold = threshold)
+            }
+        }
+
+        item { SectionHeader("What happened") }
+
+        item {
+            SessionTimelinePanel(session = session, threshold = threshold)
+        }
+
+        item { SectionHeader("Details") }
+
         item {
             SceneSessionCards(
                 session = session,

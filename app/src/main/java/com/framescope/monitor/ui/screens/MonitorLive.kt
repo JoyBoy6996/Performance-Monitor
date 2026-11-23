@@ -187,7 +187,7 @@ private fun LiveMetricCardFor(
                 accent = MaterialTheme.metric.temperature,
                 trend = history.temperatureC.asChartPoints(),
                 availability = temperatureAvailability(system),
-                footnote = thermalStatusLabel(system.thermalStatus),
+                footnote = system.thermalStatus?.let { thermalStatusLabel(it) },
                 modifier = modifier
             )
         }
@@ -308,7 +308,7 @@ fun LiveGraphs(
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Space.sm)) {
         metrics.forEach { entry ->
-            val points = pointsOf(entry, history)
+            val points = livePointsOf(entry, history)
             if (points.size < 2) return@forEach
             LiveGraphRow(
                 title = entry.label,
@@ -414,7 +414,7 @@ private fun temperatureAvailability(system: SystemMetrics): MetricAvailability =
     }
 
 /** The readings of one metric, as chart points. */
-private fun pointsOf(metric: DashboardMetric, history: LiveHistory): List<ChartPoint> =
+fun livePointsOf(metric: DashboardMetric, history: LiveHistory): List<ChartPoint> =
     when (metric) {
         DashboardMetric.FPS -> history.fps.asChartPoints()
         DashboardMetric.FRAME_TIME -> history.frameTimeMs.asChartPoints()
@@ -434,7 +434,7 @@ private fun seriesOf(
     history: LiveHistory,
     threshold: Int
 ): List<ChartSeries> {
-    val points = pointsOf(metric, history)
+    val points = livePointsOf(metric, history)
     return listOf(
         ChartSeries(
             label = metric.label,

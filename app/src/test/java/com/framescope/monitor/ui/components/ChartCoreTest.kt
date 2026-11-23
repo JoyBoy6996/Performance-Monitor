@@ -56,6 +56,15 @@ class ChartCoreTest {
     }
 
     @Test
+    fun aPinnedEdgeStaysWhereItWasPinned() {
+        val scale = buildChartScale(listOf(50f, 60f), pinnedMin = 0f)
+
+        // A frame rate does not go below zero, so the scale does not either.
+        assertEquals(0f, scale.min, 0.0001f)
+        assertTrue("max was ${scale.max}", scale.max >= 60f)
+    }
+
+    @Test
     fun aScaleOfOneValueStillHasRoom() {
         val scale = buildChartScale(listOf(60f))
 

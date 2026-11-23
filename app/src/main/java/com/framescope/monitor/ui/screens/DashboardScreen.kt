@@ -239,7 +239,10 @@ fun DashboardScreen(
             )
         }
 
+        // A graph without readings is left out, and so is the title of the
+        // section: an empty section says less than no section.
         val chosenGraphs = DashboardMetric.fromKeys(graphKeys, DashboardMetric.graphs)
+            .filter { livePointsOf(it, liveHistory).size >= 2 }
         if (chosenGraphs.isNotEmpty()) {
             item { SectionHeader("Live graphs") }
 

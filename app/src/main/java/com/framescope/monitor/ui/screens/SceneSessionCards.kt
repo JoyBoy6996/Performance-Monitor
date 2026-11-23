@@ -62,31 +62,37 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** One palette for the on-screen report and its PDF twin. */
+/**
+ * The palette of the detailed report.
+ *
+ * The colours are the ones of the app, so the report of a run looks like the
+ * rest of the screen instead of like a page out of another program. The PDF
+ * that the app exports keeps its own colours and is drawn by its own renderer.
+ */
 private object Scene {
-    val background = Color(0xFF0D0D0F)
-    val card = Color(0xFF18191C)
-    val border = Color(0xFF26282E)
-    val text = Color(0xFFE6E8EC)
-    val muted = Color(0xFF8E929B)
-    val blue = Color(0xFF3897F0)
-    val fps = Color(0xFFE8EAED)
-    val temp = Color(0xFFD97736)
-    val cpu = Color(0xFFE056FD)
-    val gpu = Color(0xFF4FC3F7)
-    val frame = Color(0xFF7CC4FA)
-    val total = Color(0xFF00E5FF)
-    val power = Color(0xFF2962FF)
-    val capacity = Color(0xFF90CAF9)
-    val chipTemp = Color(0xFF81D4FA)
+    val background = Color.Transparent
+    val card = Color(0xFF121620)
+    val border = Color(0xFF293241)
+    val text = Color(0xFFF1F4FA)
+    val muted = Color(0xFF929BAA)
+    val blue = Color(0xFF56C8F0)
+    val fps = Color(0xFF55D6A1)
+    val temp = Color(0xFFFFAA63)
+    val cpu = Color(0xFFB18CFF)
+    val gpu = Color(0xFF55B9D8)
+    val frame = Color(0xFF62A9FF)
+    val total = Color(0xFF35D6E8)
+    val power = Color(0xFFE86FA8)
+    val capacity = Color(0xFF7A8CFF)
+    val chipTemp = Color(0xFF9FD3C7)
     val warnBack = Color(0xFF2A211B)
     val warn = Color(0xFFFF8C42)
-    val platform = Color(0xFF7B61FF)
-    val host = Color(0xFF4A90E2)
-    val os = Color(0xFF3DDC84)
-    val profile = Color(0xFFFF6B35)
+    val platform = Color(0xFFB18CFF)
+    val host = Color(0xFF62A9FF)
+    val os = Color(0xFF55D6A1)
+    val profile = Color(0xFFFFAA63)
     val cluster = listOf(
-        Color(0xFF9C27B0), Color(0xFF00BFA5), Color(0xFF2979FF), Color(0xFFFF9100)
+        Color(0xFFB18CFF), Color(0xFF55D6A1), Color(0xFF62A9FF), Color(0xFFFFAA63)
     )
 }
 
@@ -475,69 +481,15 @@ fun SceneSessionCards(
             }
         }
 
-        // Card 5 - FPS + temperature right axis + CPU/GPU. One legend only.
-        SceneCard {
-            Text("FPS & Temperature(°C)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
-            Spacer(Modifier.height(8.dp))
-            val fpsCeil = (sPositive(session.fpsSeries).maxOrNull() ?: 120f)
-                .let { if (it > 130f) 144f else 120f }
-            SceneLineChart(
-                lines = listOf(
-                    ChartLineUi(sClamped(session.fpsSeries, 0f, fpsCeil), Scene.fps, 0f, fpsCeil),
-                    ChartLineUi(temps.map { it.coerceIn(0f, 110f) }, Scene.temp, 0f, 110f,
-                        strokeWidth = 1.5f),
-                    ChartLineUi(sClamped(session.cpuSeries, 0f, 100f), Scene.cpu, 0f, 100f),
-                    ChartLineUi(sClamped(session.gpuPercentSeries, 0f, 100f), Scene.gpu, 0f, 100f)
-                ),
-                leftLabels = (5 downTo 0).map { sfmt(fpsCeil * it / 5f, 0) },
-                rightLabels = listOf("110", "88", "66", "44", "22", "0"),
-                timeLabels = timeTicks(session)
-            )
-            Legend(
-                "FPS" to Scene.fps, "TEMP(°C)" to Scene.temp,
-                "CPU(%)" to Scene.cpu, "GPU(%)" to Scene.gpu
-            )
-            Text(
-                "TEMP MAX: ${sfmt(temps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${sfmt(temps.minOrNull(), 1)}°C   " +
-                    "AVG: ${sfmt(temps.avgOrNull(), 1)}°C",
-                style = tnumSmall, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-
-        // Card 6 - sharp 1.5dp sky-blue frame-time spikes.
-        SceneCard {
-            Text("Frame Time(ms)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
-            Spacer(Modifier.height(8.dp))
-            val maxFrame = (sPositive(session.frameTimeSeries).maxOrNull() ?: 100f)
-                .coerceAtLeast(100f)
-            SceneLineChart(
-                lines = listOf(
-                    ChartLineUi(
-                        sClamped(session.frameTimeSeries, 0f, maxFrame), Scene.frame,
-                        0f, maxFrame, spikes = true, strokeWidth = 1.5f
-                    )
-                ),
-                leftLabels = (5 downTo 0).map { sfmt(maxFrame * it / 5f, 0) },
-                timeLabels = timeTicks(session),
-                height = 150.dp
-            )
-            Text(
-                "MAX: ${sfmt(session.maxFrameTimeMs, 0)}ms",
-                style = tnumSmall, textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-
-        // Card 7 - total plus every detected cluster.
+        // The load of the processor, cluster by cluster. The total has its own
+        // chart above, next to the frame rate.
         SceneCard {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("CPU Usage(%)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+                Text("CPU by cluster(%)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
                 Text("Chart Options", style = tnumSmall)
             }
             Spacer(Modifier.height(8.dp))

@@ -98,8 +98,14 @@ fun buildChartScale(
         return ChartScale(centre - pad, centre + pad)
     }
 
+    // The padding gives the line some air. A pinned edge stays where it was
+    // pinned: a frame rate that is pinned to zero does not get a scale that
+    // goes below zero, because there is no frame rate below zero.
     val pad = (high - low) * 0.08f
-    return ChartScale(low - pad, high + pad)
+    return ChartScale(
+        min = if (pinnedMin != null) low else low - pad,
+        max = if (pinnedMax != null) high else high + pad
+    )
 }
 
 /**

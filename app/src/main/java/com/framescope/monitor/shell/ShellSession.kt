@@ -101,6 +101,10 @@ class ShellSession(
             append(marker)
             append("' \"${'$'}__framescope_status\"\n")
         }
+        // The error output of the last command was read completely when its
+        // marker arrived, so the buffer can be emptied before the next one
+        // starts. Nothing of this command can be lost by it.
+        stderrBuffer.reset()
         try {
             stdin.write(script.toByteArray(Charsets.UTF_8))
             stdin.flush()
@@ -113,7 +117,6 @@ class ShellSession(
                 status = ShellExecutionStatus.FAILURE
             )
         }
-        stderrBuffer.reset()
 
         return when (val outcome = readUntilMarker(marker, timeoutMs)) {
             is Outcome.Found -> {

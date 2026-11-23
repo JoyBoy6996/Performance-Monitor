@@ -146,6 +146,12 @@ class SystemSampler(private val hub: ShellHub) {
         val thermalStatus = Parsers.parseThermalStatus(part(3))
         val identity = Parsers.parseDeviceIdentity(part(10))
         val detail = telemetryDetail(part(10), identity.first, chipZones, cpuGroups)
+        // Keep the unparsed privileged answer too: Shell Logs must show the actual
+        // UID/PLATFORM/GAME-MODE/CPUMAX/TZLINE lines, not a hand-written summary.
+        val rawTelemetry = listOf(part(10), part(11))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString("\n")
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
         record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")
@@ -179,6 +185,7 @@ class SystemSampler(private val hub: ShellHub) {
             platform = identity.first,
             performanceProfile = identity.second,
             telemetryDetail = detail,
+            telemetryRaw = rawTelemetry,
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,

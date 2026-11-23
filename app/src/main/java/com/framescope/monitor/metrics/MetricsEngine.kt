@@ -96,6 +96,9 @@ class MetricsEngine(
     private val _recording = MutableStateFlow(false)
     val recording: StateFlow<Boolean> = _recording.asStateFlow()
 
+    /** Raw privileged identity captured at Record time for this run's Shell Logs. */
+    private var startTelemetryRaw: String = ""
+
     private val _live = MutableStateFlow(LiveStats())
     val live: StateFlow<LiveStats> = _live.asStateFlow()
 
@@ -386,6 +389,7 @@ class MetricsEngine(
             platform = privileged.platform,
             performanceProfile = privileged.performanceProfile,
             telemetryDetail = privileged.telemetryDetail,
+            telemetryRaw = privileged.telemetryRaw,
             refreshHz = native.refreshHz,
             updatedAt = maxOf(native.updatedAt, privileged.updatedAt),
             availability = availability,
@@ -474,6 +478,7 @@ class MetricsEngine(
         // new run with the old counters would report the idle time before Record.
         systemSampler.resetDeltas()
         _cpuPercent.value = null
+        startTelemetryRaw = ""
         publishSystem()
         sessionLogger.start(
             packageName = target,
@@ -492,6 +497,7 @@ class MetricsEngine(
             }
             if (fresh != null && fresh.telemetryDetail.isNotBlank()) {
                 _privileged.value = fresh
+                startTelemetryRaw = fresh.telemetryRaw
                 publishSystem()
                 sessionLogger.adoptTelemetry(
                     detail = fresh.telemetryDetail,
@@ -528,6 +534,8 @@ class MetricsEngine(
     private fun sessionShellLogs(): String = buildString {
         appendLine("captured_from=${lastMeasuredPackage.value ?: "(none)"} " +
             "at=${android.os.SystemClock.uptimeMillis()}")
+        appendLine("--- telemetry (uid=2000 shizuku) ---")
+        appendLine(startTelemetryRaw.take(4_000).trim().ifBlank { "--" })
         appendLine("--- window manager ---")
         appendLine(lastForegroundOutput().take(3_000).trim().ifBlank { "--" })
         appendLine("--- frame counters ---")

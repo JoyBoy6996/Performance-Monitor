@@ -35,7 +35,10 @@ jobs:
           if [ -z "$SDKMANAGER" ]; then SDKMANAGER=$(command -v sdkmanager || true); fi
           if [ -n "$SDKMANAGER" ]; then
             yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-            "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" || \
+            # The app is built for Android 16, so platform 36 is the one the
+            # build needs. Asking for 35 left the compile without its
+            # platform on a runner that did not have it preinstalled.
+            "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || \
               echo "sdkmanager ne packages install nahi kiye - preinstalled SDK par chalega"
           else
             echo "sdkmanager nahi mila - runner ke preinstalled SDK par chalega"

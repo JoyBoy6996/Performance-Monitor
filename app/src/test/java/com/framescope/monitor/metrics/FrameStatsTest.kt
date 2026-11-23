@@ -69,6 +69,48 @@ class FrameStatsTest {
     }
 
     @Test
+    fun theRateIsTakenOverTheLastSecondAndNotOverTheWholeDump() {
+        // A layer dump holds more frames than a second: at 60 fps it is over two
+        // seconds of them. The rate has to describe the moment, so only the
+        // intervals of the last second belong to it.
+        val deltas = List(120) { 16_666_666L }
+        val recent = recentIntervals(deltas)
+
+        assertEquals(48, recent.size)
+        assertTrue(recent.sum() <= RECENT_WINDOW_NS)
+        assertTrue(recent.sum() > RECENT_WINDOW_NS - 50_000_000L)
+        assertEquals(60f, computeFrameStats(recent)!!.fps, 0.5f)
+    }
+
+    @Test
+    fun aDropAtTheEndIsStillVisibleInTheRate() {
+        // The first 120 frames are smooth, then the app drops to 30 fps. Over
+        // the whole dump that hardly changes the number; over the last second
+        // it is the rate of now.
+        val deltas = List(120) { 16_666_666L } + List(30) { 33_333_333L }
+        val recent = recentIntervals(deltas)
+
+        assertEquals(30f, computeFrameStats(recent)!!.fps, 1f)
+        assertTrue(computeFrameStats(deltas)!!.fps > 45f)
+    }
+
+    @Test
+    fun aSeriesSlowerThanTheWindowKeepsTheFramesItHas() {
+        // Ten frames a second: the last second of the dump holds eight of them,
+        // and those eight are the rate of now.
+        val deltas = List(10) { 100_000_000L }
+        val recent = recentIntervals(deltas)
+
+        assertEquals(8, recent.size)
+        assertEquals(10f, computeFrameStats(recent)!!.fps, 0.5f)
+    }
+
+    @Test
+    fun aSingleFrameIsNeverThrownAway() {
+        assertEquals(listOf(100_000_000L), recentIntervals(listOf(100_000_000L)))
+    }
+
+    @Test
     fun theFrameTimeAlwaysMatchesTheFrameRate() {
         val deltas = List(40) { 20_000_000L }
         val stats = computeFrameStats(deltas)!!

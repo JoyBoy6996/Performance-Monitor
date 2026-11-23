@@ -102,6 +102,28 @@ object DiagnosticsReport {
         if (!fps.reason.isNullOrBlank()) {
             sb.appendLine("reason: ${fps.reason}")
         }
+        sb.appendLine("open shell in use: ${hub.openShellActive}")
+
+        // --- Where the frames come from ------------------------------------------
+        sb.appendLine()
+        sb.appendLine("--- where the frames come from ---")
+        sb.appendLine(
+            "The frames are the ones SurfaceFlinger presented. The presentation" +
+                " timestamps of the layer of the app in front are the exact ones;"
+        )
+        sb.appendLine(
+            "the counters of SurfaceFlinger are the fallback and count every" +
+                " surface, not only the app in front."
+        )
+        sb.appendLine(
+            "The old backdoor `service call SurfaceFlinger 1013` is not used:" +
+                " Android removed that transaction (it answers NAME_NOT_FOUND), and" +
+                " it needed root in any case."
+        )
+        sb.appendLine(
+            "The privileged shell stays open between the reads, so a measurement" +
+                " does not start a process for every number it takes."
+        )
 
         // --- The device metrics --------------------------------------------------
         sb.appendLine()

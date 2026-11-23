@@ -640,9 +640,9 @@ class FpsSampler(
         // This counter sees every surface the compositor presents while the game
         // is in front, not only the game's own frames. A few extra status-bar or
         // overlay frames can therefore push a 90 fps lobby to 92 or a 120 fps
-        // match to 129. Hold the number at the cap it just crossed; never push a
-        // reading upward, and leave every other source untouched.
-        val settledFps = settleToGameCap(fps, displayHz)
+        // match to 129. The screen presents no more than its own rate, so the
+        // reading is held there; it is never pushed upward.
+        val settledFps = capAtDisplayRate(fps, displayHz)
         return GlobalFpsReading(
             fps = settledFps,
             frameTimeMs = 1_000f / settledFps,
@@ -722,13 +722,17 @@ class FpsSampler(
         val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
         val ageNs = presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs) ?: return null
         val deltas = presents.zipWithNext { a, b -> b - a }
+        // The rate is taken over the last second of the dump, not over the whole
+        // of it: the dump holds more frames than that, and an average over the
+        // whole dump answers for the past instead of for now.
+        val recent = recentIntervals(deltas)
         // This rejects a standing surface and a buffer that refreshed after a
         // long idle gap: neither series can describe a live frame rate.
-        val stats = computeFrameStats(deltas) ?: return null
+        val stats = computeFrameStats(recent) ?: return null
         val fps = stats.fps
         val displayHz = refreshRateHz()
         if (fps < MIN_GAME_FPS || !isPlausibleFps(fps, displayHz)) return null
-        val settled = settleToGameCap(fps, displayHz)
+        val settled = capAtDisplayRate(fps, displayHz)
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = "the active presented layer"
@@ -742,9 +746,9 @@ class FpsSampler(
             totalFrames = presents.size.toLong(),
             jankFrames = stats.jank.toLong(),
             sampleAgeMs = ageNs / 1_000_000L,
-            windowMs = deltas.sum() / 1_000_000L,
-            low1PercentFps = lowPercentFps(deltas, 1),
-            low5PercentFps = lowPercentFps(deltas, 5),
+            windowMs = recent.sum() / 1_000_000L,
+            low1PercentFps = lowPercentFps(recent, 1),
+            low5PercentFps = lowPercentFps(recent, 5),
             appPackage = pkg,
             nowUptime = nowUptime
         )
@@ -836,7 +840,7 @@ class FpsSampler(
         // The counter sees the game plus the small compositor overhead, so a
         // 90 fps lobby can read 93 and a 120 fps match 129. Settle a small
         // overshoot onto the real cap; never push a low reading upward.
-        val settledFps = settleToGameCap(fps.toFloat(), refreshRateHz())
+        val settledFps = capAtDisplayRate(fps.toFloat(), refreshRateHz())
         publish(
             fps = settledFps,
             frameTimeMs = if (settledFps > 0f) (1000f / settledFps).toFloat() else 0f,
@@ -935,7 +939,7 @@ class FpsSampler(
         if (!sceneResult.isSceneActive || sceneResult.fps <= 0) return null
         val fps = sceneResult.fps.toFloat()
         if (!isPlausibleFps(fps)) return null
-        val settled = settleToGameCap(fps, refreshRateHz())
+        val settled = capAtDisplayRate(fps, refreshRateHz())
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = layer
@@ -1000,40 +1004,28 @@ class FpsSampler(
         isPlausibleFps(fps, refreshRateHz())
 
     /**
-     * Removes the few extra frames the compositor adds on top of a game's cap.
+     * Holds a reading at the rate the screen can really present.
      *
-     * The device-wide counter is the only source that keeps counting when a
-     * game's own entry is frozen, but it counts every surface, so 90 can appear
-     * as 92 and 120 as 129. Only a small overshoot above a normal game cap is
-     * pulled down; a reading below a cap is never inflated, and a game running
-     * at a rate that is not one of these steps is published as measured.
+     * No screen shows more frames than it refreshes, so a reading above that
+     * rate describes a counter that saw every surface and not the app that is
+     * in front. Such a reading is held at the rate of the screen and never
+     * above it.
+     *
+     * A reading that the screen can show is published exactly as it was
+     * measured. A list of "real game rates" used to pull readings down to the
+     * next one of them, which turned a genuine 129 on a 144 Hz screen into
+     * 120 and a genuine 91 into 90: a number the device never measured. The
+     * screen's own rate is the only ceiling that is a measurement.
      */
-    internal fun settleToGameCap(fps: Float, displayHz: Float?): Float {
-        val ceiling = displayHz?.takeIf { it > 0f }
-        if (ceiling != null && fps > ceiling * 1.02f && fps <= ceiling * 1.5f) {
-            // The device-wide counter also sees the overlay and status bar, so a
-            // 120 fps match can read 133. No screen presents more frames than it
-            // refreshes: hold that overshoot at the ceiling, never above it. An
-            // absurd reading is left for the plausibility check to reject.
+    internal fun capAtDisplayRate(fps: Float, displayHz: Float?): Float {
+        val ceiling = displayHz?.takeIf { it > 0f } ?: return fps
+        if (fps > ceiling * 1.02f && fps <= ceiling * 1.5f) {
+            // The device-wide counter also sees the overlay and the status bar,
+            // so a 120 fps match can read 133. The screen still shows 120.
             return ceiling
         }
-        // Only real game rates belong here. Fractional panel multipliers such as
-        // 0.8 × 144 = 115.2 used to pull a genuine 120 down to 115.2 and a 90 down
-        // to 86.4 on a 144 Hz screen, which was a measurement error, not a cap.
-        // Some ROMs do not report the current refresh rate at all, so the standard
-        // rates are also the fallback ceiling: 133 sits just above 120 and is a
-        // compositor overshoot, while a genuine 144 is left untouched.
-        val caps = buildList {
-            addAll(listOf(30f, 45f, 60f, 72f, 90f, 120f, 144f, 165f))
-            if (ceiling != null) add(ceiling)
-        }
-            .filter { cap -> ceiling == null || cap <= ceiling * 1.02f }
-            .distinct()
-            .sortedDescending()
-        for (cap in caps) {
-            val tolerance = if (cap >= 120f) 1.12f else 1.08f
-            if (fps > cap && fps <= cap * tolerance) return cap
-        }
+        // An absurd reading is left alone here: the plausibility check rejects
+        // it instead of turning it into a believable number.
         return fps
     }
 
@@ -1237,10 +1229,25 @@ class FpsSampler(
 
         val result = latencyCounter.onSample(target.name, target.presents, nowUptime)
 
-        // The timestamps themselves are the frames, so they are the reading. A
-        // rolling counter that only sees a few new frames per dump underreports
-        // a game running at 90-120 as 24, which is what the overlay showed.
-        val rawFps = ownStats.fps
+        // The reading has to describe the window that is published with it.
+        //
+        // A layer dump holds the last ~127 frames, which is more than two
+        // seconds at 60 fps and four at 30 fps. An average over that time
+        // answers for the past two seconds, not for now, and a drop that just
+        // happened is spread over it until it is gone. The counter keeps the
+        // last second of frames instead, so the number and the window belong
+        // together and a drop is still there when it is shown.
+        //
+        // The timestamps themselves are the frames, so the rate is always
+        // computed from them; the whole dump is only used when the rolling
+        // window has not enough frames yet.
+        val rollingFps = result.recentFps
+        val rawFps = rollingFps ?: ownStats.fps
+        val measuredFrameTimeMs = if (rollingFps != null) {
+            result.frameTimeMs ?: ownStats.frameTimeMs
+        } else {
+            ownStats.frameTimeMs
+        }
         // An idle UI surface presents a handful of frames a second. Calling
         // that the game produced 4 fps was wrong; it is not a frame rate of
         // the game and is refused instead of replacing a real reading.
@@ -1249,12 +1256,12 @@ class FpsSampler(
             return null
         }
         // The presentation timestamps are exact, but this path used to bypass the
-        // cap and let the overlay show 133 on a 120 Hz screen.
-        val fps = settleToGameCap(rawFps, refreshRateHz())
+        // ceiling of the screen and let the overlay show 133 on a 120 Hz screen.
+        val fps = capAtDisplayRate(rawFps, refreshRateHz())
 
         publish(
             fps = fps,
-            frameTimeMs = if (fps == rawFps) ownStats.frameTimeMs else 1000f / fps,
+            frameTimeMs = if (fps == rawFps) measuredFrameTimeMs else 1000f / fps,
             source = "SurfaceFlinger latency",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = target.name,
@@ -1308,7 +1315,13 @@ class FpsSampler(
             val sample = parseLayerLatencies("@@@$layer\n$dump").firstOrNull() ?: return
             val presents = sample.presents.filter { it > 0L && it < Long.MAX_VALUE }
             if (presents.size < MIN_EXACT_FRAMES) return
-            val spanNs = presents.last() - presents.first()
+            // The rate is taken over the last second of the dump. The dump holds
+            // more frames than that - more than two seconds at 60 fps - and an
+            // average over the whole of it answers for the past instead of for
+            // now, which is where a drop that just happened gets lost.
+            val deltas = presents.zipWithNext { a, b -> b - a }
+            val recent = recentIntervals(deltas)
+            val spanNs = recent.sum()
             if (spanNs <= 0L) return
             // The age is only for the report. Some builds stamp presents on a
             // clock this process cannot match; throwing the span away then made
@@ -1316,7 +1329,7 @@ class FpsSampler(
             // NEW timestamps since the last poll, which needs no shared clock.
             val ageNs = presentationAgeNs(presents.last(), nowUptimeNs, nowElapsedNs)
             val ageMs = ageNs?.let { it / 1_000_000L } ?: 0L
-            val fps = (presents.size - 1) * 1_000_000_000f / spanNs
+            val fps = recent.size * 1_000_000_000f / spanNs
             // An idle surface presents a handful of frames a second. Calling
             // that the game's FPS would be the wrong number again.
             if (fps < MIN_GAME_FPS || !isPlausibleFps(fps)) return
@@ -1384,7 +1397,7 @@ class FpsSampler(
 
         // A few compositor frames on top make 90 read as 93 and 120 as 129.
         // Settle a small overshoot onto the cap, never push a low reading up.
-        val settled = settleToGameCap(best.fps, refreshRateHz())
+        val settled = capAtDisplayRate(best.fps, refreshRateHz())
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = best.layer
         pendingWarmUpReason = null
@@ -1398,8 +1411,8 @@ class FpsSampler(
             jankFrames = sceneJankFrames,
             sampleAgeMs = best.ageMs,
             windowMs = best.windowMs,
-            low1PercentFps = lowPercentFps(best.presents.zipWithNext { a, b -> b - a }, 1),
-            low5PercentFps = lowPercentFps(best.presents.zipWithNext { a, b -> b - a }, 5),
+            low1PercentFps = lowPercentFps(recentIntervals(best.presents.zipWithNext { a, b -> b - a }), 1),
+            low5PercentFps = lowPercentFps(recentIntervals(best.presents.zipWithNext { a, b -> b - a }), 5),
             appPackage = pkg,
             nowUptime = nowUptime
         )
@@ -1462,7 +1475,7 @@ class FpsSampler(
         }
         // This path also used to publish the raw reading, so the overlay could
         // show more than the screen refreshes even after the other paths were fixed.
-        val fps = settleToGameCap(rawFps, refreshRateHz())
+        val fps = capAtDisplayRate(rawFps, refreshRateHz())
 
         publish(
             fps = fps,

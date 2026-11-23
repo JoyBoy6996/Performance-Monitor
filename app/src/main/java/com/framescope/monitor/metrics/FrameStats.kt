@@ -8,6 +8,33 @@ data class FrameStats(
 )
 
 /**
+ * The intervals of the last part of a series.
+ *
+ * A layer dump holds the last ~127 frames, which is more than two seconds at
+ * 60 fps and four at 30 fps. A rate over all of them answers for the past
+ * rather than for now, and a drop that just happened is spread over it until
+ * it is gone. The intervals of the last second describe the moment.
+ *
+ * At least one interval is always kept, so a series that is slower than the
+ * window is not thrown away.
+ */
+fun recentIntervals(deltas: List<Long>, windowNs: Long = RECENT_WINDOW_NS): List<Long> {
+    if (deltas.isEmpty()) return deltas
+    var total = 0L
+    var start = deltas.size
+    while (start > 0) {
+        val span = total + deltas[start - 1]
+        if (span > windowNs && start < deltas.size) break
+        total = span
+        start--
+    }
+    return deltas.subList(start, deltas.size)
+}
+
+/** The window a live frame rate is measured over. */
+const val RECENT_WINDOW_NS = 800_000_000L
+
+/**
  * Turns the intervals between presented frames into a frame rate.
  * Returns null when the series cannot be a frame rate (idle gaps, impossible
  * intervals, too little data).

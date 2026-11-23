@@ -33,7 +33,9 @@ object Diagnostics {
         "if [ -n \"\$PKG\" ]; then dumpsys gfxinfo \"\$PKG\" framestats 2>/dev/null | " +
             "grep -m4 -E 'Flags,|FrameCompleted' | cut -c1-170; fi",
         "echo '--- privileged identity ---'",
-        "id 2>/dev/null || whoami 2>/dev/null"
+        "id 2>/dev/null || whoami 2>/dev/null",
+        "echo '--- the old SurfaceFlinger frame counter (transaction 1013) ---'",
+        "service call SurfaceFlinger 1013 2>&1 | head -2"
     ).joinToString("; ")
 
     /**
@@ -94,6 +96,8 @@ object Diagnostics {
             "dumpsys SurfaceFlinger --list 2>/dev/null | grep -F '$app' | head -8",
             "echo '--- the window in front ---'",
             "dumpsys window 2>/dev/null | grep -m2 -E 'mCurrentFocus|mFocusedApp'",
+            "echo '--- the old SurfaceFlinger frame counter (transaction 1013) ---'",
+            "service call SurfaceFlinger 1013 2>&1 | head -2",
             "echo 'captured_from=$app at=$atMs'"
         ).joinToString("; ")
     }

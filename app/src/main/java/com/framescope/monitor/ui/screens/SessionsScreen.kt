@@ -76,6 +76,7 @@ private fun fmt(value: Float?, decimals: Int): String {
 fun SessionsScreen(
     container: AppContainer,
     onOpenSession: (SessionRecord) -> Unit = {},
+    onOpenCompare: () -> Unit = {},
     bottomPadding: Dp = 24.dp
 ) {
     val sessions by container.store.sessions.collectAsState()
@@ -116,7 +117,14 @@ fun SessionsScreen(
         } else {
             "${sessions.size} recorded ${if (sessions.size == 1) "run" else "runs"}"
         },
-        bottomPadding = bottomPadding
+        bottomPadding = bottomPadding,
+        actions = {
+            if (sessions.size >= 2) {
+                TextButton(onClick = onOpenCompare) {
+                    Text("Compare")
+                }
+            }
+        }
     ) {
         if (sessions.isEmpty()) {
             item {

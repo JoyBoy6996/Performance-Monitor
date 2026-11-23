@@ -67,7 +67,7 @@ class UiSnapshotTest {
             com.framescope.monitor.ui.screens.SettingsScreen(container = container)
         }
         capture("05-tools-dark", dark = true) {
-            com.framescope.monitor.ui.screens.ToolsScreen(container = container)
+            com.framescope.monitor.ui.screens.ToolsScreen(container = container, onBack = {})
         }
         capture("06-sessions-dark", dark = true) {
             com.framescope.monitor.ui.screens.SessionsScreen(container = container)
@@ -92,7 +92,7 @@ class UiSnapshotTest {
             )
         }
         capture("10-compare-dark", dark = true, heightDp = 2400) {
-            com.framescope.monitor.ui.screens.CompareScreen(container = container)
+            com.framescope.monitor.ui.screens.CompareScreen(container = container, onBack = {})
         }
         capture("07-shell-dark", dark = true) {
             FrameScopeRoot(

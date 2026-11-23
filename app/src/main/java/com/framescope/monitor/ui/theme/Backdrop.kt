@@ -20,16 +20,27 @@ fun AppBackdrop(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
-    val colors = LocalSurfaceColors.current
     Box(modifier.fillMaxSize()) {
-        Canvas(Modifier.fillMaxSize()) {
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colors = listOf(colors.backdropTop, colors.backdropBottom),
-                    endY = size.height
-                )
-            )
-        }
+        BackdropWash(Modifier.fillMaxSize())
         content()
+    }
+}
+
+/**
+ * The gradient of the app background on its own.
+ *
+ * The heading of a screen uses it as well, so the frosted panel in front of the
+ * heading sits in the same light as the rest of the screen.
+ */
+@Composable
+fun BackdropWash(modifier: Modifier = Modifier) {
+    val colors = LocalSurfaceColors.current
+    Canvas(modifier) {
+        drawRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(colors.backdropTop, colors.backdropBottom),
+                endY = size.height
+            )
+        )
     }
 }

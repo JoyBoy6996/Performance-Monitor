@@ -19,7 +19,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Upload
-import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.FilledTonalButton
@@ -77,7 +76,6 @@ private fun Throwable.describe(): String {
 fun SettingsScreen(
     container: AppContainer,
     bottomPadding: Dp = 24.dp,
-    onOpenOverlay: () -> Unit = {},
     onOpenTools: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -179,26 +177,12 @@ fun SettingsScreen(
             }
         }
 
-        item { SectionHeader("Overlay and tools") }
+        item { SectionHeader("Tools") }
 
         item {
             Panel(contentPadding = 0.dp) {
                 SettingRow(
-                    title = "Overlay",
-                    supporting = "The numbers on top of the game, and how they are drawn",
-                    leading = {
-                        Icon(
-                            imageVector = Icons.Rounded.Layers,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    },
-                    onClick = onOpenOverlay
-                )
-                PanelDivider()
-                SettingRow(
-                    title = "Tools",
+                    title = "Device facts and shell",
                     supporting = "The facts of the device and a privileged shell",
                     leading = {
                         Icon(

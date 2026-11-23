@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material3.AlertDialog
@@ -202,7 +203,8 @@ fun compareVerdict(a: SessionRecord, b: SessionRecord, threshold: Int): String {
 @Composable
 fun CompareScreen(
     container: AppContainer,
-    bottomPadding: Dp = 24.dp
+    bottomPadding: Dp = 24.dp,
+    onBack: (() -> Unit)? = null
 ) {
     val sessions by container.store.sessions.collectAsState()
     val threshold = container.settings.fpsThreshold.flow.collectAsState().value
@@ -223,7 +225,18 @@ fun CompareScreen(
         } else {
             "Two runs, side by side"
         },
-        bottomPadding = bottomPadding
+        bottomPadding = bottomPadding,
+        actions = {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back to the sessions",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
     ) {
         if (sessions.size < 2) {
             item {

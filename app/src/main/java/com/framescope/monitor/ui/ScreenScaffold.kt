@@ -1,31 +1,41 @@
 package com.framescope.monitor.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.framescope.monitor.ui.components.FrostedHeading
 import com.framescope.monitor.ui.theme.Space
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The shape of every screen of the app.
+ *
+ * The heading floats on top of the content: the content scrolls under the
+ * frosted panel instead of being pushed down by it, so the panel always shows
+ * what is underneath it and the list keeps its full height.
+ *
+ * The space of the heading is measured, so the content starts below the panel
+ * whatever the size of the text is. A phone with big fonts gets a taller panel
+ * and the content moves down with it.
+ */
 @Composable
 fun FrameScopeScreen(
     title: String,
@@ -36,50 +46,34 @@ fun FrameScopeScreen(
     actions: @Composable RowScope.() -> Unit = {},
     content: LazyListScope.() -> Unit
 ) {
-    Scaffold(
-        modifier = modifier,
-        containerColor = Color.Transparent,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            TopAppBar(
-                modifier = Modifier
-                    .statusBarsPadding()
-                    .fillMaxWidth(),
-                title = {
-                    androidx.compose.foundation.layout.Column {
-                        Text(
-                            text = title,
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                        if (!subtitle.isNullOrBlank()) {
-                            Text(
-                                text = subtitle,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                },
-                actions = actions,
-                windowInsets = WindowInsets(0, 0, 0, 0),
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent,
-                    scrolledContainerColor = Color.Transparent
-                )
-            )
-        }
-    ) { padding ->
+    var headingHeight by remember { mutableStateOf(0.dp) }
+    val density = LocalDensity.current
+
+    Box(modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = Space.gutter,
                 end = Space.gutter,
-                top = padding.calculateTopPadding() + Space.md,
+                // The heading floats over the list, so the list starts below it.
+                top = headingHeight + Space.md,
                 bottom = bottomPadding
             ),
             verticalArrangement = Arrangement.spacedBy(Space.lg),
             content = content
+        )
+
+        FrostedHeading(
+            title = title,
+            subtitle = subtitle,
+            actions = actions,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .onSizeChanged { size ->
+                    val height = with(density) { size.height.toDp() }
+                    if (height != headingHeight) headingHeight = height
+                }
         )
     }
 }

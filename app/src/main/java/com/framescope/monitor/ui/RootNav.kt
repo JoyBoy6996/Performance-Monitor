@@ -15,10 +15,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Timeline
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
@@ -29,11 +27,7 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -57,26 +51,33 @@ import com.framescope.monitor.ui.theme.Space
 /**
  * The places the app can be in.
  *
- * Four of them. The overlay and the tools are pages inside the settings: they
- * are set up once and then left alone, and a bar with five places takes away
- * the room of the place where the numbers are.
+ * Four of them. The overlay is one of them because the numbers on top of the
+ * game are the reason the app exists, and the tools are a page inside the
+ * settings: they are set up once and then left alone.
  */
 enum class AppTab(val label: String, val icon: ImageVector) {
     MONITOR("Monitor", Icons.Rounded.Speed),
     SESSIONS("Sessions", Icons.Rounded.Timeline),
-    COMPARE("Compare", Icons.Rounded.CompareArrows),
+    OVERLAY("Overlay", Icons.Rounded.Layers),
     SETTINGS("Settings", Icons.Rounded.Tune)
 }
 
 /**
- * The pages that live inside the settings.
+ * A page that is open inside a tab.
  *
- * The overlay and the tools are not lost: they are two doors in the settings,
- * and they keep their own back button.
+ * A tab says where the user is; a page says what is open there. Choosing
+ * another tab closes the page, because a tab is always the stronger of the
+ * two: a session that is open must never hide the place the user just chose.
  */
-enum class SettingsPage {
-    OVERLAY,
-    TOOLS
+sealed interface OpenPage {
+    /** The report of one recorded run. */
+    data class Session(val session: SessionRecord) : OpenPage
+
+    /** The comparison of two recorded runs. */
+    data object Compare : OpenPage
+
+    /** The facts of the device and a privileged shell. */
+    data object Tools : OpenPage
 }
 
 /**
@@ -93,17 +94,13 @@ fun FrameScopeRoot(
     onRequestOverlayPermission: () -> Unit,
     onRequestScreenRecord: () -> Unit = {}
 ) {
-    var tab by rememberSaveable { mutableStateOf(AppTab.MONITOR) }
-    var openSession by remember { mutableStateOf<SessionRecord?>(null) }
-    var settingsPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+    val nav = rememberSaveable(saver = NavState.Saver) { NavState() }
 
-    // A session is a page inside the app, not a new Activity. Without this the
-    // hardware Back key falls through and finishes the whole app from the detail page.
-    BackHandler(enabled = openSession != null) {
-        openSession = null
-    }
-    BackHandler(enabled = openSession == null && settingsPage != null) {
-        settingsPage = null
+    // A page inside the app, not a new Activity. Without this the hardware
+    // Back key falls through and finishes the whole app from the report of a
+    // run. The page closes first and the tab stays where it was.
+    BackHandler(enabled = nav.hasOpenPage) {
+        nav.closePage()
     }
 
     // On a wide screen the content stays a readable column instead of stretching edge to edge.
@@ -122,35 +119,35 @@ fun FrameScopeRoot(
                 contentAlignment = Alignment.TopCenter
             ) {
                 Box(modifier = contentModifier) {
-                    val session = openSession
-                    val page = settingsPage
-                    if (session != null) {
-                        SessionDetailScreen(
-                            session = session,
-                            threshold = container.settings.fpsThreshold.flow.collectAsStateValue(),
-                            onBack = { openSession = null },
-                            onUpdateNote = { note -> container.store.updateNote(session.id, note) },
-                            bottomPadding = Space.xl
-                        )
-                    } else if (page != null) {
+                    val page = nav.openPage
+                    if (page != null) {
                         when (page) {
-                            SettingsPage.OVERLAY -> OverlayScreen(
-                                container = container,
-                                onRequestOverlayPermission = onRequestOverlayPermission,
-                                bottomPadding = Space.xl,
-                                onBack = { settingsPage = null }
+                            is OpenPage.Session -> SessionDetailScreen(
+                                session = page.session,
+                                threshold = container.settings.fpsThreshold.flow.collectAsStateValue(),
+                                onBack = { nav.closePage() },
+                                onUpdateNote = { note ->
+                                    container.store.updateNote(page.session.id, note)
+                                },
+                                bottomPadding = Space.xl
                             )
 
-                            SettingsPage.TOOLS -> ToolsScreen(
+                            OpenPage.Compare -> CompareScreen(
                                 container = container,
                                 bottomPadding = Space.xl,
-                                onBack = { settingsPage = null }
+                                onBack = { nav.closePage() }
+                            )
+
+                            OpenPage.Tools -> ToolsScreen(
+                                container = container,
+                                bottomPadding = Space.xl,
+                                onBack = { nav.closePage() }
                             )
                         }
                     } else {
                         val motion = LocalMotionEnabled.current
                         AnimatedContent(
-                            targetState = tab,
+                            targetState = nav.tab,
                             transitionSpec = {
                                 // The animation follows the system: when the phone
                                 // is set to no animation, the screen changes at once.
@@ -169,10 +166,10 @@ fun FrameScopeRoot(
                                 onRequestOverlayPermission = onRequestOverlayPermission,
                                 onRequestScreenRecord = onRequestScreenRecord,
                                 bottomPadding = Space.xl,
-                                onOpenSettings = { tab = AppTab.SETTINGS },
-                                onOpenSession = { openSession = it },
-                                onOpenOverlay = { settingsPage = SettingsPage.OVERLAY },
-                                onOpenTools = { settingsPage = SettingsPage.TOOLS }
+                                onOpenSettings = { nav.selectTab(AppTab.SETTINGS) },
+                                onOpenSession = { nav.openSession(it) },
+                                onOpenCompare = { nav.openCompare() },
+                                onOpenTools = { nav.openTools() }
                             )
                         }
                     }
@@ -180,8 +177,14 @@ fun FrameScopeRoot(
             }
 
             FrameScopeNavigationBar(
-                tab = tab,
-                onSelect = { tab = it }
+                tab = nav.tab,
+                onSelect = { selected ->
+                    // The bar is always the stronger of the two. Choosing another
+                    // place closes what was open inside the old one, so a report
+                    // of a run can never stay on top of the screen the user
+                    // just asked for.
+                    nav.selectTab(selected)
+                }
             )
         }
     }
@@ -241,7 +244,7 @@ private fun TabContent(
     bottomPadding: androidx.compose.ui.unit.Dp,
     onOpenSettings: () -> Unit,
     onOpenSession: (SessionRecord) -> Unit,
-    onOpenOverlay: () -> Unit,
+    onOpenCompare: () -> Unit,
     onOpenTools: () -> Unit
 ) {
     when (tab) {
@@ -254,16 +257,17 @@ private fun TabContent(
         AppTab.SESSIONS -> SessionsScreen(
             container = container,
             onOpenSession = onOpenSession,
+            onOpenCompare = onOpenCompare,
             bottomPadding = bottomPadding
         )
-        AppTab.COMPARE -> CompareScreen(
+        AppTab.OVERLAY -> OverlayScreen(
             container = container,
+            onRequestOverlayPermission = onRequestOverlayPermission,
             bottomPadding = bottomPadding
         )
         AppTab.SETTINGS -> SettingsScreen(
             container = container,
             bottomPadding = bottomPadding,
-            onOpenOverlay = onOpenOverlay,
             onOpenTools = onOpenTools
         )
     }

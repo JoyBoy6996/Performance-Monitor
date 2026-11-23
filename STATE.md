@@ -251,3 +251,55 @@ wins, because it is exact.
 The diagnostics now carry the evidence: what the window manager answered, and the
 counters the device printed the last time it was asked. A wrong number can now be
 explained from the text and not from a guess.
+
+## 1.2.10 - the prompt came back, and the hardware rows needed Shizuku
+
+Three defects, each of them in the way the app reaches the phone.
+
+### 1. The "Allow USB debugging?" dialog came back on every start
+
+The phone shows that dialog for every key it has **not** seen. The app offered its
+key once and remembered that only in memory, so the next start of the app offered
+it again - and the phone asked again. A ROM that ignores "Always allow from this
+computer" never stores the key in its own key store, so the stamp the app wrote
+was never set and the loop never ended.
+
+The fact that the key was handed over is now written to the app's own storage,
+next to the key itself (`AdbKeyStore.keyWasOffered`). A restart of the app, a
+reboot and a failed setup all find the flag and do not offer the key again. Only
+an explicit action - "Set up bridge", "Forget key" - may ask the phone again.
+
+### 2. The hardware rows needed Shizuku, although the bridge could answer them
+
+The CPU, GPU, temperature, power and memory rows were read through Shizuku only.
+The local ADB bridge was refused, because an unprivileged zero is a fake reading.
+
+That was true for the app's own process, which cannot read the procfs and sysfs
+nodes on Android 16 - but not for the bridge. `adbd` runs its commands as the
+`shell` user (uid 2000), exactly like the Shizuku UserService, and reads the same
+nodes. The bridge now answers the hardware reads as well. The app's own process
+still never answers one.
+
+### 3. A refused one-time permission was swallowed
+
+`pm grant` can only hand out a permission that carries the `development` flag,
+and `android.permission.DUMP` does - so the app's own shell can read the frame
+timelines of every app without Shizuku, once the permission is granted.
+
+The attempt was made once and never repeated, and the reason it failed was
+dropped. A refusal - a ROM that blocks `pm grant` from the shell, or a moment
+when the shell was not ready yet - was therefore invisible and permanent for the
+life of the app. The attempt is now repeated after half a minute, and the reason
+belongs in the status, so the app says why the one-time permission is not there.
+
+### Also
+
+- The reader of the app's own shell is given the time to empty the pipe. The
+  counters of a game are hundreds of kilobytes, and a reader that was cut short
+  lost exactly the layers that were drawing. A reader that is still busy now says
+  so, instead of handing over a half answer that looks complete.
+- An oversized answer from the UserService no longer throws the connection away.
+  It is a bad answer, not a broken session.
+- The build workflow asks for platform 36 and build-tools 36.0.0. It asked for 35
+  while the app is built for Android 16, and a runner without platform 36
+  preinstalled had nothing to compile against.

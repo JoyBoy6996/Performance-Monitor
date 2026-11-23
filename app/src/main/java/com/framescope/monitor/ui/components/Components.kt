@@ -196,17 +196,6 @@ fun StatCell(
     }
 }
 
-/** The word that explains why a reading is missing. */
-private fun availabilityLabel(availability: MetricAvailability): String = when (availability) {
-    MetricAvailability.SHIZUKU_REQUIRED -> "needs Shizuku"
-    MetricAvailability.PERMISSION_REQUIRED -> "needs permission"
-    MetricAvailability.UNSUPPORTED -> "not reported"
-    MetricAvailability.STALE -> "out of date"
-    MetricAvailability.WARMING_UP -> "starting up"
-    MetricAvailability.ERROR -> "read failed"
-    MetricAvailability.AVAILABLE -> ""
-}
-
 /** Label on the left, measured value on the right. */
 @Composable
 fun MetricLine(

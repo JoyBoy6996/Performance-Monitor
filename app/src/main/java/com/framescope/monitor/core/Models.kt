@@ -375,6 +375,31 @@ data class SessionSegment(
     val averageFps: Float
 )
 
+/**
+ * One reading of the live dashboard, with the moment it was taken.
+ *
+ * The moment is kept per reading and not per round: the frame rate is measured
+ * every few hundred milliseconds and the temperature every few seconds, and a
+ * graph that pretended both happened at the same time would be a lie.
+ */
+data class LivePoint(val timeMs: Long, val value: Float)
+
+/**
+ * The short memory of the live readings.
+ *
+ * It only exists so the graphs on the dashboard have something to draw. It is
+ * bounded, so a phone that runs all night does not collect a history of the
+ * whole night.
+ */
+data class LiveHistory(
+    val fps: List<LivePoint> = emptyList(),
+    val frameTimeMs: List<LivePoint> = emptyList(),
+    val cpuPercent: List<LivePoint> = emptyList(),
+    val temperatureC: List<LivePoint> = emptyList(),
+    val ramPercent: List<LivePoint> = emptyList(),
+    val gpuPercent: List<LivePoint> = emptyList()
+)
+
 /** Aggregated numbers for the session that is currently being recorded. */
 data class LiveStats(
     val avgFps: Float = 0f,

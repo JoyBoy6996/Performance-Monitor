@@ -1,6 +1,7 @@
 package com.framescope.monitor.ui.components
 
 import androidx.compose.ui.graphics.Color
+import com.framescope.monitor.core.LivePoint
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
@@ -252,3 +253,18 @@ fun chartPoints(values: List<Float>, timesMs: List<Long>): List<ChartPoint> {
 /** True when a run knows the moment of every one of its samples. */
 fun hasRealTimes(timesMs: List<Long>, values: List<Float>): Boolean =
     timesMs.isNotEmpty() && timesMs.size == values.size
+
+/**
+ * The live readings as chart points.
+ *
+ * The moments are made relative to the first one, so the time axis of a live
+ * graph starts at zero instead of at the uptime of the phone.
+ */
+fun List<LivePoint>.asChartPoints(): List<ChartPoint> {
+    if (isEmpty()) return emptyList()
+    val first = first().timeMs
+    return mapNotNull { point ->
+        if (!point.value.isFinite()) return@mapNotNull null
+        ChartPoint(point.timeMs - first, point.value)
+    }
+}

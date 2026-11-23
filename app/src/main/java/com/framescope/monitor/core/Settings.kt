@@ -100,6 +100,17 @@ class AppSettings(context: Context) {
     val protectBankApps = Pref(sp, "protect_bank_apps", true)
     val protectedApps = Pref(sp, "protected_apps", "")
 
+    /**
+     * The metric cards the dashboard shows.
+     *
+     * The list is a set of keys, so a card that is removed from the app does not
+     * take the choice of the user with it.
+     */
+    val dashboardCards = Pref(sp, "dashboard_cards", "fps,cpu,gpu,temp,ram,power")
+
+    /** The graphs the dashboard shows, in the same way. */
+    val dashboardGraphs = Pref(sp, "dashboard_graphs", "fps,frame,cpu,gpu,temp,ram")
+
     val fpsThreshold = Pref(sp, "fps_threshold", 45)
     val sampleIntervalMs = Pref(sp, "sample_interval", 400)
     val monitorWhileBackground = Pref(sp, "monitor_background", true)
@@ -162,6 +173,7 @@ class AppSettings(context: Context) {
         overlayX, overlayY, overlayShowGraph, overlayGraphHeight, overlayClickThrough,
         overlayPillTapToRecord,
         protectBankApps, protectedApps,
+        dashboardCards, dashboardGraphs,
         fpsThreshold, sampleIntervalMs, monitorWhileBackground,
         measurementEnabled, setupCompleted,
         themeMode, dynamicColor

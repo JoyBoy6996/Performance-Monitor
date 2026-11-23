@@ -31,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,7 +61,9 @@ import com.framescope.monitor.shell.AccessState
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.BarMeter
 import com.framescope.monitor.ui.components.FpsGauge
+import com.framescope.monitor.ui.components.InfoRow
 import com.framescope.monitor.ui.components.MetricLine
+import com.framescope.monitor.ui.components.MiniStat
 import com.framescope.monitor.ui.components.Panel
 import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.Sparkline
@@ -70,6 +73,7 @@ import com.framescope.monitor.ui.components.TerminalBlock
 import com.framescope.monitor.ui.components.fpsStateColor
 import com.framescope.monitor.ui.components.rememberPulseAlpha
 import com.framescope.monitor.ui.theme.MonoInline
+import com.framescope.monitor.ui.theme.metric
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
 import kotlinx.coroutines.launch
@@ -90,6 +94,12 @@ fun DashboardScreen(
     val status by container.hub.status.collectAsState()
     val diagnostic by container.engine.diagnostic.collectAsState()
     val liveSeries by container.engine.liveSeries.collectAsState()
+    val liveHistory by container.engine.liveHistory.collectAsState()
+    var customising by remember { mutableStateOf(false) }
+    val cardKeys = container.settings.dashboardCards.flow.collectAsState().value
+        .split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    val graphKeys = container.settings.dashboardGraphs.flow.collectAsState().value
+        .split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     val scope = rememberCoroutineScope()
     val layer by container.engine.measuredLayer.collectAsState()
     val threshold = container.settings.fpsThreshold.flow.collectAsState().value
@@ -165,7 +175,8 @@ fun DashboardScreen(
             HeroPanel(
                 fps = if (measuring) fps else FpsState(),
                 layer = if (measuring) layer else null,
-                threshold = threshold
+                threshold = threshold,
+                system = system
             )
         }
 
@@ -179,6 +190,67 @@ fun DashboardScreen(
         if (foreground == BuildConfig.APPLICATION_ID) {
             item {
                 SelfMeasureNotice()
+            }
+        }
+
+        item {
+            SectionHeader("Live metrics") {
+                TextButton(
+                    onClick = { customising = !customising },
+                    modifier = Modifier.padding(end = Space.sm)
+                ) {
+                    Text(if (customising) "Done" else "Customise")
+                }
+            }
+        }
+
+        if (customising) {
+            item {
+                Panel {
+                    Text(
+                        text = "Choose what the dashboard shows",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    DashboardCustomisation(
+                        cards = cardKeys,
+                        graphs = graphKeys,
+                        onCardsChange = { keys ->
+                            container.settings.dashboardCards.value =
+                                DashboardMetric.cards.filter { it.key in keys }.joinToString(",") { it.key }
+                        },
+                        onGraphsChange = { keys ->
+                            container.settings.dashboardGraphs.value =
+                                DashboardMetric.graphs.filter { it.key in keys }.joinToString(",") { it.key }
+                        }
+                    )
+                }
+            }
+        }
+
+        item {
+            LiveMetricCards(
+                fps = if (measuring) fps else FpsState(),
+                system = system,
+                history = liveHistory,
+                threshold = threshold,
+                metrics = DashboardMetric.fromKeys(cardKeys, DashboardMetric.cards)
+            )
+        }
+
+        val chosenGraphs = DashboardMetric.fromKeys(graphKeys, DashboardMetric.graphs)
+        if (chosenGraphs.isNotEmpty()) {
+            item { SectionHeader("Live graphs") }
+
+            item {
+                LiveGraphs(
+                    fps = if (measuring) fps else FpsState(),
+                    system = system,
+                    history = liveHistory,
+                    threshold = threshold,
+                    metrics = chosenGraphs
+                )
             }
         }
 
@@ -280,71 +352,112 @@ private fun AccessBanner(title: String, detail: String, onOpenSettings: () -> Un
 }
 
 @Composable
-private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
-    val stateColor = fpsStateColor(fps.fps, threshold)
+private fun HeroPanel(
+    fps: FpsState,
+    layer: String?,
+    threshold: Int,
+    system: SystemMetrics
+) {
+    val stateColor = frameRateStatusColor(fps, threshold)
     val ceiling = maxOf(threshold * 1.6f, 90f)
-    val stateText = when {
-        !fps.valid -> "No signal"
-        fps.fps >= threshold -> "On target"
-        fps.fps >= threshold * 0.75f -> "Slightly below"
-        else -> "Below target"
-    }
+    val stateText = frameRateStatus(fps, threshold)
+    val palette = MaterialTheme.metric
 
-    Panel {
+    Panel(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {
         BoxWithConstraints {
             // The gauge and the numbers only sit side by side when there is room for both.
             // On a narrow phone the reading stays square and the numbers go under it.
             val stacked = maxWidth < 320.dp
 
             val details: @Composable ColumnScope.() -> Unit = {
-                // The gauge already carries the colour. The chip is a label next to it.
+                // The state of the reading, in words. The gauge already carries the
+                // colour, so this chip is only the name of the state.
                 StatusPill(
                     text = stateText,
                     color = stateColor,
                     textColor = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.height(Space.md))
-                MetricLine(
-                    label = "Frame time",
-                    value = if (fps.valid) "${String.format("%.1f", fps.frameTimeMs)} ms" else "--",
-                    accent = MaterialTheme.colorScheme.onSurface
-                )
-                MetricLine(
-                    label = "Frames",
-                    value = fps.totalFrames.toString(),
-                    accent = MaterialTheme.colorScheme.onSurface
-                )
-                MetricLine(
-                    label = "Jank",
-                    value = fps.jankFrames.toString(),
-                    accent = if (fps.jankFrames > 0) {
-                        MaterialTheme.status.warn
-                    } else {
-                        MaterialTheme.colorScheme.onSurface
-                    }
-                )
-                MetricLine(
-                    label = "Target",
-                    value = "$threshold fps",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                MetricLine(
+
+                // The numbers of the reading, each on its own scale. The frame rate
+                // of the panel, the frame rate the game asks for and the frame rate
+                // that was measured are three different things and are told apart.
+                Row(Modifier.fillMaxWidth()) {
+                    MiniStat(
+                        label = "Target",
+                        value = "$threshold",
+                        unit = "fps",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    MiniStat(
+                        label = "Cap",
+                        value = fps.detectedCapFps?.toString() ?: "--",
+                        unit = "fps",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    MiniStat(
+                        label = "Frame time",
+                        value = if (fps.valid) String.format("%.1f", fps.frameTimeMs) else "--",
+                        unit = "ms",
+                        color = palette.frameTime,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(Modifier.height(Space.sm))
+                Row(Modifier.fillMaxWidth()) {
+                    MiniStat(
+                        label = "1% low",
+                        value = fps.low1PercentFps?.let { String.format("%.0f", it) } ?: "--",
+                        unit = "fps",
+                        color = palette.fps,
+                        modifier = Modifier.weight(1f)
+                    )
+                    MiniStat(
+                        label = "5% low",
+                        value = fps.low5PercentFps?.let { String.format("%.0f", it) } ?: "--",
+                        unit = "fps",
+                        color = palette.fps,
+                        modifier = Modifier.weight(1f)
+                    )
+                    MiniStat(
+                        label = "Panel",
+                        value = system.refreshHz?.let { "$it" } ?: "--",
+                        unit = "Hz",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(Modifier.height(Space.sm))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(Space.sm))
+
+                // Where the number comes from and how old it is. A frame rate
+                // without these cannot be judged.
+                InfoRow(
                     label = "Source",
-                    value = fps.source,
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                    value = if (fps.valid) fps.source else "--",
+                    valueColor = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                // How old the frame behind the number is, and how long the number was
-                // measured over. Without them a number cannot be judged.
-                MetricLine(
+                InfoRow(
                     label = "Sample age",
                     value = if (fps.valid) "${fps.sampleAgeMs} ms" else "--",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                    valueColor = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                MetricLine(
+                InfoRow(
                     label = "Measured over",
                     value = if (fps.valid) "${fps.measurementWindowMs} ms" else "--",
-                    accent = MaterialTheme.colorScheme.onSurfaceVariant
+                    valueColor = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (!fps.capCause.isNullOrBlank()) {
+                    InfoRow(
+                        label = "Cap cause",
+                        value = fps.capCause,
+                        valueColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 if (!fps.valid && !fps.reason.isNullOrBlank()) {
                     Text(
                         text = fps.reason,
@@ -374,7 +487,7 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
                         value = fps.fps,
                         target = threshold,
                         maxValue = ceiling,
-                        diameter = 168.dp
+                        diameter = 184.dp
                     )
                     Spacer(Modifier.height(Space.md))
                     Column(Modifier.fillMaxWidth()) { details() }
@@ -385,7 +498,7 @@ private fun HeroPanel(fps: FpsState, layer: String?, threshold: Int) {
                         value = fps.fps,
                         target = threshold,
                         maxValue = ceiling,
-                        diameter = 148.dp
+                        diameter = 152.dp
                     )
                     Spacer(Modifier.width(Space.lg))
                     Column(Modifier.weight(1f)) { details() }

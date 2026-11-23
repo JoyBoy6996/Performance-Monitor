@@ -2,7 +2,9 @@ package com.framescope.monitor.metrics
 
 import android.content.Context
 import com.framescope.monitor.core.AppSettings
+import android.os.SystemClock
 import com.framescope.monitor.core.FpsState
+import com.framescope.monitor.core.LiveHistory
 import com.framescope.monitor.core.LiveStats
 import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.ProtectedApps
@@ -111,6 +113,17 @@ class MetricsEngine(
     private val _liveSeries = MutableStateFlow<List<Float>>(emptyList())
     val liveSeries: StateFlow<List<Float>> = _liveSeries.asStateFlow()
 
+    /**
+     * The short memory of the live readings, for the graphs of the dashboard.
+     *
+     * It is filled while the measurements run and forgets itself when the
+     * measurement is switched off, so the graphs never show a line that belongs
+     * to a run that is over.
+     */
+    private val _liveHistory = MutableStateFlow(LiveHistory())
+    val liveHistory: StateFlow<LiveHistory> = _liveHistory.asStateFlow()
+    private val historyBuffer = LiveHistoryBuffer()
+
     private val _measuredLayer = MutableStateFlow<String?>(null)
     val measuredLayer: StateFlow<String?> = _measuredLayer.asStateFlow()
 
@@ -153,6 +166,8 @@ class MetricsEngine(
                     systemSampler.sampleCpu()
                 }?.let {
                     _cpuPercent.value = it
+                    historyBuffer.addCpu(SystemClock.elapsedRealtime(), it)
+                    _liveHistory.value = historyBuffer.snapshot()
                     publishSystem()
                 }
             } catch (_: Exception) {
@@ -178,6 +193,11 @@ class MetricsEngine(
             // a privileged shell, instead of the whole interface going quiet.
             val fpsState = if (!enabled) {
                 fpsSampler.reset()
+                // The graphs of the dashboard belong to the running measurement.
+                // When the measurement is off they are emptied, so they never show
+                // a line of a run that is over.
+                historyBuffer.clear()
+                _liveHistory.value = historyBuffer.snapshot()
                 null
             } else {
                 try {
@@ -227,6 +247,13 @@ class MetricsEngine(
                 currentList.add(fpsState.fps)
                 if (currentList.size > 60) currentList.removeAt(0)
                 _liveSeries.value = currentList
+
+                historyBuffer.addFrames(
+                    SystemClock.elapsedRealtime(),
+                    fpsState.fps,
+                    fpsState.frameTimeMs
+                )
+                _liveHistory.value = historyBuffer.snapshot()
             }
 
             val elapsedMs = (System.nanoTime() - started) / 1_000_000L
@@ -413,6 +440,14 @@ class MetricsEngine(
             (peak - now).coerceAtLeast(0f)
         } else null
         _system.value = merged.copy(tempPeakC = peak, tempCooledC = cooled)
+
+        historyBuffer.addDevice(
+            SystemClock.elapsedRealtime(),
+            merged.deviceTemperatureC(),
+            merged.ramPercent,
+            merged.gpuPercent
+        )
+        _liveHistory.value = historyBuffer.snapshot()
     }
 
     /** Where the foreground answer came from, in words a user can read. */

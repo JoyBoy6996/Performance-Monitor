@@ -6,6 +6,7 @@ import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -93,6 +94,28 @@ class UiSnapshotTest {
         }
         capture("10-compare-dark", dark = true, heightDp = 2400) {
             com.framescope.monitor.ui.screens.CompareScreen(container = container, onBack = {})
+        }
+        // A list that is scrolled: the content has to pass under the frosted
+        // heading and the heading has to stay readable on top of it.
+        capture("11-heading-scrolled", dark = true) {
+            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                listState.scrollToItem(4)
+            }
+            com.framescope.monitor.ui.FrameScopeScreen(
+                title = "Monitor",
+                subtitle = "Scrolled under the heading",
+                listState = listState
+            ) {
+                items(20) { index ->
+                    com.framescope.monitor.ui.components.Panel {
+                        androidx.compose.material3.Text(
+                            text = "Row $index",
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                }
+            }
         }
         capture("07-shell-dark", dark = true) {
             FrameScopeRoot(

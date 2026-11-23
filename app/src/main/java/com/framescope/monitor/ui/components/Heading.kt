@@ -73,7 +73,7 @@ fun FrostedHeading(
         Box(
             modifier = Modifier
                 .matchParentSize()
-                .background(surface.copy(alpha = 0.72f), shape)
+                .background(surface.copy(alpha = 0.86f), shape)
         )
         Box(
             modifier = Modifier

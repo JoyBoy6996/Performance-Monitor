@@ -271,6 +271,7 @@ object ShellCommands {
      */
     fun gpuBusy(): String = listOf(
         "for f in /sys/class/kgsl/kgsl-*/gpu_busy_percentage " +
+            "/sys/class/kgsl/kgsl-*/gpubusy " +
             "/sys/class/misc/mali0/device/utilisation " +
             "/sys/class/misc/mali0/device/utilization " +
             "/sys/devices/platform/*.gpu/utilisation " +

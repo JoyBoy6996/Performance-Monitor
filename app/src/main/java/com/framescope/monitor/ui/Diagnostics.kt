@@ -67,9 +67,14 @@ object Diagnostics {
                 "echo '--- last 5 polled FPS readings: none ---'"
             },
             if (layer.isBlank()) {
-                "echo '--- measured layer: none yet ---'"
+                "echo '--- the layer that was measured: none yet ---'"
             } else {
-                "echo '--- measured layer ---'; echo 'layer=[$layer]'"
+                // The name is the one SurfaceFlinger knows the layer by, including the
+                // creation stamp. It is asked for in single quotes, and a quote inside
+                // the name is removed instead of closing the quote.
+                "echo '--- the layer that was measured ---'; echo 'layer=[$layer]';\n" +
+                    "echo -n 'rows='; dumpsys SurfaceFlinger --latency '$layer' 2>/dev/null | wc -l;\n" +
+                    "dumpsys SurfaceFlinger --latency '$layer' 2>/dev/null | tail -4"
             },
             "echo '--- display refresh period ns (6944444 = 144 Hz) ---'",
             "dumpsys SurfaceFlinger --latency 2>/dev/null | head -1",

@@ -12,9 +12,9 @@ class DisplayRefreshTest {
 
     @Test
     fun readsThePanelRateFromTheLatencyHeader() {
-        assertEquals(144f, refreshHzFromLatencyDump("6944444\n0 0 0\n0 0 0"), 0.05f)
-        assertEquals(120f, refreshHzFromLatencyDump("8333333\n"), 0.05f)
-        assertEquals(60f, refreshHzFromLatencyDump("16666666\n"), 0.05f)
+        assertEquals(144f, refreshHzFromLatencyDump("6944444\n0 0 0\n0 0 0") ?: 0f, 0.05f)
+        assertEquals(120f, refreshHzFromLatencyDump("8333333\n") ?: 0f, 0.05f)
+        assertEquals(60f, refreshHzFromLatencyDump("16666666\n") ?: 0f, 0.05f)
     }
 
     @Test

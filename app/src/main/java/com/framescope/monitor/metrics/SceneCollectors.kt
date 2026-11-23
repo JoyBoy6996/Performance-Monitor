@@ -30,14 +30,14 @@ class SceneCollectors {
 
     private var lastCoreStat: Map<Int, LongArray>? = null
     private var lastThreadTicks: Map<String, Long>? = null
-    private var lastWallMs = 0L
+    private var lastWallMs: Long? = null
     private var clockTicksPerSec: Int? = null
 
     /** Drops the previous readings so a new app or a new run starts clean. */
     fun reset() {
         lastCoreStat = null
         lastThreadTicks = null
-        lastWallMs = 0L
+        lastWallMs = null
     }
 
     /**
@@ -139,7 +139,9 @@ class SceneCollectors {
         val wallMs = lastWallMs
         lastThreadTicks = current
         lastWallMs = nowWallMs
-        if (previous == null || wallMs <= 0L || nowWallMs <= wallMs) return emptyList()
+        // Without a previous poll there is no interval, and a poll that is not
+        // newer than the last one has no interval either.
+        if (previous == null || wallMs == null || nowWallMs <= wallMs) return emptyList()
 
         val elapsedSec = (nowWallMs - wallMs) / 1_000f
         val hz = clockTicksPerSec ?: 100

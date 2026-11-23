@@ -80,6 +80,13 @@ class AdbTcpRunner(
         if (keys.authorisationStored) {
             _authState.value = AdbAuthState.STORED
             keyOfferUsed = true
+        } else if (keys.keyWasOffered) {
+            // The key was handed over before, but this ROM did not keep it in
+            // its own key store. The phone would show the "Allow USB
+            // debugging?" dialog again on every start of the app, and that
+            // dialog is the loop this flag ends. Only an explicit re-check
+            // may offer the key again.
+            keyOfferUsed = true
         }
     }
 
@@ -93,6 +100,8 @@ class AdbTcpRunner(
 
     fun resetAuthorisation() {
         keyOfferUsed = false
+        // The user asked for a new prompt, so the phone may be asked again.
+        keys.clearKeyOffered()
         failureCount = 0
         lastFailureAt = 0L
         lastError = null
@@ -314,6 +323,11 @@ class AdbTcpRunner(
                 canOfferKey = { allowKeyOffer && !keyOfferUsed },
                 onKeyOffered = {
                     keyOfferUsed = true
+                    // The key is on its way to the phone. It is written to the
+                    // app's own storage as well, so the next start of the app
+                    // does not offer it again and the phone does not ask
+                    // again.
+                    keys.markKeyOffered()
                     _authState.value = AdbAuthState.PROMPT_SENT
                 }
             )
@@ -324,6 +338,10 @@ class AdbTcpRunner(
             failureCount = 0
             lastError = null
             keyOfferUsed = true
+            // The phone accepted our key, however it got there. Remembering
+            // that on disk is what stops the dialog from coming back after a
+            // restart of the app.
+            keys.markKeyOffered()
 
             // A silent signature means the phone already had the key: that is
             // real persistent trust. A key we just offered is different - a

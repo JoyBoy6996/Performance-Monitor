@@ -32,6 +32,7 @@ class AdbKeyStore(
     private val privateFile = File(directory, "adb_host_key.pk8")
     private val publicFile = File(directory, "adb_host_key.pk8.pub")
     private val storedStamp = File(directory, "authorised.stamp")
+    private val offeredStamp = File(directory, "key_offered.stamp")
 
     private val sp: SharedPreferences? by lazy {
         context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -43,9 +44,6 @@ class AdbKeyStore(
     init {
         runCatching { load() }
     }
-
-    /** True when a key pair is loaded or can be created on disk. */
-    val hasKey: Boolean get() = runCatching { ensure() }.isSuccess
 
     private fun load() {
         // 1. Try loading from files first
@@ -162,6 +160,48 @@ class AdbKeyStore(
         }
     }
 
+    /**
+     * True when the key was already handed to the phone.
+     *
+     * Handing a key over is what raises the "Allow USB debugging?" dialog, and
+     * the dialog only comes up for a key the phone has never seen. A key that
+     * was offered once must therefore never be offered again on its own: not
+     * after a reconnect, not after the app was restarted, not after a reboot.
+     * Otherwise the phone keeps asking, over and over, and the app looks
+     * broken.
+     *
+     * This is not the same as [authorisationStored]: that one means the phone
+     * kept the key in its own key store. A ROM that ignores "Always allow
+     * from this computer" never stores it, so the phone asks again on the
+     * next start - which is the loop this flag stops.
+     */
+    val keyWasOffered: Boolean
+        get() = offeredStamp.exists() || (sp?.getBoolean(KEY_OFFERED, false) == true)
+
+    /** Records that the key was handed to the phone. */
+    fun markKeyOffered() {
+        runCatching {
+            directory.mkdirs()
+            offeredStamp.writeText(publicKeyFingerprint())
+        }
+        runCatching {
+            sp?.edit()?.putBoolean(KEY_OFFERED, true)?.apply()
+        }
+    }
+
+    /**
+     * Forgets that the key was handed to the phone.
+     *
+     * Only an explicit action does this: the user asks for the dialog again
+     * because the first one was missed or dismissed.
+     */
+    fun clearKeyOffered() {
+        runCatching { offeredStamp.delete() }
+        runCatching {
+            sp?.edit()?.putBoolean(KEY_OFFERED, false)?.apply()
+        }
+    }
+
     /** The raw 524 byte Android public key blob. */
     fun publicKeyBlob(): ByteArray {
         val privateKey = ensure().private as RSAPrivateCrtKey
@@ -227,5 +267,6 @@ class AdbKeyStore(
         private const val KEY_PRIVATE = "rsa_private_pkcs8"
         private const val KEY_PUBLIC = "rsa_public_x509"
         private const val KEY_AUTHORISED = "is_authorised"
+        private const val KEY_OFFERED = "key_was_offered"
     }
 }

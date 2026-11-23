@@ -642,10 +642,10 @@ class FpsSampler(
         // overlay frames can therefore push a 90 fps lobby to 92 or a 120 fps
         // match to 129. The screen presents no more than its own rate, so the
         // reading is held there; it is never pushed upward.
-        val settledFps = capAtDisplayRate(fps, displayHz)
+        val cappedFps = capAtDisplayRate(fps, displayHz)
         return GlobalFpsReading(
-            fps = settledFps,
-            frameTimeMs = 1_000f / settledFps,
+            fps = cappedFps,
+            frameTimeMs = 1_000f / cappedFps,
             layer = "the frames presented while $pkg was in front",
             totalFrames = frames - baseline.second,
             elapsedMs = elapsedMs,
@@ -732,14 +732,14 @@ class FpsSampler(
         val fps = stats.fps
         val displayHz = refreshRateHz()
         if (fps < MIN_GAME_FPS || !isPlausibleFps(fps, displayHz)) return null
-        val settled = capAtDisplayRate(fps, displayHz)
+        val capped = capAtDisplayRate(fps, displayHz)
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = "the active presented layer"
         targetReason = "active layer present timestamps"
         publish(
-            fps = settled,
-            frameTimeMs = 1_000f / settled,
+            fps = capped,
+            frameTimeMs = 1_000f / capped,
             source = "SurfaceFlinger frame times",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = measuredLayer,
@@ -838,12 +838,12 @@ class FpsSampler(
         )
 
         // The counter sees the game plus the small compositor overhead, so a
-        // 90 fps lobby can read 93 and a 120 fps match 129. Settle a small
-        // overshoot onto the real cap; never push a low reading upward.
-        val settledFps = capAtDisplayRate(fps.toFloat(), refreshRateHz())
+        // 90 fps lobby can read 93 and a 120 fps match 129. The screen still
+        // presents no more than its own rate; a low reading is never pushed up.
+        val cappedFps = capAtDisplayRate(fps.toFloat(), refreshRateHz())
         publish(
-            fps = settledFps,
-            frameTimeMs = if (settledFps > 0f) (1000f / settledFps).toFloat() else 0f,
+            fps = cappedFps,
+            frameTimeMs = if (cappedFps > 0f) (1000f / cappedFps).toFloat() else 0f,
             source = "SurfaceFlinger counters",
             kind = FpsSourceKind.TIMESTATS,
             layer = tick.layer,
@@ -939,14 +939,14 @@ class FpsSampler(
         if (!sceneResult.isSceneActive || sceneResult.fps <= 0) return null
         val fps = sceneResult.fps.toFloat()
         if (!isPlausibleFps(fps)) return null
-        val settled = capAtDisplayRate(fps, refreshRateHz())
+        val capped = capAtDisplayRate(fps, refreshRateHz())
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = layer
 
         publish(
-            fps = settled,
-            frameTimeMs = 1_000f / settled,
+            fps = capped,
+            frameTimeMs = 1_000f / capped,
             source = "SurfaceFlinger frame times",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = layer,
@@ -1397,13 +1397,13 @@ class FpsSampler(
 
         // A few compositor frames on top make 90 read as 93 and 120 as 129.
         // Settle a small overshoot onto the cap, never push a low reading up.
-        val settled = capAtDisplayRate(best.fps, refreshRateHz())
+        val capped = capAtDisplayRate(best.fps, refreshRateHz())
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = best.layer
         pendingWarmUpReason = null
         publish(
-            fps = settled,
-            frameTimeMs = 1_000f / settled,
+            fps = capped,
+            frameTimeMs = 1_000f / capped,
             source = "SurfaceFlinger frame times",
             kind = FpsSourceKind.SURFACE_FLAINGER_LATENCY,
             layer = best.layer,

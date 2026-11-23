@@ -1,9 +1,9 @@
 name: Build APK
 on:
   push:
-    branches: [ main, fix/fps-overlay ]
+    branches: [ main, fix/fps-overlay, fix-overlay ]
   pull_request:
-    branches: [ main, fix/fps-overlay ]
+    branches: [ main, fix/fps-overlay, fix-overlay ]
   workflow_dispatch:
 permissions:
   contents: write

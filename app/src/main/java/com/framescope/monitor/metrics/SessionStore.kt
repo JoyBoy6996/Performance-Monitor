@@ -246,6 +246,7 @@ class SessionStore(context: Context) {
         put("maxTempC", record.maxTempC.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
         put("avgCpu", record.avgCpu.finiteOrNull()?.toDouble() ?: JSONObject.NULL)
         put("fpsSeries", JSONArray(record.fpsSeries.finiteDoubles()))
+        put("seriesTimesMs", JSONArray(record.seriesTimesMs.map { it }))
         put("cpuSeries", JSONArray(record.cpuSeries.finiteDoubles()))
         put("tempSeries", JSONArray(record.tempSeries.finiteDoubles()))
         put("frameTimeSeries", JSONArray(record.frameTimeSeries.finiteDoubles()))
@@ -336,6 +337,7 @@ class SessionStore(context: Context) {
             maxTempC = if (o.isNull("maxTempC")) null else o.optDouble("maxTempC").toFloat().finiteOrNull(),
             avgCpu = if (o.isNull("avgCpu")) null else o.optDouble("avgCpu").toFloat().finiteOrNull(),
             fpsSeries = o.optJSONArray("fpsSeries").toFloatList(),
+            seriesTimesMs = o.optJSONArray("seriesTimesMs").toLongList(),
             cpuSeries = o.optJSONArray("cpuSeries").toFloatList(),
             tempSeries = o.optJSONArray("tempSeries").toFloatList(),
             frameTimeSeries = o.optJSONArray("frameTimeSeries").toFloatList(),
@@ -418,7 +420,10 @@ class SessionStore(context: Context) {
             record.socTempSeries.size
         )
         for (i in 0 until size) {
-            sb.append(i).append(',')
+            // The real second of the run, when the run kept it. Older runs fall back to
+            // the index, which is one second per row.
+            val second = record.seriesTimesMs.getOrNull(i)?.let { (it / 1000L).toInt() } ?: i
+            sb.append(second).append(',')
             sb.append(record.fpsSeries.getOrElse(i) { "" }).append(',')
             sb.append(record.frameTimeSeries.getOrElse(i) { "" }).append(',')
             sb.append(record.cpuSeries.getOrElse(i) { "" }).append(',')
@@ -459,6 +464,17 @@ class SessionStore(context: Context) {
         for (i in 0 until length()) {
             val value = optDouble(i, 0.0).toFloat()
             if (value.finiteOrNull() != null) out.add(value)
+        }
+        return out
+    }
+
+    /** Reads the moments of the recorded seconds. */
+    private fun JSONArray?.toLongList(): List<Long> {
+        if (this == null) return emptyList()
+        val out = ArrayList<Long>(length())
+        for (i in 0 until length()) {
+            val value = optLong(i, 0L)
+            if (value >= 0L) out.add(value)
         }
         return out
     }
@@ -510,6 +526,7 @@ class SessionStore(context: Context) {
                     longest_frame_ms REAL,
                     drop_seconds INTEGER,
                     fps_series TEXT,
+                    series_times_ms TEXT,
                     cpu_series TEXT,
                     temp_series TEXT,
                     frame_time_series TEXT,
@@ -577,6 +594,9 @@ class SessionStore(context: Context) {
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             // Keep existing data on upgrade; do not drop tables.
+            if (oldVersion < 12) {
+                addColumnIfMissing(db, TABLE_RECORDS, "series_times_ms", "TEXT")
+            }
             if (oldVersion < 2) {
                 addColumnIfMissing(db, TABLE_RECORDS, "peak_thermal_status", "INTEGER")
                 addColumnIfMissing(db, TABLE_RECORDS, "throttled_seconds", "INTEGER DEFAULT 0")
@@ -706,6 +726,7 @@ class SessionStore(context: Context) {
                 put("longest_frame_ms", record.longestFrameMs)
                 put("drop_seconds", record.dropSeconds)
                 put("fps_series", JSONArray(record.fpsSeries.finiteDoubles()).toString())
+                put("series_times_ms", JSONArray(record.seriesTimesMs.map { it }).toString())
                 put("cpu_series", JSONArray(record.cpuSeries.finiteDoubles()).toString())
                 put("temp_series", JSONArray(record.tempSeries.finiteDoubles()).toString())
                 put("frame_time_series", JSONArray(record.frameTimeSeries.finiteDoubles()).toString())
@@ -806,6 +827,7 @@ class SessionStore(context: Context) {
                     val throttledIdx = c.getColumnIndex("throttled_seconds")
                     val statusSeriesIdx = c.getColumnIndex("thermal_status_series")
                     val gapIdx = c.getColumnIndex("gap_seconds")
+                    val timesIdx = c.getColumnIndex("series_times_ms")
                     val jitterIdx = c.getColumnIndex("jitter_ms")
                     val varianceIdx = c.getColumnIndex("fps_variance")
                     val powerIdx = c.getColumnIndex("avg_power_w")
@@ -860,6 +882,11 @@ class SessionStore(context: Context) {
                             maxTempC = if (maxTempIdx >= 0 && !c.isNull(maxTempIdx)) c.getFloat(maxTempIdx).finiteOrNull() else null,
                             avgCpu = if (avgCpuIdx >= 0 && !c.isNull(avgCpuIdx)) c.getFloat(avgCpuIdx).finiteOrNull() else null,
                             fpsSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("fps_series"))),
+                            seriesTimesMs = if (timesIdx >= 0) {
+                                jsonToLongList(c.getString(timesIdx))
+                            } else {
+                                emptyList()
+                            },
                             cpuSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("cpu_series"))),
                             tempSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("temp_series"))),
                             frameTimeSeries = jsonToFloatList(c.getString(c.getColumnIndexOrThrow("frame_time_series"))),
@@ -992,6 +1019,17 @@ class SessionStore(context: Context) {
             writableDatabase.delete(TABLE_SAMPLES, null, null)
         }
 
+        private fun jsonToLongList(json: String?): List<Long> {
+            if (json.isNullOrBlank()) return emptyList()
+            val arr = runCatching { JSONArray(json) }.getOrNull() ?: return emptyList()
+            val list = ArrayList<Long>(arr.length())
+            for (i in 0 until arr.length()) {
+                val value = arr.optLong(i, 0L)
+                if (value >= 0L) list.add(value)
+            }
+            return list
+        }
+
         private fun jsonToFloatList(json: String?): List<Float> {
             if (json.isNullOrBlank()) return emptyList()
             val arr = runCatching { JSONArray(json) }.getOrNull() ?: return emptyList()
@@ -1005,7 +1043,7 @@ class SessionStore(context: Context) {
 
         companion object {
             private const val DB_NAME = "framescope_sessions.db"
-            private const val DB_VERSION = 11
+            private const val DB_VERSION = 12
             private const val TABLE_RECORDS = "session_records"
             private const val TABLE_SAMPLES = "session_samples"
         }

@@ -86,6 +86,48 @@ private val LightStatus = StatusColors(
 )
 
 /**
+ * The colours of the metrics themselves.
+ *
+ * A frame rate is green, a frame time is blue, the CPU is violet. These are not
+ * "good" and "bad": they tell which line is which when several of them share a
+ * chart, and they stay the same in every theme so a reading never changes its
+ * meaning because the phone switched to light mode.
+ */
+@Immutable
+data class MetricColors(
+    val fps: Color,
+    val frameTime: Color,
+    val cpu: Color,
+    val gpu: Color,
+    val temperature: Color,
+    val ram: Color,
+    val power: Color,
+    val battery: Color
+)
+
+private val DarkMetricColors = MetricColors(
+    fps = Color(0xFF55D6A1),
+    frameTime = Color(0xFF62A9FF),
+    cpu = Color(0xFFB18CFF),
+    gpu = Color(0xFF55B9D8),
+    temperature = Color(0xFFFFAA63),
+    ram = Color(0xFF7A8CFF),
+    power = Color(0xFFE86FA8),
+    battery = Color(0xFF9FD3C7)
+)
+
+private val LightMetricColors = MetricColors(
+    fps = Color(0xFF0E8F63),
+    frameTime = Color(0xFF2C6FD1),
+    cpu = Color(0xFF7443C7),
+    gpu = Color(0xFF1B7A99),
+    temperature = Color(0xFFB85F10),
+    ram = Color(0xFF4457C4),
+    power = Color(0xFFB93C77),
+    battery = Color(0xFF3F7F72)
+)
+
+/**
  * Whether repeating, decorative motion is allowed.
  *
  * It is switched off when the system asks for animations to be removed, which keeps the
@@ -98,10 +140,18 @@ val LocalMotionEnabled = compositionLocalOf { true }
  */
 val LocalStatusColors = staticCompositionLocalOf { DarkStatus }
 
+/** The colours of the metrics, reachable the same way as the other palettes. */
+val LocalMetricColors = staticCompositionLocalOf { DarkMetricColors }
+
 val MaterialTheme.status: StatusColors
     @Composable
     @ReadOnlyComposable
     get() = LocalStatusColors.current
+
+val MaterialTheme.metric: MetricColors
+    @Composable
+    @ReadOnlyComposable
+    get() = LocalMetricColors.current
 
 private val DarkScheme = darkColorScheme(
     primary = Color(0xFF56C8F0),
@@ -123,22 +173,22 @@ private val DarkScheme = darkColorScheme(
     onError = Color(0xFF690005),
     errorContainer = Color(0xFF93000A),
     onErrorContainer = Color(0xFFFFDAD6),
-    background = Color(0xFF0A0E13),
-    onBackground = Color(0xFFE4EAF2),
-    surface = Color(0xFF0E131A),
-    onSurface = Color(0xFFE4EAF2),
-    surfaceVariant = Color(0xFF1B232E),
-    onSurfaceVariant = Color(0xFF98A6B8),
-    surfaceContainerLowest = Color(0xFF070A0E),
-    surfaceContainerLow = Color(0xFF11171F),
-    surfaceContainer = Color(0xFF151C25),
-    surfaceContainerHigh = Color(0xFF1B232E),
-    surfaceContainerHighest = Color(0xFF222B37),
+    background = Color(0xFF0B0D12),
+    onBackground = Color(0xFFF1F4FA),
+    surface = Color(0xFF121620),
+    onSurface = Color(0xFFF1F4FA),
+    surfaceVariant = Color(0xFF181E29),
+    onSurfaceVariant = Color(0xFF929BAA),
+    surfaceContainerLowest = Color(0xFF0B0D12),
+    surfaceContainerLow = Color(0xFF121620),
+    surfaceContainer = Color(0xFF181E29),
+    surfaceContainerHigh = Color(0xFF202735),
+    surfaceContainerHighest = Color(0xFF293241),
     surfaceTint = Color(0xFF56C8F0),
-    inverseSurface = Color(0xFFE4EAF2),
+    inverseSurface = Color(0xFFF1F4FA),
     inverseOnSurface = Color(0xFF10151C),
-    outline = Color(0xFF38455A),
-    outlineVariant = Color(0xFF263140),
+    outline = Color(0xFF3A4657),
+    outlineVariant = Color(0xFF293241),
     scrim = Color(0xFF000000)
 )
 
@@ -206,6 +256,7 @@ fun FrameScopeTheme(
             // depend on the wallpaper the user picked, so only light/dark is swapped.
             androidx.compose.runtime.CompositionLocalProvider(
                 LocalStatusColors provides if (dark) DarkStatus else LightStatus,
+                LocalMetricColors provides if (dark) DarkMetricColors else LightMetricColors,
                 LocalSurfaceColors provides surfaceColors(colors),
                 LocalMotionEnabled provides motionEnabled,
                 content = content

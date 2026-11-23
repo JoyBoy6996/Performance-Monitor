@@ -69,7 +69,16 @@ data class SecondBucket(
     /** The observed cap at the end of this second; zero means not confirmed yet. */
     val capFps: Float = 0f,
     /** "heat" only while thermal mitigation was active and the rate had dropped. */
-    val capCause: String? = null
+    val capCause: String? = null,
+    /**
+     * When this second of the run happened, in milliseconds since the recording started.
+     *
+     * The buckets are one second long, but a run that lost the shell for a while has a
+     * gap, and after a gap the next bucket covers more than one second. The charts need
+     * the real moment of every reading, otherwise a gap silently moves the whole rest
+     * of the run to the left.
+     */
+    val atMs: Long = 0L
 )
 
 /**
@@ -395,7 +404,7 @@ class SessionLogger(private val store: SessionStore) {
         if (capFps != null && capCause != null) bucketCapCause.add(capCause)
 
         if (nowSec > lastBucketSec) {
-            flushBucket()
+            flushBucket(now - startedAt)
             // Gap time is removed from the averages, not filled with a copy of the
             // last reading. A copied bucket looks like measured data on the chart.
             lastBucketSec = nowSec
@@ -443,7 +452,7 @@ class SessionLogger(private val store: SessionStore) {
         )
     }
 
-    private fun flushBucket() {
+    private fun flushBucket(atMs: Long) {
         if (bucketFps.isEmpty()) return
         val fps = bucketFps.average().toFloat()
         val frameTime = if (bucketFrameTime.isNotEmpty()) bucketFrameTime.average().toFloat() else (if (fps > 0f) 1000f / fps else 16.6f)
@@ -467,6 +476,7 @@ class SessionLogger(private val store: SessionStore) {
 
         secondBuckets.add(
             SecondBucket(
+                atMs = atMs,
                 fps = fps,
                 frameTimeMs = frameTime,
                 cpuPercent = cpu,
@@ -610,8 +620,9 @@ class SessionLogger(private val store: SessionStore) {
     fun stop(targetFps: Int, shellLogs: String = ""): SessionRecord? {
         if (!isRecording) return null
         isRecording = false
-        flushBucket()
-        closeSegment(System.currentTimeMillis() - startedAt)
+        val stoppedAt = System.currentTimeMillis()
+        flushBucket(stoppedAt - startedAt)
+        closeSegment(stoppedAt - startedAt)
 
         val duration = System.currentTimeMillis() - startedAt
         if (samples.size < 3 && secondBuckets.size < 2) {
@@ -740,6 +751,7 @@ class SessionLogger(private val store: SessionStore) {
             maxTempC = maxTemp,
             avgCpu = avgCpu,
             fpsSeries = fpsSeries,
+            seriesTimesMs = secondBuckets.map { it.atMs },
             cpuSeries = secondBuckets.map { it.cpuPercent },
             tempSeries = secondBuckets.map { it.tempC },
             frameTimeSeries = secondBuckets.map { it.frameTimeMs },

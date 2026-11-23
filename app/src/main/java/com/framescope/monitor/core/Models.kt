@@ -258,6 +258,18 @@ data class SessionRecord(
     val throttledSeconds: Int = 0,
     /** Thermal mitigation level per second, for the chart. */
     val thermalStatusSeries: List<Float> = emptyList(),
+    /**
+     * When each recorded second happened, in milliseconds since the recording started.
+     *
+     * The buckets of a run are one second long, but a run that lost its readings for a
+     * while has a gap, and after a gap the next bucket covers more than one second.
+     * The charts need the real moment of every reading, otherwise a gap silently
+     * moves the rest of the run to the left.
+     *
+     * Empty for runs that were recorded before this was kept. The charts then fall
+     * back to one second per sample and say that they did.
+     */
+    val seriesTimesMs: List<Long> = emptyList(),
     /** Mean change between consecutive frame times, in milliseconds. */
     val jitterMs: Float? = null,
     /** Spread of the per-second frame rate, in fps². */

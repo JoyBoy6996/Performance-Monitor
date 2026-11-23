@@ -455,6 +455,30 @@ fun SettingsScreen(
                         ) {
                             Text("Reconnect")
                         }
+                        // Forgets that the phone keeps the key. The next setup
+                        // starts from scratch, which is what a phone needs
+                        // after its trust was dropped - a wipe, a change of the
+                        // debugging authorisation, or a ROM that never kept
+                        // the key in the first place.
+                        OutlinedButton(
+                            enabled = !checking && status.adbAuthorised,
+                            onClick = {
+                                checking = true
+                                adbMessage = "Forgetting the saved key..."
+                                scope.launch {
+                                    container.hub.resetAdbAuthorisation()
+                                    val refreshed = runCatching {
+                                        container.hub.refresh()
+                                    }.getOrNull()
+                                    adbMessage = refreshed?.detail?.ifBlank {
+                                        "The saved key was forgotten. Tap Set up bridge to pair again."
+                                    } ?: "The saved key was forgotten."
+                                    checking = false
+                                }
+                            }
+                        ) {
+                            Text("Forget key")
+                        }
                     }
                     if (!shizukuActive && !dumpActive && status.adbReady && !status.adbAuthorised) {
                         Spacer(Modifier.height(Space.xs))

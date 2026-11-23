@@ -416,6 +416,11 @@ class ShellHub(
         } else {
             "Local ADB bridge is off. Start Shizuku to open it, or tap Set up bridge."
         }
+        publishStatus()
+    }
+
+    /** Recomputes the status and hands it to the interface. */
+    private fun publishStatus() {
         _status.value = accessStatus(
             shizukuRunner.connectionState.value,
             shizukuRunner.connectionDetails.value,
@@ -490,10 +495,14 @@ class ShellHub(
     }
 
     /**
-     * Runs a hardware telemetry read on the same privileged (`uid=2000`) shell that
-     * serves SurfaceFlinger. Android 16 hides procfs/sysfs CPU, thermal and GPU nodes
-     * from the app's own process, so while Shizuku is connected it is the ONLY
-     * transport used here - an unprivileged answer of zero is worse than no answer.
+     * Runs a hardware telemetry read on a shell that may see the hardware.
+     *
+     * Android 16 hides procfs/sysfs CPU, thermal and GPU nodes from an
+     * ordinary app, so the app's own process cannot answer a telemetry read.
+     * The two shells that can are the Shizuku UserService and the local ADB
+     * bridge - both run as the `shell` user (uid 2000) and read the same
+     * nodes. An unprivileged answer of zero is worse than no answer, so the
+     * app's own shell never serves one.
      */
     suspend fun execTelemetry(command: String, timeoutMs: Long = 8_000): ShellResult = withContext(Dispatchers.IO) {
         if (hasPrivilegedShell()) {
@@ -510,13 +519,30 @@ class ShellHub(
             }
         }
 
-        // Hardware telemetry is Shizuku-only. The local ADB bridge and the app's
-        // own DUMP shell may serve the frame probe, but they are never allowed to
-        // answer a procfs/sysfs hardware read: an unprivileged zero is a fake
-        // reading. No answer is reported as "--" by the caller instead.
+        // The local ADB bridge is a `shell` session as well, so it reads the
+        // hardware nodes the same way the UserService does. Without it the
+        // CPU, GPU, temperature, power and memory rows stay empty for
+        // everyone who does not run Shizuku.
+        if (_adbReady.value || adb.authorisationStored) {
+            _telemetryShell.value = "Local ADB bridge"
+            try {
+                val result = adb.exec(command, timeoutMs)
+                _adbReady.value = true
+                _lastError.value = null
+                return@withContext result
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _adbReady.value = false
+                _lastError.value = e.message ?: "Local ADB bridge did not answer"
+                throw e
+            }
+        }
+
         _telemetryShell.value = "None"
         val reason = shizukuRunner.errorMessage.value?.takeIf { it.isNotBlank() }
-            ?: "No privileged shell is connected. Start Shizuku to read hardware telemetry."
+            ?: "No privileged shell is connected. Start Shizuku or set up the local ADB bridge " +
+            "to read hardware telemetry."
         _lastError.value = reason
         throw ShellUnavailable(reason)
     }
@@ -573,12 +599,28 @@ class ShellHub(
                 errThread.join(200L)
                 return ShellResult(-1, stdout.toString(), "Command timed out", ShellExecutionStatus.TIMEOUT)
             }
-            outThread.join(800L)
-            errThread.join(800L)
+            // The process is gone, but the reader threads may not have taken
+            // everything out of the pipe yet. The dump of a game is bigger
+            // than a pipe buffer, so a reader that is cut short loses exactly
+            // the layers that were drawing. The wait is therefore generous,
+            // and a reader that is still busy afterwards says so instead of
+            // handing over a half answer that looks complete.
+            outThread.join(LOCAL_SHELL_DRAIN_MS)
+            errThread.join(LOCAL_SHELL_DRAIN_MS)
+            val truncated = outThread.isAlive || errThread.isAlive
             val code = process.exitValue()
             val status = if (code == 0) ShellExecutionStatus.SUCCESS else ShellExecutionStatus.FAILURE
             _lastError.value = null
-            ShellResult(code, stdout.toString(), stderr.toString(), status)
+            ShellResult(
+                code = code,
+                out = if (truncated) {
+                    stdout.toString() + "\n[output may be incomplete]"
+                } else {
+                    stdout.toString()
+                },
+                err = stderr.toString(),
+                status = status
+            )
         } catch (e: Exception) {
             _lastError.value = e.message ?: "The app's own shell failed"
             ShellResult(-1, "", e.message.orEmpty(), ShellExecutionStatus.FAILURE)
@@ -591,22 +633,72 @@ class ShellHub(
      * The permission can only be granted by hand, but a privileged shell may
      * do it for the app it belongs to. When it works, the app no longer needs
      * Shizuku for the frame rate.
+     *
+     * `pm grant` only hands out a permission that carries the `development`
+     * flag, and DUMP does. A ROM that keeps the app out of that path - some
+     * of them block `pm grant` from the shell - refuses it, and the refusal
+     * is reported instead of being swallowed.
+     *
+     * A failed attempt is not final: the app tries again later, because the
+     * first attempt may have happened while the package was still being
+     * installed or while the shell was not ready yet.
      */
     private var dumpGrantAttempted = false
+    private var dumpGrantLastAttemptAt = 0L
+
+    /**
+     * How long the app waits before it asks for the one-time permission again.
+     *
+     * A refused attempt is not final, but it must not be repeated on every
+     * poll either.
+     */
+    @Volatile
+    var dumpGrantRetryDelayMs: Long = DUMP_GRANT_RETRY_MS
+
+    /** Why the last attempt to get the permission failed, when it did. */
+    @Volatile
+    private var dumpGrantReason: String? = null
 
     suspend fun tryGrantDumpPermission(): Boolean {
-        if (dumpGrantAttempted) return hasDumpPermission()
+        if (hasDumpPermission()) {
+            dumpGrantAttempted = true
+            dumpGrantReason = null
+            return true
+        }
         val ctx = appContext ?: return false
+        val now = System.currentTimeMillis()
+        if (dumpGrantAttempted && now - dumpGrantLastAttemptAt < dumpGrantRetryDelayMs) {
+            return false
+        }
         dumpGrantAttempted = true
-        if (hasDumpPermission()) return true
+        dumpGrantLastAttemptAt = now
         return runCatching {
             val result = shizukuRunner.exec(
                 "pm grant ${ctx.packageName} ${Manifest.permission.DUMP}",
                 5_000
             )
-            result.ok && hasDumpPermission()
-        }.getOrDefault(false)
+            val granted = result.ok && hasDumpPermission()
+            if (!granted) {
+                dumpGrantReason = result.err.ifBlank {
+                    "The shell refused to hand over ${Manifest.permission.DUMP}."
+                }.trim()
+            } else {
+                dumpGrantReason = null
+            }
+            // The reason belongs in the status right away. Without this the
+            // screen keeps the text of the last refresh and the refusal is
+            // never seen.
+            publishStatus()
+            granted
+        }.getOrElse { error ->
+            dumpGrantReason = error.message ?: "The permission could not be requested."
+            publishStatus()
+            false
+        }
     }
+
+    /** Why the one-time permission was not granted, when it was refused. */
+    fun dumpGrantFailureReason(): String? = dumpGrantReason
 
     fun cleanup() {
         statusScope.cancel()
@@ -623,12 +715,18 @@ class ShellHub(
     ): AccessStatus {
         val adbAuthorised = adb.authorisationStored
         val fingerprint = adb.fingerprint()
+        // The one-time permission is the quiet route: it lets the app read the
+        // frame timelines by itself. When the shell refused it, the reason
+        // belongs in the status, otherwise the app looks like it never tried.
+        val dumpReason = dumpGrantFailureReason()?.let {
+            " The one-time permission was refused: $it"
+        }.orEmpty()
 
         // Shizuku is the preferred route whenever it answers.
         if (state == ShizukuRunner.ConnectionState.READY) {
             return AccessStatus(
                 state = AccessState.READY,
-                detail = "",
+                detail = dumpReason.trim(),
                 checkedAt = System.currentTimeMillis(),
                 permissionGranted = details.permissionGranted,
                 binderAvailable = details.binderAvailable,
@@ -662,12 +760,12 @@ class ShellHub(
         if (adbReady) {
             return AccessStatus(
                 state = AccessState.READY,
-                detail = if (adbAuthorised) {
+                detail = (if (adbAuthorised) {
                     "Local ADB bridge connected on $LOOPBACK:$adbPort. Key saved — it reconnects automatically."
                 } else {
                     "Local ADB bridge connected on $LOOPBACK:$adbPort for this session. " +
                         "Key not saved — repeat setup once after reboot or USB debugging toggle."
-                },
+                }) + dumpReason,
                 checkedAt = System.currentTimeMillis(),
                 permissionGranted = true,
                 binderAvailable = false,
@@ -698,9 +796,9 @@ class ShellHub(
             ShizukuRunner.ConnectionState.READY -> ""
         }
         val detail = if (adbAuthorised && adbReason.isNotBlank()) {
-            "$adbReason $shizukuReason"
+            "$adbReason $shizukuReason$dumpReason"
         } else {
-            shizukuReason
+            "$shizukuReason$dumpReason"
         }
         return AccessStatus(
             state = accessState,
@@ -722,5 +820,16 @@ class ShellHub(
         private const val LOOPBACK = "127.0.0.1"
         private const val PROMPT_WATCH_ATTEMPTS = 30
         private const val PROMPT_WATCH_INTERVAL_MS = 2_000L
+
+        /** How long the app waits before it asks for the one-time permission again. */
+        private const val DUMP_GRANT_RETRY_MS = 30_000L
+
+        /**
+         * How long the reader of the app's own shell may take to empty the pipe.
+         *
+         * The counters of a game are hundreds of kilobytes, so the reader has
+         * to be given the time to take all of it.
+         */
+        private const val LOCAL_SHELL_DRAIN_MS = 2_000L
     }
 }

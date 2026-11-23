@@ -372,6 +372,10 @@ fun ToolsScreen(
     val system by container.engine.system.collectAsState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    // Which shell answers the hardware rows. Android 16 hides the procfs and
+    // sysfs nodes from an ordinary app, so this says where the numbers come
+    // from - and "None" means the hardware rows stay empty.
+    val telemetryShell by container.hub.telemetryShell.collectAsState()
 
     LaunchedEffect(Unit) {
         deviceFacts = collectDeviceFacts(context, container.hub)
@@ -379,7 +383,11 @@ fun ToolsScreen(
 
     FrameScopeScreen(
         title = "Tools",
-        subtitle = "Device facts and a privileged shell",
+        subtitle = if (telemetryShell == "None") {
+            "Device facts and a privileged shell"
+        } else {
+            "Device facts · hardware via $telemetryShell"
+        },
         bottomPadding = bottomPadding,
         actions = {
             if (onBack != null) {

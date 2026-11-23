@@ -745,9 +745,11 @@ class ShizukuRunner private constructor(
         if (stdout.length > ShizukuUserService.MAX_RESULT_TEXT_CHARS ||
             stderr.length > ShizukuUserService.MAX_RESULT_TEXT_CHARS
         ) {
-            val message = "Shizuku returned an oversized command result."
-            handleCommandConnectionFailure(activeService, activeGeneration, message)
-            throw ShellUnavailable(message)
+            // The UserService caps every answer, so this only happens when the
+            // answer did not come from our own service. It is a bad answer,
+            // not a broken connection: the session stays, because throwing it
+            // away would cost a reconnect for a single oversized answer.
+            throw ShellUnavailable("Shizuku returned an oversized command result.")
         }
         synchronized(lifecycleLock) {
             if (service === activeService && activeBinding?.generation == activeGeneration) {

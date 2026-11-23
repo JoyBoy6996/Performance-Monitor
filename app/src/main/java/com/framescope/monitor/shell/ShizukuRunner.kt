@@ -161,6 +161,14 @@ class ShizukuRunner private constructor(
     @Volatile
     private var sessionOpenedAtMs: Long = 0L
 
+    /** The service the open shell was last tried with. */
+    @Volatile
+    private var sessionHost: IShizukuService? = null
+
+    /** How often opening the open shell failed in a row. */
+    @Volatile
+    private var sessionFailures: Int = 0
+
     private inner class BindingAttempt(
         val generation: Long,
         val args: Shizuku.UserServiceArgs
@@ -874,6 +882,12 @@ class ShizukuRunner private constructor(
         }
         if (existing != null) return existing
 
+        // A service that was started before the open shell existed answers
+        // nothing to the request. Asking again for every command would cost a
+        // round trip for nothing, so the shell is given up on for that service.
+        if (sessionUnsupported && sessionHost === activeService) return null
+        sessionHost = activeService
+
         val response = try {
             withTimeoutOrNull(SESSION_TIMEOUT_MS + REMOTE_TIMEOUT_GRACE_MS) {
                 callService { activeService.openSession() }
@@ -882,11 +896,27 @@ class ShizukuRunner private constructor(
             throw e
         } catch (_: Exception) {
             null
-        } ?: return null
+        }
+
+        if (response == null) {
+            sessionFailures++
+            if (sessionFailures >= SESSION_FAILURES_BEFORE_GIVING_UP) {
+                sessionUnsupported = true
+            }
+            return null
+        }
 
         val status = response.getString(ShizukuUserService.KEY_STATUS)
         val id = response.getString(ShizukuUserService.KEY_SESSION_ID).orEmpty()
-        if (id.isBlank() || status != ShellExecutionStatus.SUCCESS.name) return null
+        if (id.isBlank() || status != ShellExecutionStatus.SUCCESS.name) {
+            sessionFailures++
+            if (sessionFailures >= SESSION_FAILURES_BEFORE_GIVING_UP) {
+                sessionUnsupported = true
+            }
+            return null
+        }
+        sessionFailures = 0
+        sessionUnsupported = false
 
         synchronized(lifecycleLock) {
             sessionId = id
@@ -966,6 +996,9 @@ class ShizukuRunner private constructor(
             sessionId = null
             sessionOwner = null
             sessionOpenedAtMs = 0L
+            sessionHost = null
+            sessionUnsupported = false
+            sessionFailures = 0
         }
     }
 
@@ -978,6 +1011,10 @@ class ShizukuRunner private constructor(
      */
     val openShellActive: Boolean
         get() = synchronized(lifecycleLock) { sessionId != null }
+
+    /** True when the service has no open shell and asking again is pointless. */
+    @Volatile
+    private var sessionUnsupported = false
 
     /** True when the open shell has been idle for too long. */
     private fun sessionExpiredLocked(): Boolean =
@@ -1107,6 +1144,15 @@ class ShizukuRunner private constructor(
 
         /** How often a command is tried again in a fresh shell before the fallback. */
         private const val SESSION_ATTEMPTS = 2
+
+        /**
+         * How often opening the open shell may fail before it is given up on.
+         *
+         * A service that was started before the open shell existed knows
+         * nothing about it, and asking for every command would cost a round
+         * trip for nothing.
+         */
+        private const val SESSION_FAILURES_BEFORE_GIVING_UP = 2
 
         /** How long opening or closing a shell may take. */
         private const val SESSION_TIMEOUT_MS = 4_000L

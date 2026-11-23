@@ -116,16 +116,22 @@ class ShellSession(
         stderrBuffer.reset()
 
         return when (val outcome = readUntilMarker(marker, timeoutMs)) {
-            is Outcome.Found -> ShellResult(
-                code = outcome.exitCode,
-                out = outcome.stdout,
-                err = stderrBuffer.asString(),
-                status = if (outcome.exitCode == 0) {
-                    ShellExecutionStatus.SUCCESS
-                } else {
-                    ShellExecutionStatus.FAILURE
-                }
-            )
+            is Outcome.Found -> {
+                // The marker is printed after the command is done, so everything
+                // the command wrote to its error stream is already in the pipe.
+                // The thread that reads it may not have picked it up yet.
+                awaitStderrSettled()
+                ShellResult(
+                    code = outcome.exitCode,
+                    out = outcome.stdout,
+                    err = stderrBuffer.asString(),
+                    status = if (outcome.exitCode == 0) {
+                        ShellExecutionStatus.SUCCESS
+                    } else {
+                        ShellExecutionStatus.FAILURE
+                    }
+                )
+            }
 
             Outcome.TimedOut -> {
                 // The shell is stuck inside a command that never ends. Its
@@ -274,6 +280,29 @@ class ShellSession(
         return -1
     }
 
+    /**
+     * Waits until the error output has stopped growing.
+     *
+     * The command is finished when the marker arrives, so what is left is only
+     * the work of the thread that reads the error stream. It is given a moment
+     * to catch up, and the wait ends as soon as nothing more arrives.
+     */
+    private fun awaitStderrSettled() {
+        val deadline = System.nanoTime() + STDERR_SETTLE_TIMEOUT_NS
+        var lastSize = -1
+        while (System.nanoTime() < deadline) {
+            val size = stderrBuffer.size()
+            if (size == lastSize) return
+            lastSize = size
+            try {
+                Thread.sleep(STDERR_SETTLE_STEP_MS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
     /** Moves the standard output into the queue in blocks. */
     private fun pumpStdout() {
         try {
@@ -309,6 +338,12 @@ class ShellSession(
     private companion object {
         /** How much one command may print. */
         const val MAX_OUTPUT_BYTES = 64 * 1024
+
+        /** How long the error output may take to arrive. */
+        const val STDERR_SETTLE_TIMEOUT_NS = 60_000_000L
+
+        /** How often the error output is looked at while it arrives. */
+        const val STDERR_SETTLE_STEP_MS = 2L
     }
 
     /** A block of standard output, or the end of it. */
@@ -331,6 +366,9 @@ class ShellSession(
             buffer.reset()
             truncated = false
         }
+
+        @Synchronized
+        fun size(): Int = buffer.size()
 
         @Synchronized
         fun asString(): String {

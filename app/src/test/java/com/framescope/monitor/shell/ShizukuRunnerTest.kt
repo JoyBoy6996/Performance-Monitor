@@ -111,11 +111,15 @@ class ShizukuRunnerTest {
         var probeSucceeds: Boolean = true,
         var commandException: RemoteException? = null,
         var cancelException: RemoteException? = null,
-        var commandHandler: ((String) -> Bundle)? = null
+        var commandHandler: ((String) -> Bundle)? = null,
+        var supportsSessions: Boolean = false
     ) : IShizukuService.Stub() {
 
         val executedCommands = CopyOnWriteArrayList<String>()
         val cancelledExecutions = CopyOnWriteArrayList<String>()
+        val sessionCommands = CopyOnWriteArrayList<String>()
+        val openedSessions = CopyOnWriteArrayList<String>()
+        val closedSessions = CopyOnWriteArrayList<String>()
 
         override fun destroy() {}
         override fun exit() {}
@@ -175,6 +179,50 @@ class ShizukuRunnerTest {
             cancelException?.let { throw it }
             return true
         }
+
+        /** The fake opens a shell only when the test asks for one. */
+        override fun openSession(): Bundle {
+            if (!supportsSessions) {
+                return Bundle().apply {
+                    putString(ShizukuUserService.KEY_SESSION_ID, "")
+                    putString(ShizukuUserService.KEY_STATUS, ShellExecutionStatus.FAILURE.name)
+                    putInt(ShizukuUserService.KEY_EXIT_CODE, -1)
+                    putString(ShizukuUserService.KEY_STDOUT, "")
+                    putString(ShizukuUserService.KEY_STDERR, "The fake service has no open shell")
+                }
+            }
+            val id = "session-${openedSessions.size + 1}"
+            openedSessions.add(id)
+            return Bundle().apply {
+                putString(ShizukuUserService.KEY_SESSION_ID, id)
+                putString(ShizukuUserService.KEY_STATUS, ShellExecutionStatus.SUCCESS.name)
+                putInt(ShizukuUserService.KEY_EXIT_CODE, 0)
+                putString(ShizukuUserService.KEY_STDOUT, "")
+                putString(ShizukuUserService.KEY_STDERR, "")
+            }
+        }
+
+        override fun execInSession(sessionId: String, command: String, timeoutMs: Long): Bundle {
+            sessionCommands.add(command)
+            return Bundle().apply {
+                putString(ShizukuUserService.KEY_SESSION_ID, sessionId)
+                putString(ShizukuUserService.KEY_STATUS, ShellExecutionStatus.SUCCESS.name)
+                putInt(ShizukuUserService.KEY_EXIT_CODE, 0)
+                putString(ShizukuUserService.KEY_STDOUT, "session:$command")
+                putString(ShizukuUserService.KEY_STDERR, "")
+            }
+        }
+
+        override fun closeSession(sessionId: String): Bundle {
+            closedSessions.add(sessionId)
+            return Bundle().apply {
+                putString(ShizukuUserService.KEY_SESSION_ID, sessionId)
+                putString(ShizukuUserService.KEY_STATUS, ShellExecutionStatus.SUCCESS.name)
+                putInt(ShizukuUserService.KEY_EXIT_CODE, 0)
+                putString(ShizukuUserService.KEY_STDOUT, "")
+                putString(ShizukuUserService.KEY_STDERR, "")
+            }
+        }
     }
 
     private fun createLifecycleRunner(
@@ -217,6 +265,53 @@ class ShizukuRunnerTest {
         assertEquals(ShizukuRunner.ConnectionState.READY, runner.connectionState.value)
         assertTrue(runner.isAvailable())
         assertEquals("", runner.unavailableReason())
+    }
+
+    @Test
+    fun theCommandRunsInTheShellThatStaysOpen() = runBlocking {
+        val mock = MockShizukuService(
+            defaultStdout = "uid=2000(shell)",
+            supportsSessions = true
+        )
+        val runner = ShizukuRunner(mockService = mock)
+
+        val result = runner.exec("dumpsys SurfaceFlinger --latency", 5_000)
+
+        assertTrue(result.ok)
+        assertEquals("session:dumpsys SurfaceFlinger --latency", result.out)
+        // The command did not start a process of its own.
+        assertTrue(mock.executedCommands.none { it.contains("SurfaceFlinger") })
+        assertEquals(1, mock.openedSessions.size)
+        assertEquals(1, mock.sessionCommands.size)
+    }
+
+    @Test
+    fun theOpenShellIsUsedForEveryCommand() = runBlocking {
+        val mock = MockShizukuService(
+            defaultStdout = "uid=2000(shell)",
+            supportsSessions = true
+        )
+        val runner = ShizukuRunner(mockService = mock)
+
+        runner.exec("first", 5_000)
+        runner.exec("second", 5_000)
+
+        // One shell answers both commands.
+        assertEquals(1, mock.openedSessions.size)
+        assertEquals(listOf("first", "second"), mock.sessionCommands.toList())
+    }
+
+    @Test
+    fun aServiceWithoutAnOpenShellFallsBackToOneCommand() = runBlocking {
+        val mock = MockShizukuService(defaultStdout = "one-shot")
+        val runner = ShizukuRunner(mockService = mock)
+
+        val result = runner.exec("dumpsys SurfaceFlinger --latency", 5_000)
+
+        assertTrue(result.ok)
+        assertEquals("one-shot", result.out)
+        assertTrue(mock.executedCommands.contains("dumpsys SurfaceFlinger --latency"))
+        assertTrue(mock.sessionCommands.isEmpty())
     }
 
     @Test

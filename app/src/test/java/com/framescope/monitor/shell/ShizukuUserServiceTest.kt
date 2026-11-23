@@ -53,6 +53,63 @@ class ShizukuUserServiceTest {
     }
 
     @Test
+    fun theOpenShellAnswersManyCommands() {
+        val service = ShizukuUserService()
+
+        val opened = service.openSession()
+        val sessionId = opened.getString(ShizukuUserService.KEY_SESSION_ID).orEmpty()
+        assertEquals(ShellExecutionStatus.SUCCESS.name, opened.getString(ShizukuUserService.KEY_STATUS))
+        assertTrue(sessionId.isNotBlank())
+
+        val first = service.execInSession(sessionId, "printf 'first'", 2_000)
+        val second = service.execInSession(sessionId, "printf 'second'", 2_000)
+
+        assertEquals("first", first.getString(ShizukuUserService.KEY_STDOUT))
+        assertEquals("second", second.getString(ShizukuUserService.KEY_STDOUT))
+        assertEquals(0, second.getInt(ShizukuUserService.KEY_EXIT_CODE))
+
+        service.closeSession(sessionId)
+    }
+
+    @Test
+    fun theOpenShellReportsTheExitCodeOfACommand() {
+        val service = ShizukuUserService()
+        val sessionId = service.openSession()
+            .getString(ShizukuUserService.KEY_SESSION_ID).orEmpty()
+
+        val result = service.execInSession(sessionId, "printf 'out'; printf 'err' >&2; exit 7", 2_000)
+
+        assertEquals(ShellExecutionStatus.FAILURE.name, result.getString(ShizukuUserService.KEY_STATUS))
+        assertEquals(7, result.getInt(ShizukuUserService.KEY_EXIT_CODE))
+        assertEquals("out", result.getString(ShizukuUserService.KEY_STDOUT))
+        assertTrue(result.getString(ShizukuUserService.KEY_STDERR).orEmpty().contains("err"))
+
+        service.closeSession(sessionId)
+    }
+
+    @Test
+    fun anUnknownShellSessionIsRefused() {
+        val service = ShizukuUserService()
+
+        val result = service.execInSession("not-a-session", "printf 'x'", 2_000)
+
+        assertEquals(ShellExecutionStatus.FAILURE.name, result.getString(ShizukuUserService.KEY_STATUS))
+        assertTrue(result.getString(ShizukuUserService.KEY_STDERR).orEmpty().contains("unknown"))
+    }
+
+    @Test
+    fun destroyingTheServiceClosesTheOpenShells() {
+        val service = ShizukuUserService()
+        val sessionId = service.openSession()
+            .getString(ShizukuUserService.KEY_SESSION_ID).orEmpty()
+
+        service.destroy()
+
+        val result = service.execInSession(sessionId, "printf 'x'", 2_000)
+        assertEquals(ShellExecutionStatus.FAILURE.name, result.getString(ShizukuUserService.KEY_STATUS))
+    }
+
+    @Test
     fun rejectsOversizedCommandBeforeStartingProcess() {
         val result = ShizukuUserService().execute(
             "large-command",

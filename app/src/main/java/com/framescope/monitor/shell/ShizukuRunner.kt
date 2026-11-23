@@ -141,6 +141,26 @@ class ShizukuRunner private constructor(
     @Volatile
     private var service: IShizukuService? = mockService
 
+    /**
+     * The shell that stays open, when there is one.
+     *
+     * A command that is started and stopped again costs a process every time,
+     * and that process is started while the app that is being measured is
+     * trying to draw. One shell that answers many commands costs one process
+     * for the whole session, and the counters of the device stay warm between
+     * two reads.
+     */
+    @Volatile
+    private var sessionId: String? = null
+
+    /** The service that owns the open shell. */
+    @Volatile
+    private var sessionOwner: IShizukuService? = null
+
+    /** When the open shell was opened, on the wall clock. */
+    @Volatile
+    private var sessionOpenedAtMs: Long = 0L
+
     private inner class BindingAttempt(
         val generation: Long,
         val args: Shizuku.UserServiceArgs
@@ -189,6 +209,7 @@ class ShizukuRunner private constructor(
             val current = activeBinding
             if (current != null) detachAttemptLocked(current)
             service = null
+            forgetSession()
             _connectionDetails.update {
                 it.copy(binderAvailable = false, userServiceConnected = false, commandVerified = false)
             }
@@ -498,6 +519,7 @@ class ShizukuRunner private constructor(
         } else {
             synchronized(lifecycleLock) {
                 service = null
+                forgetSession()
                 _connectionDetails.update { it.copy(userServiceConnected = false, commandVerified = false) }
                 _connectionState.value = if (_connectionDetails.value.binderAvailable) {
                     ConnectionState.CONNECTING
@@ -519,6 +541,7 @@ class ShizukuRunner private constructor(
             if (activeBinding !== attempt) return
             detachAttemptLocked(attempt)
             service = null
+            forgetSession()
             _connectionDetails.update { it.copy(userServiceConnected = false, commandVerified = false) }
             val recoverable = _connectionDetails.value.binderAvailable &&
                 _connectionDetails.value.permissionGranted
@@ -693,6 +716,12 @@ class ShizukuRunner private constructor(
             throw ShellUnavailable(unavailableReason().ifBlank { "Shizuku UserService is not verified." })
         }
 
+        // The open shell answers first. It costs no process per command, and
+        // the counters of the device stay warm between two reads - which is
+        // what makes a short measurement window trustworthy.
+        execInOpenShell(activeService, command, timeoutMs)
+            ?.let { return@withContext it }
+
         val executionId = UUID.randomUUID().toString()
         val effectiveTimeout = timeoutMs.coerceIn(MIN_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS)
         val response = try {
@@ -785,7 +814,6 @@ class ShizukuRunner private constructor(
                 } catch (e: Exception) {
                     continuation.resumeWithException(e)
                 }
-
                 continuation.invokeOnCancellation {
                     try {
                         commandExecutor.execute {
@@ -804,6 +832,173 @@ class ShizukuRunner private constructor(
             activeCommands.remove(executionId, activeService)
         }
     }
+
+    /**
+     * Runs a command in the shell that stays open.
+     *
+     * Returns null when the open shell cannot answer, so the caller can fall
+     * back to the one-shot transport. A shell that died or that ran into its
+     * timeout is thrown away, and the command is tried once more in a fresh
+     * one before the fallback takes over.
+     */
+    private suspend fun execInOpenShell(
+        activeService: IShizukuService,
+        command: String,
+        timeoutMs: Long
+    ): ShellResult? {
+        // The readiness probe answers on its own: it proves that the service
+        // can run a command, and it must not depend on a shell that is not
+        // there yet.
+        if (command.contains(VERIFY_PROBE_TOKEN)) return null
+
+        var attempt = 0
+        while (attempt < SESSION_ATTEMPTS) {
+            attempt++
+            val sessionId = openSession(activeService) ?: return null
+            val result = runInSession(activeService, sessionId, command, timeoutMs)
+            if (result != null) return result
+            closeSession(activeService, sessionId)
+        }
+        return null
+    }
+
+    /** Opens a shell that stays open, or returns the one that is already there. */
+    private suspend fun openSession(activeService: IShizukuService): String? {
+        val existing = synchronized(lifecycleLock) {
+            val current = sessionId
+            if (current != null && sessionOwner === activeService && !sessionExpiredLocked()) {
+                current
+            } else {
+                null
+            }
+        }
+        if (existing != null) return existing
+
+        val response = try {
+            withTimeoutOrNull(SESSION_TIMEOUT_MS + REMOTE_TIMEOUT_GRACE_MS) {
+                callService { activeService.openSession() }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        } ?: return null
+
+        val status = response.getString(ShizukuUserService.KEY_STATUS)
+        val id = response.getString(ShizukuUserService.KEY_SESSION_ID).orEmpty()
+        if (id.isBlank() || status != ShellExecutionStatus.SUCCESS.name) return null
+
+        synchronized(lifecycleLock) {
+            sessionId = id
+            sessionOwner = activeService
+            sessionOpenedAtMs = System.currentTimeMillis()
+        }
+        return id
+    }
+
+    /** Runs one command in an open shell. */
+    private suspend fun runInSession(
+        activeService: IShizukuService,
+        sessionId: String,
+        command: String,
+        timeoutMs: Long
+    ): ShellResult? {
+        val effectiveTimeout = timeoutMs.coerceIn(MIN_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS)
+        val response = try {
+            withTimeoutOrNull(effectiveTimeout + REMOTE_TIMEOUT_GRACE_MS) {
+                callService { activeService.execInSession(sessionId, command, effectiveTimeout) }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        } ?: return null
+
+        val status = response.getString(ShizukuUserService.KEY_STATUS)
+            ?.let { value -> ShellExecutionStatus.entries.firstOrNull { it.name == value } }
+            ?: return null
+        // A command that ran into its timeout leaves the shell in an unknown
+        // state. The session is thrown away and the command runs again.
+        if (status == ShellExecutionStatus.TIMEOUT) return null
+
+        val stdout = response.getString(ShizukuUserService.KEY_STDOUT, "").orEmpty()
+        val stderr = response.getString(ShizukuUserService.KEY_STDERR, "").orEmpty()
+        if (stdout.length > ShizukuUserService.MAX_RESULT_TEXT_CHARS ||
+            stderr.length > ShizukuUserService.MAX_RESULT_TEXT_CHARS
+        ) {
+            return null
+        }
+        synchronized(lifecycleLock) {
+            if (sessionId == this.sessionId) sessionOpenedAtMs = System.currentTimeMillis()
+        }
+        return ShellResult(
+            code = response.getInt(ShizukuUserService.KEY_EXIT_CODE, -1),
+            out = stdout,
+            err = stderr,
+            status = status,
+            executionId = sessionId
+        )
+    }
+
+    /** Closes an open shell and forgets it. */
+    private suspend fun closeSession(activeService: IShizukuService, sessionId: String) {
+        synchronized(lifecycleLock) {
+            if (this.sessionId == sessionId) {
+                this.sessionId = null
+                sessionOwner = null
+                sessionOpenedAtMs = 0L
+            }
+        }
+        try {
+            withTimeoutOrNull(SESSION_TIMEOUT_MS) {
+                callService { activeService.closeSession(sessionId) }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // The service is gone; there is nothing left to close.
+        }
+    }
+
+    /** Forgets the open shell without closing it. */
+    private fun forgetSession() {
+        synchronized(lifecycleLock) {
+            sessionId = null
+            sessionOwner = null
+            sessionOpenedAtMs = 0L
+        }
+    }
+
+    /**
+     * True while a shell that stays open is answering the commands.
+     *
+     * A measurement that runs in an open shell does not start a process for
+     * every read, so it takes less of the phone while the app that is being
+     * measured is trying to draw.
+     */
+    val openShellActive: Boolean
+        get() = synchronized(lifecycleLock) { sessionId != null }
+
+    /** True when the open shell has been idle for too long. */
+    private fun sessionExpiredLocked(): Boolean =
+        System.currentTimeMillis() - sessionOpenedAtMs > SESSION_IDLE_MS
+
+    /** Runs a binder call off the caller's thread. */
+    private suspend fun <T> callService(block: () -> T): T =
+        suspendCancellableCoroutine { continuation ->
+            try {
+                commandExecutor.execute {
+                    if (!continuation.isActive) return@execute
+                    try {
+                        continuation.resume(block())
+                    } catch (e: Exception) {
+                        continuation.resumeWithException(e)
+                    }
+                }
+            } catch (e: Exception) {
+                continuation.resumeWithException(e)
+            }
+        }
 
     private fun handleCommandConnectionFailure(
         activeService: IShizukuService,
@@ -856,6 +1051,7 @@ class ShizukuRunner private constructor(
             val current = activeBinding
             if (current != null) detachAttemptLocked(current)
             service = null
+            forgetSession()
             _connectionDetails.value = ConnectionDetails()
             _connectionState.value = ConnectionState.NOT_RUNNING
             current
@@ -908,5 +1104,19 @@ class ShizukuRunner private constructor(
         private const val MIN_COMMAND_TIMEOUT_MS = 100L
         private const val MAX_COMMAND_TIMEOUT_MS = 120_000L
         private const val REMOTE_TIMEOUT_GRACE_MS = 3_000L
+
+        /** How often a command is tried again in a fresh shell before the fallback. */
+        private const val SESSION_ATTEMPTS = 2
+
+        /** How long opening or closing a shell may take. */
+        private const val SESSION_TIMEOUT_MS = 4_000L
+
+        /**
+         * How long an open shell is kept when nothing asks for it.
+         *
+         * The shell is a process on the phone. It is worth keeping while the
+         * measurement runs and worth throwing away when it does not.
+         */
+        private const val SESSION_IDLE_MS = 60_000L
     }
 }

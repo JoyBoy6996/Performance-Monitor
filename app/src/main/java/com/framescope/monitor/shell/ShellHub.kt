@@ -79,6 +79,14 @@ class ShellHub(
     private val _status = MutableStateFlow(AccessStatus())
     val status: StateFlow<AccessStatus> = _status.asStateFlow()
 
+    /**
+     * True while the privileged shell that stays open is answering.
+     *
+     * Commands that run in it cost no process, so the measurement takes less of
+     * the phone while the app in front is trying to draw.
+     */
+    val openShellActive: Boolean get() = shizukuRunner.openShellActive
+
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 

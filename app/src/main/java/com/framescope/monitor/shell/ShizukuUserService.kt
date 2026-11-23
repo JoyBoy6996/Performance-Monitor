@@ -61,6 +61,9 @@ class ShizukuUserService : IShizukuService.Stub {
     private val executionLock = Any()
     private val destroyed = AtomicBoolean(false)
 
+    /** The shells that stay open and answer many commands. */
+    private val sessions = ConcurrentHashMap<String, ShellSession>()
+
     override fun destroy() {
         synchronized(executionLock) {
             if (!destroyed.compareAndSet(false, true)) return
@@ -68,6 +71,8 @@ class ShizukuUserService : IShizukuService.Stub {
             cancellationsBeforeStart.clear()
             recentlyFinished.clear()
         }
+        sessions.values.forEach { it.close() }
+        sessions.clear()
     }
 
     override fun exit() {
@@ -253,6 +258,110 @@ class ShizukuUserService : IShizukuService.Stub {
         }
     }
 
+    /**
+     * Opens a shell that stays open.
+     *
+     * A command that is started and stopped again costs a process every time,
+     * and the process is started while the app that is being measured is trying
+     * to draw. One shell that answers many commands costs one process, and the
+     * counters of the device stay warm between the reads.
+     */
+    override fun openSession(): Bundle {
+        if (destroyed.get()) {
+            return sessionBundle(
+                "",
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Shizuku UserService is shutting down"
+            )
+        }
+        val session = try {
+            ShellSession()
+        } catch (e: Exception) {
+            return sessionBundle(
+                "",
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                e.message ?: "Failed to start a shell session"
+            )
+        }
+        val previous = sessions.put(session.id, session)
+        previous?.close()
+        return sessionBundle(session.id, ShellExecutionStatus.SUCCESS, 0, "", "")
+    }
+
+    /**
+     * Runs one command in a shell that is already open.
+     *
+     * The answer has the same shape as the answer of a one-shot command, so the
+     * caller does not have to know which of the two it used.
+     */
+    override fun execInSession(sessionId: String, command: String, timeoutMs: Long): Bundle {
+        if (destroyed.get()) {
+            return sessionBundle(
+                sessionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Shizuku UserService is shutting down"
+            )
+        }
+        if (command.length > MAX_COMMAND_LENGTH) {
+            return sessionBundle(
+                sessionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "Command exceeds the maximum length of $MAX_COMMAND_LENGTH characters"
+            )
+        }
+        val session = sessions[sessionId]
+            ?: return sessionBundle(
+                sessionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                "The shell session is unknown"
+            )
+
+        val result = try {
+            session.run(command, timeoutMs.coerceIn(100L, 120_000L))
+        } catch (e: Exception) {
+            return sessionBundle(
+                sessionId,
+                ShellExecutionStatus.FAILURE,
+                -1,
+                "",
+                e.message ?: "The shell session failed"
+            )
+        }
+        if (!session.isAlive) {
+            sessions.remove(sessionId, session)
+        }
+        return sessionBundle(
+            sessionId,
+            result.status,
+            result.code,
+            result.out,
+            result.err
+        )
+    }
+
+    /** Closes a shell session and forgets it. */
+    override fun closeSession(sessionId: String): Bundle {
+        val session = sessions.remove(sessionId)
+        session?.close()
+        return sessionBundle(
+            sessionId,
+            ShellExecutionStatus.SUCCESS,
+            0,
+            "",
+            if (session == null) "The shell session was already closed" else ""
+        )
+    }
+
     private class CapturedOutput(private val limitBytes: Int) {
         private val buffer = ByteArrayOutputStream(limitBytes)
         private var truncated = false
@@ -315,6 +424,21 @@ class ShizukuUserService : IShizukuService.Stub {
         putString(KEY_STDERR, stderr.take(MAX_RESULT_TEXT_CHARS))
     }
 
+    /** The answer of a command that ran in an open shell. */
+    private fun sessionBundle(
+        sessionId: String,
+        status: ShellExecutionStatus,
+        exitCode: Int,
+        stdout: String,
+        stderr: String
+    ) = Bundle().apply {
+        putString(KEY_SESSION_ID, sessionId.take(MAX_SESSION_ID_LENGTH))
+        putString(KEY_STATUS, status.name)
+        putInt(KEY_EXIT_CODE, exitCode)
+        putString(KEY_STDOUT, stdout.take(MAX_RESULT_TEXT_CHARS))
+        putString(KEY_STDERR, stderr.take(MAX_RESULT_TEXT_CHARS))
+    }
+
     private fun pruneExpiredCancellations() {
         val now = System.currentTimeMillis()
         cancellationsBeforeStart.entries.removeAll { it.value <= now }
@@ -334,11 +458,13 @@ class ShizukuUserService : IShizukuService.Stub {
 
     companion object {
         const val KEY_EXECUTION_ID = "execution_id"
+        const val KEY_SESSION_ID = "session_id"
         const val KEY_STATUS = "execution_status"
         const val KEY_EXIT_CODE = "exit_code"
         const val KEY_STDOUT = "stdout"
         const val KEY_STDERR = "stderr"
         private const val MAX_EXECUTION_ID_LENGTH = 128
+        private const val MAX_SESSION_ID_LENGTH = 128
         internal const val MAX_COMMAND_LENGTH = 32 * 1024
         // Parcel strings use UTF-16, so this keeps both output fields well below Binder's transaction limit.
         /**

@@ -8,4 +8,7 @@ interface IShizukuService {
     int getUid() = 2;
     Bundle execute(String executionId, String command, long timeoutMs) = 3;
     boolean cancel(String executionId) = 4;
+    Bundle openSession() = 5;
+    Bundle execInSession(String sessionId, String command, long timeoutMs) = 6;
+    Bundle closeSession(String sessionId) = 7;
 }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CompareArrows
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material.icons.rounded.Terminal
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.ui.screens.CompareScreen
 import com.framescope.monitor.ui.screens.DashboardScreen
 import com.framescope.monitor.ui.screens.OverlayScreen
 import com.framescope.monitor.ui.screens.SessionDetailScreen
@@ -49,12 +51,29 @@ import com.framescope.monitor.ui.theme.AppBackdrop
 import com.framescope.monitor.ui.theme.LocalSurfaceColors
 import com.framescope.monitor.ui.theme.Space
 
+/**
+ * The places the app can be in.
+ *
+ * Four of them. The overlay and the tools are pages inside the settings: they
+ * are set up once and then left alone, and a bar with five places takes away
+ * the room of the place where the numbers are.
+ */
 enum class AppTab(val label: String, val icon: ImageVector) {
     MONITOR("Monitor", Icons.Rounded.Speed),
-    OVERLAY("Overlay", Icons.Rounded.Layers),
     SESSIONS("Sessions", Icons.Rounded.Timeline),
-    TOOLS("Tools", Icons.Rounded.Terminal),
-    SETUP("Setup", Icons.Rounded.Tune)
+    COMPARE("Compare", Icons.Rounded.CompareArrows),
+    SETTINGS("Settings", Icons.Rounded.Tune)
+}
+
+/**
+ * The pages that live inside the settings.
+ *
+ * The overlay and the tools are not lost: they are two doors in the settings,
+ * and they keep their own back button.
+ */
+enum class SettingsPage {
+    OVERLAY,
+    TOOLS
 }
 
 /**
@@ -73,11 +92,15 @@ fun FrameScopeRoot(
 ) {
     var tab by rememberSaveable { mutableStateOf(AppTab.MONITOR) }
     var openSession by remember { mutableStateOf<SessionRecord?>(null) }
+    var settingsPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
 
     // A session is a page inside the app, not a new Activity. Without this the
     // hardware Back key falls through and finishes the whole app from the detail page.
     BackHandler(enabled = openSession != null) {
         openSession = null
+    }
+    BackHandler(enabled = openSession == null && settingsPage != null) {
+        settingsPage = null
     }
 
     // On a wide screen the content stays a readable column instead of stretching edge to edge.
@@ -97,6 +120,7 @@ fun FrameScopeRoot(
             ) {
                 Box(modifier = contentModifier) {
                     val session = openSession
+                    val page = settingsPage
                     if (session != null) {
                         SessionDetailScreen(
                             session = session,
@@ -105,6 +129,21 @@ fun FrameScopeRoot(
                             onUpdateNote = { note -> container.store.updateNote(session.id, note) },
                             bottomPadding = Space.xl
                         )
+                    } else if (page != null) {
+                        when (page) {
+                            SettingsPage.OVERLAY -> OverlayScreen(
+                                container = container,
+                                onRequestOverlayPermission = onRequestOverlayPermission,
+                                bottomPadding = Space.xl,
+                                onBack = { settingsPage = null }
+                            )
+
+                            SettingsPage.TOOLS -> ToolsScreen(
+                                container = container,
+                                bottomPadding = Space.xl,
+                                onBack = { settingsPage = null }
+                            )
+                        }
                     } else {
                         AnimatedContent(
                             targetState = tab,
@@ -120,8 +159,10 @@ fun FrameScopeRoot(
                                 onRequestOverlayPermission = onRequestOverlayPermission,
                                 onRequestScreenRecord = onRequestScreenRecord,
                                 bottomPadding = Space.xl,
-                                onOpenSettings = { tab = AppTab.SETUP },
-                                onOpenSession = { openSession = it }
+                                onOpenSettings = { tab = AppTab.SETTINGS },
+                                onOpenSession = { openSession = it },
+                                onOpenOverlay = { settingsPage = SettingsPage.OVERLAY },
+                                onOpenTools = { settingsPage = SettingsPage.TOOLS }
                             )
                         }
                     }
@@ -189,7 +230,9 @@ private fun TabContent(
     onRequestScreenRecord: () -> Unit,
     bottomPadding: androidx.compose.ui.unit.Dp,
     onOpenSettings: () -> Unit,
-    onOpenSession: (SessionRecord) -> Unit
+    onOpenSession: (SessionRecord) -> Unit,
+    onOpenOverlay: () -> Unit,
+    onOpenTools: () -> Unit
 ) {
     when (tab) {
         AppTab.MONITOR -> DashboardScreen(
@@ -198,17 +241,20 @@ private fun TabContent(
             bottomPadding = bottomPadding,
             onRequestScreenRecord = onRequestScreenRecord
         )
-        AppTab.OVERLAY -> OverlayScreen(
-            container = container,
-            onRequestOverlayPermission = onRequestOverlayPermission,
-            bottomPadding = bottomPadding
-        )
         AppTab.SESSIONS -> SessionsScreen(
             container = container,
             onOpenSession = onOpenSession,
             bottomPadding = bottomPadding
         )
-        AppTab.TOOLS -> ToolsScreen(container = container, bottomPadding = bottomPadding)
-        AppTab.SETUP -> SettingsScreen(container = container, bottomPadding = bottomPadding)
+        AppTab.COMPARE -> CompareScreen(
+            container = container,
+            bottomPadding = bottomPadding
+        )
+        AppTab.SETTINGS -> SettingsScreen(
+            container = container,
+            bottomPadding = bottomPadding,
+            onOpenOverlay = onOpenOverlay,
+            onOpenTools = onOpenTools
+        )
     }
 }

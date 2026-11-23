@@ -19,7 +19,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Upload
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -74,7 +76,9 @@ private fun Throwable.describe(): String {
 @Composable
 fun SettingsScreen(
     container: AppContainer,
-    bottomPadding: Dp = 24.dp
+    bottomPadding: Dp = 24.dp,
+    onOpenOverlay: () -> Unit = {},
+    onOpenTools: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val settings = container.settings
@@ -165,6 +169,40 @@ fun SettingsScreen(
                             }
                         }
                     }
+                )
+            }
+        }
+
+        item { SectionHeader("Overlay and tools") }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                SettingRow(
+                    title = "Overlay",
+                    supporting = "The numbers on top of the game, and how they are drawn",
+                    leading = {
+                        Icon(
+                            imageVector = Icons.Rounded.Layers,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    },
+                    onClick = onOpenOverlay
+                )
+                PanelDivider()
+                SettingRow(
+                    title = "Tools",
+                    supporting = "The facts of the device and a privileged shell",
+                    leading = {
+                        Icon(
+                            imageVector = Icons.Rounded.Terminal,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    },
+                    onClick = onOpenTools
                 )
             }
         }

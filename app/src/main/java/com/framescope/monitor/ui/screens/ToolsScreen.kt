@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Tv
@@ -359,7 +360,8 @@ private suspend fun collectDeviceFacts(context: Context, hub: ShellHub): DeviceF
 @Composable
 fun ToolsScreen(
     container: AppContainer,
-    bottomPadding: Dp = 24.dp
+    bottomPadding: Dp = 24.dp,
+    onBack: (() -> Unit)? = null
 ) {
     var showScreenTest by remember { mutableStateOf(false) }
     var deviceFacts by remember { mutableStateOf(DeviceFacts()) }
@@ -378,7 +380,18 @@ fun ToolsScreen(
     FrameScopeScreen(
         title = "Tools",
         subtitle = "Device facts and a privileged shell",
-        bottomPadding = bottomPadding
+        bottomPadding = bottomPadding,
+        actions = {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back to the settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
     ) {
         item { SectionHeader("Device") }
 

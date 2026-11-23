@@ -91,6 +91,9 @@ class UiSnapshotTest {
                 onBack = {}
             )
         }
+        capture("10-compare-dark", dark = true, heightDp = 2400) {
+            com.framescope.monitor.ui.screens.CompareScreen(container = container)
+        }
         capture("07-shell-dark", dark = true) {
             FrameScopeRoot(
                 container = container,
@@ -127,12 +130,16 @@ class UiSnapshotTest {
             "batterySeries":[${batterySeries.joinToString(",")}],
             "longestFrameMs":28.4,"dropSeconds":3}
         """.trimIndent()
+        val secondSeries = listOf(
+            60.0, 60.2, 59.8, 60.1, 60.3, 60.0, 59.7, 59.9, 58.4, 54.0, 47.5, 44.2,
+            49.8, 55.1, 58.9, 60.2, 60.4, 60.1, 59.8, 60.0, 60.3, 59.6, 59.9, 60.1, 60.0
+        )
         val second = """
             {"id":"s2","appPackage":"com.example.racer","appLabel":"Asphalt Legends",
             "startedAt":${now - 90_000_000},"durationMs":655000,"avgFps":59.1,"maxFps":61.0,
             "minFps":55.0,"low1Percent":55.4,"low5Percent":56.1,"smoothness":97.0,
             "totalFrames":38710,"jankFrames":48,"avgFrameTimeMs":16.9,"maxFrameTimeMs":19.4,
-            "maxTempC":39.2,"avgCpu":44.8,"fpsSeries":[${series.joinToString(",")}],
+            "maxTempC":39.2,"avgCpu":44.8,"fpsSeries":[${secondSeries.joinToString(",")}],
             "cpuSeries":[],"tempSeries":[]}
         """.trimIndent()
         File(dir, "s1.json").writeText(first)

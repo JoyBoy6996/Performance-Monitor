@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Warning
@@ -21,6 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
@@ -66,7 +68,8 @@ private val STYLE_LABELS = listOf("Pill", "Compact", "Classic", "Detailed", "RTS
 fun OverlayScreen(
     container: AppContainer,
     onRequestOverlayPermission: () -> Unit,
-    bottomPadding: Dp = 24.dp
+    bottomPadding: Dp = 24.dp,
+    onBack: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val settings = container.settings
@@ -94,7 +97,18 @@ fun OverlayScreen(
     FrameScopeScreen(
         title = "Overlay",
         subtitle = "Live telemetry on top of any app",
-        bottomPadding = bottomPadding
+        bottomPadding = bottomPadding,
+        actions = {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back to the settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
     ) {
         item {
             Panel {

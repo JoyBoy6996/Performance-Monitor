@@ -296,21 +296,6 @@ class FpsSampler(
     }
 
     /**
-     * Publishes the absence of a measurement, and why.
-     *
-     * Used when the measurement cannot even be attempted, so the interface can say
-     * "this needs Shizuku" instead of showing an empty reading with no explanation.
-     */
-    fun reportUnavailable(reason: String, availability: MetricAvailability) {
-        _state.value = rememberLastReading(
-            source = "no source",
-            kind = FpsSourceKind.NONE,
-            reason = reason,
-            availability = availability
-        )
-    }
-
-    /**
      * Takes one measurement.
      *
      * @param targetFps the refresh rate the frame budget is derived from

@@ -160,13 +160,6 @@ class SessionStore(context: Context) {
     }
 
     @Synchronized
-    fun addSample(sample: SessionSample) {
-        ioScope.launch {
-            runCatching { dbHelper.insertSample(sample) }
-        }
-    }
-
-    @Synchronized
     fun addSamples(samples: List<SessionSample>) {
         if (samples.isEmpty()) return
         ioScope.launch {
@@ -396,66 +389,6 @@ class SessionStore(context: Context) {
             },
             device = o.optJSONObject("device").toDeviceInfo()
         )
-    }
-
-    fun toCsv(record: SessionRecord): String {
-        val sb = StringBuilder()
-        sb.append("second,fps,frame_time_ms,cpu_percent,temp_c,battery_percent,thermal_status,cap_fps,")
-        sb.append("power_w,cpu_freq_mhz,gpu_freq_mhz,cpu_temp_c,soc_temp_c,gpu_percent")
-        sb.append(",ddr_freq_mhz")
-        val coreCount = maxOf(record.perCoreLoadSeries.size, record.perCoreFreqSeries.size)
-        repeat(coreCount) { core ->
-            sb.append(",core${core}_load_pct,core${core}_freq_mhz")
-        }
-        sb.append('\n')
-        val size = maxOf(
-            record.fpsSeries.size,
-            record.cpuSeries.size,
-            record.tempSeries.size,
-            record.frameTimeSeries.size,
-            record.batterySeries.size,
-            record.powerSeries.size,
-            record.cpuFreqSeries.size,
-            record.cpuTempSeries.size,
-            record.socTempSeries.size
-        )
-        for (i in 0 until size) {
-            // The real second of the run, when the run kept it. Older runs fall back to
-            // the index, which is one second per row.
-            val second = record.seriesTimesMs.getOrNull(i)?.let { (it / 1000L).toInt() } ?: i
-            sb.append(second).append(',')
-            sb.append(record.fpsSeries.getOrElse(i) { "" }).append(',')
-            sb.append(record.frameTimeSeries.getOrElse(i) { "" }).append(',')
-            sb.append(record.cpuSeries.getOrElse(i) { "" }).append(',')
-            sb.append(record.tempSeries.getOrElse(i) { "" }).append(',')
-            sb.append(record.batterySeries.getOrElse(i) { "" })
-            sb.append(',')
-            sb.append(record.thermalStatusSeries.getOrElse(i) { "" })
-            sb.append(',')
-            sb.append(record.capSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
-            sb.append(',')
-            sb.append(record.powerSeries.getOrElse(i) { "" })
-            sb.append(',')
-            sb.append(record.cpuFreqSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
-            sb.append(',')
-            sb.append(record.gpuFreqSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
-            sb.append(',')
-            sb.append(record.cpuTempSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
-            sb.append(',')
-            sb.append(record.socTempSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
-            sb.append(',')
-            sb.append(record.gpuPercentSeries.getOrNull(i)?.takeIf { it > 0f }?.toString().orEmpty())
-            sb.append(',')
-            sb.append(record.ddrFreqSeries.getOrNull(i)?.takeIf { it > 0 }?.toString().orEmpty())
-            repeat(coreCount) { core ->
-                sb.append(',')
-                sb.append(record.perCoreLoadSeries.getOrNull(core)?.getOrNull(i)?.toString().orEmpty())
-                sb.append(',')
-                sb.append(record.perCoreFreqSeries.getOrNull(core)?.getOrNull(i)?.toString().orEmpty())
-            }
-            sb.append('\n')
-        }
-        return sb.toString()
     }
 
     private fun JSONArray?.toFloatList(): List<Float> {
@@ -789,23 +722,6 @@ class SessionStore(context: Context) {
         fun updateNote(id: String, note: String) {
             val cv = ContentValues().apply { put("note", note) }
             writableDatabase.update(TABLE_RECORDS, cv, "id = ?", arrayOf(id))
-        }
-
-        fun insertSample(sample: SessionSample) {
-            val cv = ContentValues().apply {
-                put("session_id", sample.sessionId)
-                put("timestamp", sample.timestamp)
-                put("fps", sample.fps)
-                put("frame_time_ms", sample.frameTimeMs)
-                put("cpu_percent", sample.cpuPercent)
-                put("gpu_freq_mhz", sample.gpuFreqMHz)
-                put("thermal_max_c", sample.thermalMaxC)
-                put("battery_level", sample.batteryLevel)
-                put("ram_percent", sample.ramPercent)
-                put("thermal_status", sample.thermalStatus)
-                put("power_watts", sample.powerWatts)
-            }
-            writableDatabase.insert(TABLE_SAMPLES, null, cv)
         }
 
         fun getAllRecords(): List<SessionRecord> {

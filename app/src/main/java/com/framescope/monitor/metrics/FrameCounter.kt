@@ -306,17 +306,6 @@ class FrameCounter(
     }
 
     /**
-     * How old the newest accepted frame really is, in milliseconds.
-     *
-     * This is the age of the frame itself, measured in the source's clock, and it is the
-     * number that says how far behind the screen the reading is.
-     */
-    fun frameAgeMs(nowSourceClockNanos: Long): Long {
-        if (lastPresentSourceNs == Long.MIN_VALUE) return 0L
-        return ((nowSourceClockNanos - lastPresentSourceNs) / 1_000_000L).coerceAtLeast(0L)
-    }
-
-    /**
      * The frame time at a given percentile, in milliseconds.
      *
      * `0.99` is the frame time that one percent of the frames were slower than, which

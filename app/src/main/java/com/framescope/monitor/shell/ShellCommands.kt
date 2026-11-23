@@ -43,10 +43,6 @@ object ShellCommands {
      */
     fun surfaceLatencyDefault(): String = "dumpsys SurfaceFlinger --latency 2>/dev/null"
 
-    /** Fallback when SurfaceFlinger does not list layers: the window manager does. */
-    fun surfaceWindows(): String =
-        "dumpsys window windows 2>/dev/null | grep -E 'SurfaceView|Surface\\[' | head -20"
-
     /**
      * The latency of every layer of one app, in a single round trip.
      *
@@ -113,8 +109,6 @@ object ShellCommands {
      */
     fun surfaceTimeStatsEnable(): String = "dumpsys SurfaceFlinger --timestats -enable 2>/dev/null"
 
-    fun surfaceTimeStatsDump(): String = "dumpsys SurfaceFlinger --timestats -dump 2>/dev/null"
-
     /**
      * The device-wide presented-frame counter, and nothing else.
      *
@@ -169,8 +163,6 @@ object ShellCommands {
         "dumpsys gfxinfo $packageName framestats 2>/dev/null"
 
     fun battery(): String = "dumpsys battery 2>/dev/null"
-
-    fun memInfo(): String = "cat /proc/meminfo 2>/dev/null | head -6"
 
     fun cpuStat(): String = "cat /proc/stat 2>/dev/null | head -8"
 
@@ -306,13 +298,6 @@ object ShellCommands {
         "  fi",
         "done"
     ).joinToString("\n")
-
-    fun displayInfo(): String =
-        "dumpsys display 2>/dev/null | grep -m3 -E 'refreshRate|fps=' ; " +
-            "dumpsys surfaceflinger 2>/dev/null | grep -m1 'refresh-rate'"
-
-    fun deviceProps(): String =
-        "getprop ro.product.model; getprop ro.board.platform; getprop ro.hardware; getprop ro.build.version.release"
 
     /**
      * Every thermal zone with its kernel name and raw value. `dumpsys thermalservice`
@@ -497,7 +482,6 @@ object Parsers {
 
     fun parseShellUid(dump: String): String? = lineValue(dump, "SHELLUID")
         ?: lineValue(dump, "UID")
-    fun parseShellUser(dump: String): String? = lineValue(dump, "SHELLUSER")
 
     data class ThermalZoneReading(val path: String, val type: String, val raw: Float?)
 
@@ -510,14 +494,6 @@ object Parsers {
             if (cols.size < 3) return@mapNotNull null
             ThermalZoneReading(cols[0], cols[1], cols[2].toFloatOrNull())
         }.toList()
-
-    /** The sysfs counter that actually answered, for the Shell Logs diagnostics. */
-    fun parseGpuPath(dump: String): String? {
-        val line = dump.lineSequence().firstOrNull {
-            it.trim().startsWith("GPUPATH=") || it.trim().startsWith("GPUFREQPATH=")
-        } ?: return null
-        return line.substringAfter("=").trim().takeIf { it.isNotBlank() }
-    }
 
     fun parseDeviceIdentity(dump: String): Pair<String?, String?> {
         val platform = (lineValue(dump, "PLATFORM") ?: lineValue(dump, "PLAT"))

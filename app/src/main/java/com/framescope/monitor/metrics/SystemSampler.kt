@@ -235,13 +235,6 @@ class SystemSampler(private val hub: ShellHub) {
         return "shell_uid=$uid | platform=$board | thermal_zone=$zones | clusters=$clusters"
     }
 
-    /** Source label for the extra Scene-style collectors, for the diagnostics report. */
-    fun sceneSourceText(): String = buildString {
-        appendLine("per-core CPU: /proc/stat + cpufreq scaling_cur_freq")
-        appendLine("memory clock: devfreq cur_freq")
-        appendLine("thread CPU: /proc/<pid>/task/<tid>/stat")
-    }.trimEnd()
-
     /**
      * Real CPU clusters: cores are grouped by the maximum clock the kernel reports.
      * A device that does not publish those nodes gets one line per core instead.

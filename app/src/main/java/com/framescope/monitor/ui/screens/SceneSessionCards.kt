@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.theme.MonoInline
@@ -338,8 +339,9 @@ private fun Drawable.toSquareBitmap(size: Int): Bitmap? = runCatching {
     bitmap
 }.getOrNull()
 
+/** The version of an installed app, so the report says which build was measured. */
 @Suppress("DEPRECATION")
-private fun appVersion(context: Context, packageName: String): String? = runCatching {
+internal fun appVersion(context: Context, packageName: String): String? = runCatching {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         context.packageManager.getPackageInfo(
             packageName, PackageManager.PackageInfoFlags.of(0L)
@@ -481,6 +483,65 @@ fun SceneSessionCards(
             }
         }
 
+        // Card 5 - the frame rate and the temperature of the chip on one
+        // chart, the way the PDF shows it.
+        SceneCard {
+            Text("FPS & Temperature(°C)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+            Spacer(Modifier.height(8.dp))
+            val fpsCeiling = (sPositive(session.fpsSeries).maxOrNull() ?: 120f)
+                .let { if (it > 130f) 144f else 120f }
+            val temps = temps.map { it.coerceIn(0f, 110f) }
+            SceneLineChart(
+                lines = listOf(
+                    ChartLineUi(sClamped(session.fpsSeries, 0f, fpsCeiling), Scene.fps, 0f, fpsCeiling),
+                    ChartLineUi(temps, Scene.temp, 0f, 110f),
+                    ChartLineUi(sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f),
+                    ChartLineUi(sClamped(session.gpuPercentSeries, 0f, 100f), Scene.gpu, 0f, 100f)
+                ),
+                leftLabels = (5 downTo 0).map { sfmt(fpsCeiling * it / 5f, 0) },
+                rightLabels = listOf("110", "88", "66", "44", "22", "0"),
+                timeLabels = timeTicks(session)
+            )
+            Legend(
+                "FPS" to Scene.fps,
+                "TEMP(°C)" to Scene.temp,
+                "CPU(%)" to Scene.total,
+                "GPU(%)" to Scene.gpu
+            )
+            Text(
+                "TEMP MAX: ${sfmt(temps.maxOrNull(), 1)}°C   " +
+                    "MIN: ${sfmt(temps.minOrNull(), 1)}°C   " +
+                    "AVG: ${sfmt(temps.avgOrNull(), 1)}°C",
+                style = tnumSmall, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Card 6 - one spike per frame time, so a stall is a spike and not a
+        // slow line.
+        SceneCard {
+            Text("Frame Time(ms)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+            Spacer(Modifier.height(8.dp))
+            val maxFrame = (sPositive(session.frameTimeSeries).maxOrNull() ?: 100f)
+                .coerceAtLeast(100f)
+            SceneLineChart(
+                lines = listOf(
+                    ChartLineUi(
+                        sClamped(session.frameTimeSeries, 0f, maxFrame),
+                        Scene.frame, 0f, maxFrame, spikes = true, strokeWidth = 2.5f
+                    )
+                ),
+                leftLabels = (5 downTo 0).map { sfmt(maxFrame * it / 5f, 0) },
+                timeLabels = timeTicks(session),
+                height = 150.dp
+            )
+            Text(
+                "MAX: ${sfmt(session.maxFrameTimeMs, 0)}ms",
+                style = tnumSmall, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
         // The load of the processor, cluster by cluster. The total has its own
         // chart above, next to the frame rate.
         SceneCard {
@@ -489,7 +550,7 @@ fun SceneSessionCards(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("CPU by cluster(%)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
+                Text("CPU Usage(%)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
                 Text("Chart Options", style = tnumSmall)
             }
             Spacer(Modifier.height(8.dp))
@@ -615,14 +676,24 @@ fun SceneSessionCards(
             ).ifEmpty { sPositive(session.cpuFreqSeries) }
             val gpuLoad = sPositive(session.gpuPercentSeries)
             val gpuClock = sPositive(session.gpuFreqSeries)
-            listOf(
+            // A row without a reading is not printed. A legacy run without
+            // counters gets one clean line instead of a page of "--".
+            val detailRows = listOf(
                 "CPU CLOCK AVG" to sfmt(freqs.avgOrNull(), 0),
                 "CPU CLOCK MAX" to sfmt(freqs.maxOrNull(), 0),
                 "GPU LOAD AVG" to sfmt(gpuLoad.avgOrNull(), 1),
                 "GPU LOAD MAX" to sfmt(gpuLoad.maxOrNull(), 1),
                 "GPU CLOCK AVG" to sfmt(gpuClock.avgOrNull(), 0),
                 "GPU CLOCK MAX" to sfmt(gpuClock.maxOrNull(), 0)
-            ).forEach { row -> DetailRow(row.first, row.second) }
+            ).filter { it.second != "--" }
+            if (detailRows.isEmpty()) {
+                Text(
+                    "Hardware counters unavailable in this legacy session",
+                    style = tnumSmall.copy(color = Scene.muted)
+                )
+            } else {
+                detailRows.forEach { row -> DetailRow(row.first, row.second) }
+            }
 
             Spacer(Modifier.height(12.dp))
             Text("Per-core (0-7)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
@@ -671,9 +742,11 @@ private fun DetailRow(label: String, value: String) {
 @Composable
 private fun ShellLogsCard(session: SessionRecord) {
     var expanded by remember(session.id) { mutableStateOf(false) }
-    val identity = session.shellLogs.lineSequence()
-        .firstOrNull { it.startsWith("shell_uid=") }
-        ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
+    // The identity is printed only when the shell really answered it. A line
+    // full of "--" is not a reading, and printing it next to the other
+    // numbers makes a run look measured when it was not.
+    val identity = ShellLogs.identity(session.shellLogs)
+    val details = ShellLogs.detailLines(session.shellLogs)
     Column {
         Row(
             Modifier.fillMaxWidth().clickable { expanded = !expanded },
@@ -684,16 +757,22 @@ private fun ShellLogsCard(session: SessionRecord) {
             Text(if (expanded) "Hide" else "Expand", style = tnumSmall, color = Scene.blue)
         }
         Spacer(Modifier.height(8.dp))
-        Text(identity, style = tnumSmall.copy(color = Scene.blue))
+        if (identity != null) {
+            Text(identity, style = tnumSmall.copy(color = Scene.blue))
+        } else {
+            Text(
+                "No shell output was captured for this run.",
+                style = tnumSmall.copy(color = Scene.muted)
+            )
+        }
         if (expanded) {
             Spacer(Modifier.height(6.dp))
             // The identity is already the cyan line above. Printing it again here
             // made every diagnostic block start with the same row twice.
-            val lines = session.shellLogs.lineSequence()
-                .filterNot { it.startsWith("shell_uid=") }
-                .joinToString("\n")
             Text(
-                lines.ifBlank { "--" },
+                details.joinToString("\n").ifBlank {
+                    "The privileged shell did not answer for this run."
+                },
                 style = tnumSmall.copy(fontSize = 9.sp)
             )
         }

@@ -24,6 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
 import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.plausibleTempC
 import java.io.File
@@ -110,8 +111,10 @@ private fun scale(max: Float, steps: Int, decimals: Int = 0): List<String> =
 
 private const val TEMP_MAX_C = 110f
 private const val PAGE_W = 1080
-private const val MARGIN = 32f
-private const val PAD = 32f
+// The report is 1080px wide, so one dp is three pixels: the outer margin is
+// 40px, the radius of a card is 12dp and the gap between two cards is 10dp.
+private const val MARGIN = 40f
+private const val PAD = 36f
 private const val GAP = 30f
 private const val RADIUS = 36f
 /** Reserved right-axis strip and the gutter that keeps lines off its numbers. */
@@ -170,7 +173,9 @@ private fun detailHeight(session: SessionRecord): Float {
         maxOf(session.perCoreLoadSeries.size, session.perCoreFreqSeries.size), 8
     )
     val threadRows = minOf(session.threadNames.size, 6)
-    val logRows = session.shellLogs.lineSequence().count().coerceIn(1, 12)
+    // Only the lines that carry a real reading are printed: the identity line
+    // and the lines under it.
+    val logRows = ShellLogs.realLines(session.shellLogs).size.coerceIn(1, 13)
     return 440f + coreRows * 32f + threadRows * 32f + logRows * 24f
 }
 
@@ -423,8 +428,13 @@ private class SceneReportRenderer(
             val stamp = SimpleDateFormat("yyyy-MM-dd  HH:mm:ss", Locale.getDefault())
                 .format(Date(session.startedAt))
             drawLauncherIcon(session, x0, y0 - 12f)
+            // The name of the app with its version, so the report says which
+            // build of the game was measured.
+            val version = appVersion(context, session.appPackage)
+            val name = session.appLabel.ifBlank { session.appPackage }
+            val fullName = if (version.isNullOrBlank()) name else "$name($version)"
             text(
-                fit(session.appLabel.ifBlank { session.appPackage }, (x1 - x0) * 0.55f, title),
+                fit(fullName, (x1 - x0) * 0.55f, title),
                 x0 + 120f, y0 + 8f, title
             )
             label.textAlign = Paint.Align.RIGHT
@@ -760,29 +770,37 @@ private class SceneReportRenderer(
                 maxOf(session.perCoreLoadSeries.size, session.perCoreFreqSeries.size), 8
             )
             val threadRows = minOf(session.threadNames.size, 6)
-            val logs = session.shellLogs.lineSequence().toList()
-                .let { if (it.isEmpty()) listOf("--") else it.take(12) }
-            val identity = logs.firstOrNull { it.startsWith("shell_uid=") }
-                ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
+            // The identity is printed only when the shell really answered it.
+            // A line of "--" is not a reading.
+            val identity = ShellLogs.identity(session.shellLogs)
+            val logs = ShellLogs.detailLines(session.shellLogs).take(12)
             var y = y0 + 40f
 
             text("Device Detail", x0, y0, header)
             val freqs = allFrequencies(session)
             val gpuLoad = session.gpuPercentSeries.positive()
             val gpuClock = session.gpuFreqSeries.positive()
-            listOf(
+            // A row without a reading is not printed. A legacy run without
+            // counters gets one clean line instead of a page of "--".
+            val detailRows = listOf(
                 Pair("CPU CLOCK AVG", fmt(freqs.avgOrNull(), 0)),
                 Pair("CPU CLOCK MAX", fmt(freqs.maxOrNull(), 0)),
                 Pair("GPU LOAD AVG", fmt(gpuLoad.avgOrNull(), 1)),
                 Pair("GPU LOAD MAX", fmt(gpuLoad.maxOrNull(), 1)),
                 Pair("GPU CLOCK AVG", fmt(gpuClock.avgOrNull(), 0)),
                 Pair("GPU CLOCK MAX", fmt(gpuClock.maxOrNull(), 0))
-            ).forEach { row ->
-                text(row.first, x0, y, label)
-                body.textAlign = Paint.Align.RIGHT
-                text(row.second, x1, y, body)
-                body.textAlign = Paint.Align.LEFT
+            ).filter { it.second != "--" }
+            if (detailRows.isEmpty()) {
+                text("Hardware counters unavailable in this legacy session", x0, y, label)
                 y += 30f
+            } else {
+                detailRows.forEach { row ->
+                    text(row.first, x0, y, label)
+                    body.textAlign = Paint.Align.RIGHT
+                    text(row.second, x1, y, body)
+                    body.textAlign = Paint.Align.LEFT
+                    y += 30f
+                }
             }
             y += 16f
 
@@ -824,12 +842,17 @@ private class SceneReportRenderer(
 
             text("Shell Logs", x0, y, header)
             y += 34f
-            body.color = ReportTheme.blue
-            text(fit(identity, x1 - x0, body), x0, y, body)
-            body.color = ReportTheme.text
-            y += 28f
+            if (identity != null) {
+                body.color = ReportTheme.blue
+                text(fit(identity, x1 - x0, body), x0, y, body)
+                body.color = ReportTheme.text
+                y += 28f
+            } else {
+                text("No shell output was captured for this run.", x0, y, label)
+                y += 28f
+            }
             // The identity line is already printed in blue directly above.
-            logs.filterNot { it.startsWith("shell_uid=") }.take(12).forEach { line ->
+            logs.forEach { line ->
                 if (y > y1) return@forEach
                 text(fit(line, x1 - x0, mono), x0, y, mono)
                 y += 24f

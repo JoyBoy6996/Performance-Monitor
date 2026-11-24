@@ -132,7 +132,6 @@ class MetricsEngine(
     private val _measuredLayer = MutableStateFlow<String?>(null)
     val measuredLayer: StateFlow<String?> = _measuredLayer.asStateFlow()
 
-    val probeReport: StateFlow<String> = MutableStateFlow("")
 
     private var fpsJob: Job? = null
     private var nativeJob: Job? = null

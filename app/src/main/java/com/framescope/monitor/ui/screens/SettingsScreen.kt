@@ -21,8 +21,12 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
@@ -67,6 +71,22 @@ import com.framescope.monitor.ui.theme.status
 import kotlinx.coroutines.launch
 
 /** A failure that would otherwise close the app is shown where the user tapped. */
+/**
+ * The name of an app that has none of its own.
+ *
+ * A system plugin has no label a person would recognise, so the name is built
+ * from the package: the last two parts, with the dots turned into spaces.
+ */
+internal fun readableAppName(packageName: String, label: String): String {
+    val trimmed = label.trim()
+    if (trimmed.isNotEmpty() && trimmed != packageName) return trimmed
+    val parts = packageName.split('.').filter { it.isNotBlank() }
+    if (parts.size <= 1) return packageName
+    return parts.takeLast(2).joinToString(" ")
+        .replace('_', ' ')
+        .replaceFirstChar { it.uppercase() }
+}
+
 private fun Throwable.describe(): String {
     val detail = message?.takeIf { it.isNotBlank() }
     return if (detail != null) "$detail (${javaClass.simpleName})" else javaClass.name
@@ -112,6 +132,9 @@ fun SettingsScreen(
         status.shellSource == "Shizuku"
     val dumpActive = status.state == AccessState.READY &&
         status.shellSource == "App shell (DUMP)"
+    // The other ways to get a shell are folded away when the app already has
+    // one, and opened when it does not.
+    var showAlternativeSetup by remember(dumpActive) { mutableStateOf(!dumpActive) }
     val scope = rememberCoroutineScope()
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -143,6 +166,13 @@ fun SettingsScreen(
             val pm = context.packageManager
             pm.getInstalledApplications(0)
                 .filter { ProtectedApps.isProtected(it.packageName) }
+                .filter { app ->
+                    // A system plugin that cannot be opened is not an app the
+                    // user recognises. A banking app that is on the list is
+                    // never dropped.
+                    app.packageName in ProtectedApps.KNOWN ||
+                        pm.getLaunchIntentForPackage(app.packageName) != null
+                }
                 .map { it.packageName to pm.getApplicationLabel(it).toString() }
                 .sortedBy { it.second }
         }.getOrDefault(emptyList())
@@ -194,10 +224,82 @@ fun SettingsScreen(
                     },
                     onClick = onOpenTools
                 )
+                PanelDivider()
+                SettingRow(
+                    title = "Copy last crash",
+                    supporting = "The last crash of the app, if there was one",
+                    leading = {
+                        Icon(
+                            imageVector = Icons.Rounded.BugReport,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    },
+                    onClick = {
+                        val crash = com.framescope.monitor.core.CrashLog.last(context)
+                        Diagnostics.copy(
+                            context,
+                            crash ?: "No crash was recorded on this device."
+                        )
+                        backupMessage = if (crash == null) {
+                            "No crash was recorded on this device."
+                        } else {
+                            "Last crash copied - paste it here."
+                        }
+                    }
+                )
             }
         }
 
-        item { SectionHeader("Privileged access") }
+        item { SectionHeader("Permissions & Shell Access") }
+
+        // One status at the top of the section. Five cards each with their own
+        // badge said five different things about the same question: does the
+        // app have a shell it can read the hardware with.
+        item {
+            Panel(contentPadding = 0.dp) {
+                SettingRow(
+                    title = when {
+                        dumpActive -> "Active (Permanent Shell)"
+                        shizukuActive -> "Active (Shizuku)"
+                        status.state == AccessState.READY -> "Active"
+                        else -> "No shell access yet"
+                    },
+                    supporting = when {
+                        dumpActive ->
+                            "The app reads the frame timings in its own shell. It lasts until " +
+                                "the app is removed and needs nothing else."
+                        shizukuActive ->
+                            "Shizuku is running and Qstats may use it. It lasts while Shizuku runs."
+                        else ->
+                            "Pick one way below. Shizuku, the local ADB bridge or the permanent " +
+                                "shell access all give the same readings."
+                    },
+                    trailing = {
+                        StatusPill(
+                            text = when {
+                                dumpActive -> "Permanent Shell"
+                                shizukuActive -> "Shizuku"
+                                status.commandVerified -> "Verified"
+                                !status.permissionGranted -> "Permission needed"
+                                !status.binderAvailable -> "Shizuku stopped"
+                                status.state == AccessState.UNAVAILABLE -> "Connection error"
+                                status.userServiceConnected -> "Verifying"
+                                else -> "Connecting"
+                            },
+                            color = if (dumpActive || shizukuActive ||
+                                status.state == AccessState.READY
+                            ) {
+                                MaterialTheme.status.good
+                            } else {
+                                MaterialTheme.status.warn
+                            }
+                        )
+                    }
+                )
+            }
+        }
 
         item {
             Panel(contentPadding = 0.dp) {
@@ -292,33 +394,105 @@ fun SettingsScreen(
                         modifier = Modifier.padding(horizontal = Space.lg, vertical = Space.sm)
                     )
                 }
-                OutlinedButton(
-                    onClick = {
-                        val crash = com.framescope.monitor.core.CrashLog.last(context)
-                        Diagnostics.copy(
-                            context,
-                            crash ?: "No crash was recorded on this device."
-                        )
-                        connectMessage = if (crash == null) {
-                            "No crash was recorded on this device."
-                        } else {
-                            "Last crash copied - paste it here."
-                        }
+            }
+        }
+
+        // The other ways to get a shell. When the app already has one, they
+        // are folded away: they are an alternative, not a requirement.
+        item {
+            Panel(contentPadding = 0.dp) {
+                SettingRow(
+                    title = "Alternative setup methods (Shizuku / ADB)",
+                    supporting = if (showAlternativeSetup) {
+                        "Every way of getting a shell for the app, one after the other."
+                    } else {
+                        "The app already reads the hardware by itself. These are the other ways."
                     },
-                    modifier = Modifier.padding(horizontal = Space.lg, vertical = Space.sm)
-                ) {
-                    Text("Copy last crash")
+                    trailing = {
+                        IconButton(onClick = { showAlternativeSetup = !showAlternativeSetup }) {
+                            Icon(
+                                imageVector = if (showAlternativeSetup) {
+                                    Icons.Rounded.ExpandLess
+                                } else {
+                                    Icons.Rounded.ExpandMore
+                                },
+                                contentDescription = if (showAlternativeSetup) {
+                                    "Hide the alternative setup methods"
+                                } else {
+                                    "Show the alternative setup methods"
+                                },
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                )
+            }
+        }
+
+        item {
+            Panel(contentPadding = 0.dp) {
+                Column(Modifier.padding(Space.lg)) {
+                    Text(
+                        text = "Permanent shell access (DUMP)",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.xs))
+                    Text(
+                        text = "With this permission the frame rate is read in the app's own " +
+                            "shell: the answer is never cut short and the reading of a game " +
+                            "is the same one the device itself gives. It is granted once and " +
+                            "lasts until the app is removed.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.md))
+                    val dumpGranted = container.hub.hasDumpPermission()
+                    Text(
+                        text = if (dumpGranted) {
+                            "Granted - the app reads the frame timings by itself."
+                        } else {
+                            "Not granted yet."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
+                        FilledTonalButton(
+                            enabled = !dumpGranted,
+                            onClick = {
+                                scope.launch {
+                                    container.hub.tryGrantDumpPermission()
+                                    container.hub.refresh()
+                                }
+                            }
+                        ) {
+                            Text("Grant it now")
+                        }
+                        OutlinedButton(onClick = {
+                            Diagnostics.copy(
+                                context,
+                                "pm grant ${context.packageName} android.permission.DUMP"
+                            )
+                        }) {
+                            Text("Copy the command")
+                        }
+                    }
                 }
             }
         }
 
-        item { SectionHeader("Shizuku setup") }
+        if (showAlternativeSetup) {
 
         item {
             Panel(contentPadding = 0.dp) {
                 SetupOption(
                     title = "Start Shizuku",
-                    badge = "Required",
+                    // The permanent shell access makes Shizuku an alternative
+                    // and not a requirement, and a badge that says the opposite
+                    // sends the user after a setup that is not needed.
+                    badge = if (dumpActive) "Alternative" else "Required",
                     description = "For phones without Wi-Fi, use ShizukuNext: start it from USB debugging, no PC needed. Grant Qstats permission above. Official Shizuku and wireless debugging work too. Qstats checks a real UserService command before it reports Connected.",
                     context = context
                 )
@@ -343,8 +517,8 @@ fun SettingsScreen(
                     Text(
                         text = when {
                             dumpActive ->
-                                "Qstats reads live FPS from its own shell. No ADB bridge, key, Wi‑Fi, PC or " +
-                                    "Shizuku is needed. This lasts until the app is removed."
+                                "No ADB bridge, key, Wi‑Fi, PC or Shizuku is needed. The permanent " +
+                                    "shell access above already reads the frame timings."
                             shizukuActive ->
                                 "Shizuku is running with Qstats granted permission. It gives live FPS with no " +
                                     "ADB key and no Wi‑Fi. Turn on “Start on boot” so it comes back after every " +
@@ -571,60 +745,6 @@ fun SettingsScreen(
             }
         }
 
-        item { SectionHeader("Permanent shell access") }
-
-        item {
-            Panel(contentPadding = 0.dp) {
-                Column(Modifier.padding(Space.lg)) {
-                    Text(
-                        text = "Grant the app the right to run dumpsys itself",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(Space.sm))
-                    Text(
-                        text = "With this permission the frame rate is read in the app's own " +
-                            "shell: the answer is never cut short and the reading of a game " +
-                            "is the same one the device itself gives. It is granted once and " +
-                            "lasts until the app is removed.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(Space.md))
-                    val dumpGranted = container.hub.hasDumpPermission()
-                    Text(
-                        text = if (dumpGranted) {
-                            "Granted - the app reads the frame timings by itself."
-                        } else {
-                            "Not granted yet."
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(Space.sm))
-                    Row(horizontalArrangement = Arrangement.spacedBy(Space.sm)) {
-                        FilledTonalButton(
-                            enabled = !dumpGranted,
-                            onClick = {
-                                scope.launch {
-                                    container.hub.tryGrantDumpPermission()
-                                    container.hub.refresh()
-                                }
-                            }
-                        ) {
-                            Text("Grant it now")
-                        }
-                        OutlinedButton(onClick = {
-                            Diagnostics.copy(
-                                context,
-                                "pm grant ${context.packageName} android.permission.DUMP"
-                            )
-                        }) {
-                            Text("Copy the command")
-                        }
-                    }
-                }
-            }
         }
 
         item { SectionHeader("Banking app protection") }
@@ -653,8 +773,9 @@ fun SettingsScreen(
                     PanelDivider()
                     installed.forEach { (pkg, label) ->
                         SettingRow(
-                            title = label,
+                            title = readableAppName(pkg, label),
                             supporting = pkg,
+                            titleMaxLines = 1,
                             trailing = {
                                 val extra = extraProtected.split(",").map { it.trim() }
                                     .filter { it.isNotEmpty() }

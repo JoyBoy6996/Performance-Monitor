@@ -63,6 +63,18 @@ private val ALL_ROWS = listOf(
 
 private val STYLE_LABELS = listOf("Pill", "Compact", "Classic", "Detailed", "RTSS")
 
+/**
+ * Whether the row toggles change anything for the style that is chosen.
+ *
+ * The pill is one number and the compact meter drops the rows, so the toggles
+ * do nothing there. The three wide styles show the rows, and there they are
+ * the setting that matters.
+ */
+internal fun rowsApplyToStyle(style: String): Boolean = when (style.trim().uppercase()) {
+    "PILL", "COMPACT" -> false
+    else -> true
+}
+
 @Composable
 fun OverlayScreen(
     container: AppContainer,
@@ -97,70 +109,9 @@ fun OverlayScreen(
         subtitle = "Live telemetry on top of any app",
         bottomPadding = bottomPadding
     ) {
-        item {
-            Panel {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = "Preview",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = if (showAllPreviews) {
-                                "All five overlay styles, full width."
-                            } else {
-                                "The selected style, full width."
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                    }
-                    Spacer(Modifier.width(Space.md))
-                    OutlinedButton(onClick = { showAllPreviews = !showAllPreviews }) {
-                        Text(if (showAllPreviews) "Selected style" else "All styles")
-                    }
-                }
-            }
-        }
-
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.md)) {
-                if (showAllPreviews) {
-                    OverlayStyle.entries.forEach { styleOption ->
-                        HudPreview(
-                            fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
-                            frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
-                            cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
-                            history = fps.history,
-                            style = styleOption.name,
-                            rows = previewRows,
-                            showGraph = showGraph,
-                            threshold = threshold,
-                            label = styleOption.name,
-                            caption = "$styleOption style preview"
-                        )
-                    }
-                } else {
-                    HudPreview(
-                        fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
-                        frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
-                        cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
-                        history = fps.history,
-                        style = style,
-                        rows = previewRows,
-                        showGraph = showGraph,
-                        threshold = threshold,
-                        label = style
-                    )
-                }
-            }
-        }
-
+        // One card at the top: what the overlay will look like, how it is moved
+        // and the button that starts it. Three cards said the same thing three
+        // times and pushed the controls down.
         item {
             Panel {
                 Row(
@@ -177,12 +128,12 @@ fun OverlayScreen(
                         Text(
                             text = if (running) {
                                 if (style.equals("PILL", ignoreCase = true) && pillTapToRecord) {
-                                    "Drag to reposition, tap to start/stop recording."
+                                    "Drag widget to move · Tap to start/stop recording"
                                 } else {
-                                    "Drag to reposition, tap to collapse."
+                                    "Drag widget to move · Tap to collapse"
                                 }
                             } else {
-                                "Start it, then leave the app you want to measure."
+                                "Drag widget to move · Tap to start/stop recording"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -245,6 +196,57 @@ fun OverlayScreen(
                         )
                     }
                 }
+
+                Spacer(Modifier.height(Space.md))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (showAllPreviews) {
+                            "All five overlay styles, full width."
+                        } else {
+                            "Preview of the selected style."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(onClick = { showAllPreviews = !showAllPreviews }) {
+                        Text(if (showAllPreviews) "Selected style" else "All styles")
+                    }
+                }
+
+                Spacer(Modifier.height(Space.sm))
+                if (showAllPreviews) {
+                    OverlayStyle.entries.forEach { styleOption ->
+                        HudPreview(
+                            fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                            frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                            cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
+                            history = fps.history,
+                            style = styleOption.name,
+                            rows = previewRows,
+                            showGraph = showGraph,
+                            threshold = threshold,
+                            label = styleOption.name,
+                            caption = "$styleOption style preview"
+                        )
+                    }
+                } else {
+                    HudPreview(
+                        fpsText = fps.fps.finiteOrNull()?.let { String.format("%.0f", it) } ?: "--",
+                        frameText = fps.frameTimeMs.finiteOrNull()?.let { "${String.format("%.1f", it)} ms" } ?: "",
+                        cpuText = system.cpuPercent.finiteOrNull()?.let { "CPU ${it.toInt()}%" } ?: "",
+                        history = fps.history,
+                        style = style,
+                        rows = previewRows,
+                        showGraph = showGraph,
+                        threshold = threshold,
+                        label = style
+                    )
+                }
             }
         }
 
@@ -302,6 +304,18 @@ fun OverlayScreen(
 
         item {
             Panel {
+                // The pill and the compact meter show one number. The rows are
+                // what the three wide styles show, and a chip that does nothing
+                // says nothing about it.
+                val rowsApply = rowsApplyToStyle(style)
+                if (!rowsApply) {
+                    Text(
+                        text = "Row toggles apply to Classic, Detailed & RTSS styles",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Space.sm))
+                }
                 ChipRow(
                     options = ALL_ROWS,
                     selected = rows.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet(),
@@ -310,7 +324,8 @@ fun OverlayScreen(
                             .filter { it.isNotEmpty() }.toMutableSet()
                         if (!current.add(option)) current.remove(option)
                         settings.overlayRows.value = current.joinToString(",")
-                    }
+                    },
+                    dimmed = if (rowsApply) emptySet() else ALL_ROWS.toSet()
                 )
             }
         }

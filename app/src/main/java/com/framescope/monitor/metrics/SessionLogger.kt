@@ -616,6 +616,25 @@ class SessionLogger(private val store: SessionStore) {
         )
     }
 
+    /**
+     * Changes the app the run belongs to.
+     *
+     * Record is often pressed a moment before the game takes the screen: the
+     * player taps Record in FrameScope and then switches. The run follows the
+     * app that comes to the front in the first seconds, so the report names
+     * the game and not the app that was in front when the button was pressed.
+     *
+     * Only the name of the run changes. The samples that were already
+     * recorded stay as they are.
+     */
+    @Synchronized
+    fun retarget(packageName: String, label: String) {
+        if (!isRecording) return
+        if (packageName.isBlank() || packageName == currentPackage) return
+        currentPackage = packageName
+        currentLabel = label
+    }
+
     @Synchronized
     fun stop(targetFps: Int, shellLogs: String = ""): SessionRecord? {
         if (!isRecording) return null

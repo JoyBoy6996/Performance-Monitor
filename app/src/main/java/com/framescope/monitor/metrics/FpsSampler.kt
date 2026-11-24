@@ -944,10 +944,7 @@ class FpsSampler(
     }
 
     /** A launcher or a system surface is never the game the user is measuring. */
-    private fun isNonGame(pkg: String): Boolean {
-        val p = pkg.lowercase()
-        return p.contains("launcher") || p == "com.android.systemui"
-    }
+    private fun isNonGame(pkg: String): Boolean = Parsers.isForegroundNoise(pkg)
 
     /**
      * True only when the app owns a game-style drawing surface.

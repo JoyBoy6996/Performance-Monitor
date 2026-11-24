@@ -211,4 +211,45 @@ class SessionLoggerTest {
         assertEquals(42f, stats.low1Percent, 0.01f)
         assertEquals(50f, stats.low5Percent, 0.01f)
     }
+
+    /**
+     * The name of the run follows the app the player switches into.
+     *
+     * Record is often pressed a moment before the game takes the screen, so
+     * the run has to be able to change its name while it is running.
+     */
+    @Test
+    fun theRunFollowsTheAppThePlayerSwitchesInto() {
+        val logger = SessionLogger(store())
+        logger.start("com.example.launcher", "Launcher", 80)
+
+        logger.retarget("com.pubg.imobile", "BGMI")
+
+        logger.onSample(sample(fps = 60f, totalFrames = 120), SystemMetrics(), 60)
+        logger.onSample(sample(fps = 60f, totalFrames = 240), SystemMetrics(), 60)
+        logger.onSample(sample(fps = 60f, totalFrames = 360), SystemMetrics(), 60)
+        val record = logger.stop(60)
+
+        assertTrue(record != null)
+        assertEquals("com.pubg.imobile", record!!.appPackage)
+        assertEquals("BGMI", record.appLabel)
+    }
+
+    @Test
+    fun theNameOfTheRunIsNotChangedByNothing() {
+        val logger = SessionLogger(store())
+        logger.start("com.pubg.imobile", "BGMI", 80)
+
+        logger.retarget("", "")
+        logger.retarget("com.pubg.imobile", "BGMI")
+
+        logger.onSample(sample(fps = 60f, totalFrames = 120), SystemMetrics(), 60)
+        logger.onSample(sample(fps = 60f, totalFrames = 240), SystemMetrics(), 60)
+        logger.onSample(sample(fps = 60f, totalFrames = 360), SystemMetrics(), 60)
+        val record = logger.stop(60)
+
+        assertTrue(record != null)
+        assertEquals("com.pubg.imobile", record!!.appPackage)
+        assertEquals("BGMI", record.appLabel)
+    }
 }

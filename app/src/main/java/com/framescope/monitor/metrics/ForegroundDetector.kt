@@ -86,6 +86,9 @@ class ForegroundDetector(
         val out = hub.execOrNull(ShellCommands.foregroundPackage(), 2_000)?.out
         lastOutput = out.orEmpty()
         if (!out.isNullOrBlank()) {
+            // The parser drops the floating windows, the system bars, the
+            // launcher and the keyboard, so a video in picture-in-picture can
+            // never take the name of the game.
             val detected = Parsers.foregroundPackage(out)
             if (!detected.isNullOrBlank() && detected != "null") {
                 return Detection(

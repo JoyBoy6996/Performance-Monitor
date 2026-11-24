@@ -303,3 +303,56 @@ belongs in the status, so the app says why the one-time permission is not there.
 - The build workflow asks for platform 36 and build-tools 36.0.0. It asked for 35
   while the app is built for Android 16, and a runner without platform 36
   preinstalled had nothing to compile against.
+
+## 1.2.11 - one screen, one report, and no made-up readings
+
+The details screen of a run showed the same numbers twice. Above the eleven Scene
+cards sat a second summary: an "Average frame rate" card, a "Charts | Table"
+switch, a "What happened" timeline and a "Details" heading. Two of the cards were
+missing from the Scene list altogether - `FPS & Temperature(°C)` and
+`Frame Time(ms)` - so the screen and the PDF of the same run did not agree.
+
+### The screen and the report now carry the same eleven cards
+
+- The duplicate block is gone. The screen is the eleven cards, from top to
+  bottom, in the order of the PDF, and the two charts that were missing are
+  back right after the game header.
+- The report draws the name of the app with its version (`BGMI(4.7.0)`) and the
+  real launcher icon, and the outer canvas keeps its 40px margin so the top
+  labels of the device row are never clipped.
+
+### A video in picture-in-picture can no longer take the name of the game
+
+The run of BGMI was stored as `app.morphe.android.youtube`, because a video in
+picture-in-picture holds the focus while the game is drawn behind it. The
+foreground query now asks the activity dump for the task that is really
+resumed, and a task that is pinned or freeform - and the system bars, the
+launcher, the keyboard and the app itself - are never the answer.
+
+Record is also often pressed a moment before the game takes the screen. For the
+first twenty seconds of a run the name of the run follows the app that comes to
+the front, so the report names the game and not the app that was in front when
+the button was pressed.
+
+### The Shell Logs card no longer prints a line of placeholders
+
+`shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--` stood next to real
+numbers, and a section heading with `--` under it looked like a measurement. A
+line of placeholders is not a reading: the identity line is printed only when
+the shell really answered, a section of the log is printed only when it carries
+a real reading, and the rows of the Device Detail that have no reading are
+left out instead of printing a page of `--`.
+
+### The load and the temperature survive Android 16
+
+Android 16 hides `/proc/stat` from the shell on some builds, and the load of
+the device then stayed at zero. The system service is asked instead - `top` and
+`dumpsys cpuinfo` - and the load of the game itself is stored with the run. The
+CPU temperature falls back to the thermal service, which names the CPU sensor
+with its type, when the sysfs zones are hidden. The chip temperature is stored
+in both `cpuTempC` and `socTempC`, and the battery temperature stays the
+battery's own reading.
+
+The collector was already running on the privileged shell (`uid=2000`, through
+the Shizuku UserService, never `Runtime.exec`) on the 1000ms tick; what was
+missing was the fallback, not the call.

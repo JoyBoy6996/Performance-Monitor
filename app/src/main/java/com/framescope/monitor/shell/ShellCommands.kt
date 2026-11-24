@@ -26,10 +26,22 @@ object ShellCommands {
         return parts.drop(1).map { it.trim() }
     }
 
-    /** `dumpsys window` style foreground package detection. */
+    /**
+     * The app the user is looking at.
+     *
+     * The window manager alone is not enough. A floating window - a video in
+     * picture-in-picture, a chat bubble - can hold the focus while a game is
+     * drawn behind it, and the run then carries the name of the video app
+     * instead of the name of the game. The activity dump knows more: it names
+     * the task that is really resumed and says how that task is put on the
+     * screen. Both are asked for and the parser decides which one is the app
+     * in front.
+     */
     fun foregroundPackage(): String =
-        "{ dumpsys activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|mResumedActivity' ; " +
-            "dumpsys window 2>/dev/null | grep -m1 -E 'mCurrentFocus|mFocusedApp' ; } | head -2"
+        "dumpsys activity activities 2>/dev/null | " +
+            "grep -m 12 -E 'topResumedActivity|mResumedActivity|mPinnedTask|" +
+            "windowingMode=|mode=(fullscreen|pinned|freeform)' ; " +
+            "dumpsys window 2>/dev/null | grep -m 2 -E 'mCurrentFocus|mFocusedApp'"
 
     fun surfaceList(): String = "dumpsys SurfaceFlinger --list 2>/dev/null"
 
@@ -165,6 +177,19 @@ object ShellCommands {
     fun battery(): String = "dumpsys battery 2>/dev/null"
 
     fun cpuStat(): String = "cat /proc/stat 2>/dev/null | head -8"
+
+    /**
+     * The CPU load when `/proc/stat` cannot be read.
+     *
+     * Android 16 hides `/proc/stat` from the shell on some builds, and the
+     * load then stays at zero even though the device is busy. The system
+     * service still knows the load of every process, so it is asked instead:
+     * `top` prints a sorted list and `dumpsys cpuinfo` prints the same numbers
+     * in another shape. Both are real readings of the running system.
+     */
+    fun cpuFallback(): String =
+        "top -b -n 1 -o %CPU,ARGS 2>/dev/null | head -40 ; " +
+            "echo CPUSVC ; dumpsys cpuinfo 2>/dev/null | head -40"
 
     // The status line says whether the system is throttling; the rest are the sensors.
     fun thermal(): String =
@@ -345,16 +370,123 @@ object Parsers {
     private val PACKAGE_RE = Regex("([a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)+)")
     private val THERMAL_NAME = Regex("mName=([^,}]+)")
     private val THERMAL_VALUE = Regex("mValue=([0-9.]+)")
+    private val THERMAL_TYPE = Regex("mType=([0-9]+)")
     private val THERMAL_STATUS = Regex("Thermal\\s*Status\\s*:\\s*([0-6])", RegexOption.IGNORE_CASE)
     private val WHITESPACE = Regex("\\s+")
 
+    /** The thermal type of the CPU sensor. */
+    private const val THERMAL_TYPE_CPU = 0
+
+    /** Marks the start of the CPU service answer inside one shell answer. */
+    private const val CPU_SERVICE_MARKER = "CPUSVC"
+
+    /** One row of the per-process load: "12.5 com.game" or "8.4% 2241/system_server". */
+    private val CPU_ROW = Regex("^([0-9]+(?:\\.[0-9]+)?)%?\\s+(.+)$")
+
+    /** The markers of a task that is drawn on top of another one. */
+    private val FLOATING_MARKERS = listOf(
+        "mPinnedTask",
+        "mode=pinned",
+        "windowingmode=3",
+        "mode=freeform",
+        "windowingmode=4"
+    )
+
+    /** Packages that are never the app in front. */
+    private val FOREGROUND_NOISE = setOf(
+        "android",
+        "com.android.systemui",
+        "com.qstats.fpsmonitor",
+        "com.framescope.monitor"
+    )
+
+    /** Parts of a package name that mark an app that is never the app in front. */
+    private val FOREGROUND_NOISE_MARKERS = listOf(
+        "launcher",
+        "homescreen",
+        ".home",
+        "inputmethod",
+        ".ime",
+        "keyboard",
+        "systemui",
+        "quicksettings"
+    )
+
+    /**
+     * The app the user is looking at.
+     *
+     * A floating window can hold the focus while a game is drawn behind it: a
+     * video in picture-in-picture is the common case, and it used to make a
+     * run of a game carry the name of the video app. The dump names the task
+     * that is really resumed, so that answer wins, and a task that is pinned
+     * or freeform is never the answer.
+     *
+     * The order of the answers is the order of trust:
+     *
+     * 1. the resumed activity, which is the app that really has the screen;
+     * 2. the focused window, which a floating window can steal;
+     * 3. the fullscreen task, which is the only thing left when nothing named
+     *    the app in front.
+     */
     fun foregroundPackage(dump: String): String? {
-        val line = dump.lineSequence().firstOrNull {
-            it.contains("topResumedActivity") || it.contains("mResumedActivity") ||
-                it.contains("mCurrentFocus") || it.contains("mFocusedApp")
-        } ?: return null
-        return PACKAGE_RE.find(line)?.groupValues?.getOrNull(1)
+        val floating = floatingPackages(dump)
+
+        val resumed = dump.lineSequence()
+            .filter { it.contains("topResumedActivity") || it.contains("mResumedActivity") }
+            .mapNotNull { packageOf(it) }
+            .firstOrNull { isForegroundCandidate(it, floating) }
+        if (resumed != null) return resumed
+
+        val focused = dump.lineSequence()
+            .filter { it.contains("mCurrentFocus") || it.contains("mFocusedApp") }
+            .mapNotNull { packageOf(it) }
+            .firstOrNull { isForegroundCandidate(it, floating) }
+        if (focused != null) return focused
+
+        return dump.lineSequence()
+            .filter {
+                it.contains("mode=fullscreen", ignoreCase = true) ||
+                    it.contains("windowingMode=1", ignoreCase = true)
+            }
+            .mapNotNull { packageOf(it) }
+            .firstOrNull { isForegroundCandidate(it, floating) }
     }
+
+    /**
+     * The packages that only ever live in a floating window.
+     *
+     * A task that is pinned (picture in picture) or freeform is drawn on top
+     * of something else, so it is never the app the user is looking at.
+     */
+    fun floatingPackages(dump: String): Set<String> = dump.lineSequence()
+        .filter { line ->
+            FLOATING_MARKERS.any { marker -> line.contains(marker, ignoreCase = true) }
+        }
+        .mapNotNull { packageOf(it) }
+        .toSet()
+
+    /**
+     * True when the package can be the app the user is looking at.
+     */
+    fun isForegroundCandidate(packageName: String, floating: Set<String>): Boolean =
+        packageName.isNotBlank() && packageName != "null" &&
+            packageName !in floating && !isForegroundNoise(packageName)
+
+    /**
+     * True when the package is never the app the user is looking at.
+     *
+     * The system bars, the launcher, the keyboard and this app itself are
+     * never the app a run is about.
+     */
+    fun isForegroundNoise(packageName: String): Boolean {
+        val name = packageName.lowercase(Locale.US)
+        if (name in FOREGROUND_NOISE) return true
+        return FOREGROUND_NOISE_MARKERS.any { marker -> name.contains(marker) }
+    }
+
+    /** The first package-like name in a line of the dump. */
+    private fun packageOf(line: String): String? =
+        PACKAGE_RE.find(line)?.groupValues?.getOrNull(1)
 
     /**
      * Parses `dumpsys SurfaceFlinger --latency`.
@@ -446,6 +578,82 @@ object Parsers {
                 map[name] = value
             }
         return map
+    }
+
+    /**
+     * The CPU temperature that the thermal service reports.
+     *
+     * The thermal service names its sensors with a type: 0 is the CPU. On a
+     * build that hides the sysfs zones this is the only real chip
+     * temperature left, and a temperature that was not measured is never
+     * guessed.
+     */
+    fun parseThermalServiceCpuTemp(dump: String): Float? = dump.lineSequence()
+        .filter { it.contains("Temperature{") }
+        .mapNotNull { line ->
+            val value = THERMAL_VALUE.find(line)?.groupValues?.get(1)?.toFloatOrNull()
+                ?: return@mapNotNull null
+            val type = THERMAL_TYPE.find(line)?.groupValues?.get(1)?.toIntOrNull()
+                ?: return@mapNotNull null
+            if (type != THERMAL_TYPE_CPU) null else value
+        }
+        .firstOrNull()
+
+    /**
+     * The load of the device when `/proc/stat` could not be read.
+     *
+     * `top` prints the load of every process. The load of the device is the
+     * sum of them, because every process is measured against one core, and
+     * the sum is capped at 100%.
+     */
+    fun parseTopCpuUsage(dump: String): Float? {
+        val rows = cpuRows(dump)
+        if (rows.isEmpty()) return null
+        val total = rows.values.sum()
+        return total.coerceIn(0f, 100f).takeIf { it > 0f }
+    }
+
+    /**
+     * The load of one process, in percent.
+     *
+     * This is how a game is found when the per-process counters of
+     * `/proc/<pid>/task` cannot be read.
+     */
+    fun parseProcessCpuPercent(dump: String, packageName: String): Float? {
+        if (packageName.isBlank()) return null
+        return cpuRows(dump).entries
+            .firstOrNull { it.key.contains(packageName) }
+            ?.value
+    }
+
+    /**
+     * The per-process load, from `top` or from the CPU service.
+     *
+     * Both are read in one shell call. `top` is the better answer - it is
+     * measured at that moment - so it is used when it answered, and the
+     * service is the second choice.
+     */
+    private fun cpuRows(dump: String): Map<String, Float> {
+        val fromTop = cpuRowsOf(dump.substringBefore(CPU_SERVICE_MARKER))
+        if (fromTop.isNotEmpty()) return fromTop
+        return cpuRowsOf(dump.substringAfter(CPU_SERVICE_MARKER, ""))
+    }
+
+    /** The rows of one of the two shapes the load is printed in. */
+    private fun cpuRowsOf(dump: String): Map<String, Float> {
+        val rows = LinkedHashMap<String, Float>()
+        dump.lineSequence().forEach { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) return@forEach
+            if (trimmed.startsWith("%") || trimmed.startsWith("Tasks")) return@forEach
+            if (trimmed.startsWith("Load:") || trimmed.startsWith("CPU usage from")) return@forEach
+            val match = CPU_ROW.find(trimmed) ?: return@forEach
+            val percent = match.groupValues[1].toFloatOrNull() ?: return@forEach
+            val name = match.groupValues[2].trim()
+            if (name.isEmpty()) return@forEach
+            rows[name] = (rows[name] ?: 0f) + percent
+        }
+        return rows
     }
 
     /**

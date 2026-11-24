@@ -190,4 +190,92 @@ class ParsersTest {
     fun findsTheRefreshRate() {
         assertEquals(120f, Parsers.parseRefreshRate("  refreshRate=120.0 (explicit)")!!, 0.01f)
     }
+
+    /**
+     * The load of the device when `/proc/stat` cannot be read.
+     *
+     * Android 16 hides `/proc/stat` from the shell on some builds. The load
+     * then has to come from the system service, and it must be a real number
+     * instead of a flat zero.
+     */
+    @Test
+    fun readsTheDeviceLoadFromTheProcessList() {
+        val dump = """
+            %CPU ARGS
+            12.5 system_server
+            30.2 com.pubg.imobile
+            4.0 com.android.systemui
+        """.trimIndent()
+
+        assertEquals(46.7f, Parsers.parseTopCpuUsage(dump)!!, 0.01f)
+    }
+
+    @Test
+    fun readsTheDeviceLoadFromTheCpuService() {
+        val dump = """
+            Load: 4.19 / 4.09 / 4.20
+            CPU usage from 23359 ms to 18356 ms ago:
+              8.4% 2241/surfaceflinger: 4.1% user + 4.3% kernel
+              25.0% 8892/com.pubg.imobile: 20% user + 5% kernel
+        """.trimIndent()
+
+        assertEquals(33.4f, Parsers.parseTopCpuUsage(dump)!!, 0.01f)
+    }
+
+    @Test
+    fun findsTheLoadOfOneProcess() {
+        val dump = """
+            %CPU ARGS
+            12.5 system_server
+            30.2 com.pubg.imobile
+        """.trimIndent()
+
+        assertEquals(30.2f, Parsers.parseProcessCpuPercent(dump, "com.pubg.imobile")!!, 0.01f)
+        assertNull(Parsers.parseProcessCpuPercent(dump, "com.example.other"))
+    }
+
+    @Test
+    fun theProcessListOfTheServiceIsUsedWhenTheListIsEmpty() {
+        val dump = """
+            CPUSVC
+            Load: 4.19 / 4.09 / 4.20
+            CPU usage from 23359 ms to 18356 ms ago:
+              25.0% 8892/com.pubg.imobile: 20% user + 5% kernel
+        """.trimIndent()
+
+        assertEquals(25f, Parsers.parseTopCpuUsage(dump)!!, 0.01f)
+    }
+
+    @Test
+    fun thereIsNoLoadWhenNothingAnswered() {
+        assertNull(Parsers.parseTopCpuUsage(""))
+        assertNull(Parsers.parseTopCpuUsage("Load: 4.19 / 4.09 / 4.20"))
+    }
+
+    /**
+     * The CPU temperature the thermal service reports.
+     *
+     * The thermal service names its sensors with a type: 0 is the CPU. On a
+     * build that hides the sysfs zones this is the only real chip
+     * temperature left.
+     */
+    @Test
+    fun readsTheCpuTemperatureOfTheThermalService() {
+        val dump = """
+            Thermal Status: 0
+            Temperature{mValue=42.5, mType=0, mName=CPU, mStatus=0, mThrottling=false}
+            Temperature{mValue=31.0, mType=2, mName=BATTERY, mStatus=0, mThrottling=false}
+        """.trimIndent()
+
+        assertEquals(42.5f, Parsers.parseThermalServiceCpuTemp(dump)!!, 0.01f)
+    }
+
+    @Test
+    fun thereIsNoCpuTemperatureWhenTheServiceDidNotNameOne() {
+        val dump = """
+            Temperature{mValue=31.0, mType=2, mName=BATTERY, mStatus=0, mThrottling=false}
+        """.trimIndent()
+
+        assertNull(Parsers.parseThermalServiceCpuTemp(dump))
+    }
 }

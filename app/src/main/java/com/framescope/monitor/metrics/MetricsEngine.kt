@@ -10,10 +10,12 @@ import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.ProtectedApps
 import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
+import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.shell.AccessState
+import com.framescope.monitor.shell.Parsers
 import com.framescope.monitor.shell.ShellHub
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -100,6 +102,9 @@ class MetricsEngine(
 
     /** Raw privileged identity captured at Record time for this run's Shell Logs. */
     private var startTelemetryRaw: String = ""
+
+    /** When the current run was started, on the elapsed clock. */
+    private var recordingStartedAtMs: Long = 0L
 
     private val _live = MutableStateFlow(LiveStats())
     val live: StateFlow<LiveStats> = _live.asStateFlow()
@@ -221,6 +226,8 @@ class MetricsEngine(
 
             _foregroundApp.value = fpsSampler.foregroundApp
             _measuredLayer.value = fpsSampler.measuredLayer
+
+            followAppIntoGame()
 
             if (fpsState != null) {
                 _diagnostic.value = when {
@@ -503,11 +510,17 @@ class MetricsEngine(
         val current = _foregroundApp.value.orEmpty()
         val own = com.framescope.monitor.BuildConfig.APPLICATION_ID
         val remembered = lastMeasuredPackage.value.orEmpty()
-        val target = if (current.isBlank() || current == own ||
-            current.contains("launcher") || current == "com.android.systemui"
+        // The app in front is the app the run belongs to. A window that floats
+        // on top of the game - a video in picture-in-picture - is never the
+        // game, and neither is the launcher, the keyboard or the system bars.
+        val target = if (current.isNotBlank() && current != own &&
+            !Parsers.isForegroundNoise(current)
         ) {
-            remembered.takeIf { it.isNotBlank() && it != own } ?: current
-        } else current
+            current
+        } else {
+            remembered.takeIf { it.isNotBlank() && it != own &&
+                !Parsers.isForegroundNoise(it) } ?: current
+        }
         val label = appLabel(target)
         // Per-core and per-thread loads are differences between two reads. Starting a
         // new run with the old counters would report the idle time before Record.
@@ -546,11 +559,36 @@ class MetricsEngine(
         val atStart = _system.value.deviceTemperatureC()
         _system.value = _system.value.copy(tempPeakC = atStart, tempCooledC = 0f.takeIf { atStart != null })
         _recording.value = true
+        recordingStartedAtMs = SystemClock.elapsedRealtime()
         _live.value = LiveStats()
     }
 
     /** Stop pressed by the user. Nothing starts a recording except the button. */
     fun stopRecordingManually(): SessionRecord? = stopRecording()
+
+    /**
+     * The run follows the app the user actually switched into.
+     *
+     * Record is often pressed a moment before the game takes the screen: the
+     * player taps Record in FrameScope and then switches. For the first
+     * twenty seconds of a run the name of the app follows the app that comes
+     * to the front, so the report names the game and not the app that was in
+     * front when the button was pressed.
+     *
+     * A floating window never changes the name of the run: only an app that
+     * takes the screen does.
+     */
+    private fun followAppIntoGame() {
+        if (!sessionLogger.isRecording) return
+        if (recordingStartedAtMs == 0L) return
+        val elapsed = SystemClock.elapsedRealtime() - recordingStartedAtMs
+        if (elapsed > FOLLOW_APP_WINDOW_MS) return
+        val candidate = _foregroundApp.value?.trim().orEmpty()
+        if (candidate.isBlank()) return
+        if (candidate == com.framescope.monitor.BuildConfig.APPLICATION_ID) return
+        if (Parsers.isForegroundNoise(candidate)) return
+        sessionLogger.retarget(candidate, appLabel(candidate))
+    }
 
     fun stopRecording(): SessionRecord? {
         if (!_recording.value) return null
@@ -560,26 +598,43 @@ class MetricsEngine(
         return record
     }
 
-    /** Identity line captured the moment Record was pressed. */
-    private fun telemetryHeaderLine(): String =
-        _system.value.telemetryDetail.trim().takeIf { it.isNotBlank() }
-            ?: "shell_uid=-- | platform=-- | thermal_zone=-- | clusters=--"
+    /**
+     * Identity line captured the moment Record was pressed.
+     *
+     * When the shell has not answered yet there is no identity line. An empty
+     * line says that; a line full of "--" pretends to be a reading, and a
+     * report that shows placeholders looks like a report that was measured.
+     */
+    private fun telemetryHeaderLine(): String {
+        val detail = _system.value.telemetryDetail.trim()
+        return if (ShellLogs.isRealIdentity(detail)) detail else ""
+    }
 
-    /** A short, real collector snapshot stored with the run for its Shell Logs card. */
+    /**
+     * A short, real collector snapshot stored with the run for its Shell Logs card.
+     *
+     * Every section is printed only when the shell really answered it. A
+     * heading with "--" under it is a fake reading, so it is left out.
+     */
     private fun sessionShellLogs(): String = buildString {
         appendLine("captured_from=${lastMeasuredPackage.value ?: "(none)"} " +
             "at=${android.os.SystemClock.uptimeMillis()}")
-        appendLine("--- telemetry (uid=2000 shizuku) ---")
-        appendLine(startTelemetryRaw.take(4_000).trim().ifBlank { "--" })
-        appendLine("--- window manager ---")
-        appendLine(lastForegroundOutput().take(3_000).trim().ifBlank { "--" })
-        appendLine("--- frame counters ---")
-        appendLine(lastCounterDump().take(6_000).trim().ifBlank { "--" })
+        section("telemetry", startTelemetryRaw.take(4_000))
+        section("window manager", lastForegroundOutput().take(3_000))
+        section("frame counters", lastCounterDump().take(6_000))
         hub.lastError.value?.takeIf { it.isNotBlank() }?.let {
             appendLine("--- last collector error ---")
             appendLine(it.trim())
         }
     }.trimEnd()
+
+    /** A section of the log is only printed when it carries a real reading. */
+    private fun StringBuilder.section(title: String, body: String) {
+        val text = body.trim()
+        if (ShellLogs.isPlaceholder(text)) return
+        appendLine("--- $title ---")
+        appendLine(text)
+    }
 
     private fun updateProtectedFlag() {
         val current = _foregroundApp.value
@@ -628,6 +683,16 @@ class MetricsEngine(
 
         /** The little `/proc/stat` read is independent of the heavy batch. */
         private const val CPU_INTERVAL_MS = 1_000L
+
+        /**
+         * How long a run keeps following the app that comes to the front.
+         *
+         * Record is often pressed a moment before the game takes the screen.
+         * For the first twenty seconds the name of the run follows the app in
+         * front, so the report names the game and not the app that was in front
+         * when the button was pressed.
+         */
+        private const val FOLLOW_APP_WINDOW_MS = 20_000L
         // Shell calls are serialised, so the fast read may wait behind a slow batch.
         // It must still get its turn rather than being cancelled before it starts.
         private const val CPU_LOOP_TIMEOUT_MS = 12_000L

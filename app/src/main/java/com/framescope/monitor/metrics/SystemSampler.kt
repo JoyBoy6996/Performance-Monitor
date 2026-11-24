@@ -101,14 +101,20 @@ class SystemSampler(private val hub: ShellHub) {
             ShellCommands.threadStat(packageName), // 8
             ShellCommands.clockTicks(),       // 9
             ShellCommands.telemetryInit(),    // 10
-            ShellCommands.thermalSysfs()      // 11
+            ShellCommands.thermalSysfs(),      // 11
+            ShellCommands.cpuFallback()        // 12
         )
         val result = runCatching { hub.execTelemetry(script, timeoutMs) }.getOrNull()
 
         val parts = if (result != null) ShellCommands.split(result.out) else emptyList()
         fun part(index: Int): String = parts.getOrElse(index) { "" }
 
-        val cpu = cpuPercent(part(0))
+        // Android 16 hides /proc/stat from the shell on some builds. When that
+        // happens the load is read from the system service instead, so the run
+        // keeps real numbers instead of a flat zero.
+        val cpuFallback = part(12)
+        val cpu = cpuPercent(part(0)) ?: Parsers.parseTopCpuUsage(cpuFallback)
+        val gameCpuPercent = Parsers.parseProcessCpuPercent(cpuFallback, packageName)
         val gpu = part(1)
         val cpuFreq = Parsers.parseCpuFreq(part(2))
         val thermals = Parsers.parseThermals(part(3))
@@ -138,6 +144,9 @@ class SystemSampler(private val hub: ShellHub) {
             }
             .mapNotNull { it.value.plausibleTempC(MAX_CHIP_TEMP_C) }
             .maxOrNull()
+            // Android 16 can hide the sysfs zones. The thermal service still
+            // knows the CPU sensor and names it with its type.
+            ?: Parsers.parseThermalServiceCpuTemp(part(3))?.plausibleTempC(MAX_CHIP_TEMP_C)
         // The matched chip zone is used for BOTH cpuTempC and socTempC. A generic
         // "all sensors" maximum can be a battery skin reading and must not win.
         val maxThermal = chipTemps.maxOrNull() ?: (zones.mapNotNull(::zoneCelsius) +
@@ -148,10 +157,20 @@ class SystemSampler(private val hub: ShellHub) {
         val detail = telemetryDetail(part(10), identity.first, chipZones, cpuGroups)
         // Keep the unparsed privileged answer too: Shell Logs must show the actual
         // UID/PLATFORM/GAME-MODE/CPUMAX/TZLINE lines, not a hand-written summary.
-        val rawTelemetry = listOf(part(10), part(11))
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .joinToString("\n")
+        val rawTelemetry = buildString {
+            append(part(10).trim())
+            if (part(11).isNotBlank()) {
+                if (isNotEmpty()) append("\n")
+                append(part(11).trim())
+            }
+            // The load of the game itself, read from the same shell answer that
+            // carries the load of the device. It is a real reading, so it is
+            // stored with the run.
+            if (gameCpuPercent != null) {
+                if (isNotEmpty()) append("\n")
+                append("GAME_CPU=$gameCpuPercent%")
+            }
+        }.trim()
 
         record(availability, sources, SystemMetric.CPU_PERCENT, cpu != null, "CPU_PERCENT", "privileged /proc/stat")
         record(availability, sources, SystemMetric.CPU_FREQ_MHZ, cpuFreq != null, "CPU_FREQ_MHZ", "privileged CPU frequency node")

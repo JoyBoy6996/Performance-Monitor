@@ -490,11 +490,11 @@ fun SceneSessionCards(
             Spacer(Modifier.height(8.dp))
             val fpsCeiling = (sPositive(session.fpsSeries).maxOrNull() ?: 120f)
                 .let { if (it > 130f) 144f else 120f }
-            val temps = temps.map { it.coerceIn(0f, 110f) }
+            val chipTemps = temps.map { it.coerceIn(0f, 110f) }
             SceneLineChart(
                 lines = listOf(
                     ChartLineUi(sClamped(session.fpsSeries, 0f, fpsCeiling), Scene.fps, 0f, fpsCeiling),
-                    ChartLineUi(temps, Scene.temp, 0f, 110f),
+                    ChartLineUi(chipTemps, Scene.temp, 0f, 110f),
                     ChartLineUi(sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f),
                     ChartLineUi(sClamped(session.gpuPercentSeries, 0f, 100f), Scene.gpu, 0f, 100f)
                 ),
@@ -509,9 +509,9 @@ fun SceneSessionCards(
                 "GPU(%)" to Scene.gpu
             )
             Text(
-                "TEMP MAX: ${sfmt(temps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${sfmt(temps.minOrNull(), 1)}°C   " +
-                    "AVG: ${sfmt(temps.avgOrNull(), 1)}°C",
+                "TEMP MAX: ${sfmt(chipTemps.maxOrNull(), 1)}°C   " +
+                    "MIN: ${sfmt(chipTemps.minOrNull(), 1)}°C   " +
+                    "AVG: ${sfmt(chipTemps.avgOrNull(), 1)}°C",
                 style = tnumSmall, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )

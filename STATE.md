@@ -356,3 +356,63 @@ battery's own reading.
 The collector was already running on the privileged shell (`uid=2000`, through
 the Shizuku UserService, never `Runtime.exec`) on the 1000ms tick; what was
 missing was the fallback, not the call.
+
+## 1.2.12 - the same numbers twice, and a screen that said too much
+
+An audit of the five screens of the app went through the monitor screen, the
+list of runs, the run itself, the overlay and the settings. It found the same
+reading in three places on one screen, a raw terminal dump in the middle of the
+scroll, a hint repeated under every graph, two cells with the same name on a
+card of a run, a delete button next to a share button, a way back that was not
+where the thumb expects it, and five cards about one question: does the app
+have a shell it can read the hardware with.
+
+### The monitor screen says every reading once
+
+- The live metrics and the device load were two grids of the same numbers. The
+  grid carries the hardware readings now, and the second one only what the grid
+  does not show: the clock of the GPU, the battery, the thermal state and how
+  far the phone has cooled.
+- A reading that could not be made is one quiet line under the grid, with the
+  reason on it, instead of a card with nothing in it.
+- The answer of SurfaceFlinger is forty lines of terminal output. It is the
+  evidence for a wrong reading, and it stays folded away until it is asked for.
+- The hint under the graphs is gone. Each graph has a button that locks its
+  scale, so a line that sits still keeps sitting still.
+- The hero card says "Smooth floor 45 fps" and "Display 120 Hz", and the
+  history says "Smoothness floor: 45 fps". Two different numbers, each with
+  its own name.
+
+### A card of a run is scannable
+
+- One row of the four numbers that matter - average, min and max, one percent
+  low, temperature and power - and one quiet line under it with the duration,
+  the frames, the variance and the smoothness. The card was six cells in two
+  rows, four lines of text and a pill.
+- The share, the PDF and the delete live behind one button. The delete still
+  asks first, and a run cannot be brought back.
+
+### The run itself and the report
+
+- The way back is on the left of the heading, where every other app puts it.
+- The jitter is a variance of the frame time and says so. It is not a frame
+  rate.
+- A chart without readings is not drawn. The charts of the hardware are behind
+  one line that names them, and a toggle brings them back.
+- The scale of the frame time follows the run. A 10 ms run is not squashed
+  into a fixed 100 ms scale, where every stutter would hide in the bottom
+  tenth of the chart.
+- The report leaves out the empty charts and the "Note not set" reminder, and
+  every card keeps a bright edge, so a printed page still shows its cards.
+
+### The overlay and the settings
+
+- The overlay has one card at the top: the preview, how it is moved and the
+  button that starts it. Three cards said the same thing three times.
+- The rows say that they only apply to the three wide styles, and they fade
+  out where they change nothing.
+- The permissions are one section with one status. When the app reads the
+  hardware in its own shell, the other ways to get one are folded away and
+  Shizuku is an alternative, not a requirement.
+- The crash is copied from the tools, and an app that has no name of its own
+  gets one that a person can read.

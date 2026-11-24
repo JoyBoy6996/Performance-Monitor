@@ -17,9 +17,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Timeline
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.framescope.monitor.AppContainer
@@ -51,11 +55,9 @@ import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.ChipRow
 import com.framescope.monitor.ui.components.EmptyState
-import com.framescope.monitor.ui.components.MetricLine
 import com.framescope.monitor.ui.components.Panel
 import com.framescope.monitor.ui.components.Sparkline
 import com.framescope.monitor.ui.components.StatCell
-import com.framescope.monitor.ui.components.StatusPill
 import com.framescope.monitor.ui.components.fpsStateColor
 import com.framescope.monitor.ui.theme.Space
 import com.framescope.monitor.ui.theme.status
@@ -345,6 +347,8 @@ private fun SessionCard(
     onDelete: () -> Unit
 ) {
     val stateColor = fpsStateColor(session.avgFps, threshold)
+    var menuOpen by remember { mutableStateOf(false) }
+
     Panel {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -363,7 +367,9 @@ private fun SessionCard(
                         session.appPackage.ifBlank { "Unknown app" }
                     },
                     style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = formattedDate,
@@ -372,28 +378,50 @@ private fun SessionCard(
                     modifier = Modifier.padding(top = Space.xs)
                 )
             }
-            TextButton(onClick = onExportPdf) {
-                Text("PDF")
-            }
-            IconButton(onClick = onShare, modifier = Modifier.size(44.dp)) {
-                Icon(
-                    imageVector = Icons.Rounded.Share,
-                    contentDescription = "Export session",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            IconButton(onClick = onDelete, modifier = Modifier.size(44.dp)) {
-                Icon(
-                    imageVector = Icons.Rounded.Delete,
-                    contentDescription = "Delete session",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp)
-                )
+            // The actions live behind one button: a delete that sits next to a
+            // share is one tap away from being the wrong one.
+            Box {
+                IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        imageVector = Icons.Rounded.MoreVert,
+                        contentDescription = "More actions for this run",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Export PDF") },
+                        onClick = {
+                            menuOpen = false
+                            onExportPdf()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share") },
+                        onClick = {
+                            menuOpen = false
+                            onShare()
+                        }
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    DropdownMenuItem(
+                        text = {
+                            Text("Delete", color = MaterialTheme.status.critical)
+                        },
+                        onClick = {
+                            menuOpen = false
+                            onDelete()
+                        }
+                    )
+                }
             }
         }
 
-        Spacer(Modifier.height(Space.sm))
+        Spacer(Modifier.height(Space.xs))
         val fpsPoints = session.fpsSeries.filter { it.finiteOrNull() != null }
         Box(
             Modifier
@@ -405,7 +433,7 @@ private fun SessionCard(
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(84.dp)
+                        .height(56.dp)
                         .padding(Space.md),
                     contentAlignment = Alignment.Center
                 ) {
@@ -420,103 +448,92 @@ private fun SessionCard(
                     values = fpsPoints,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(84.dp),
+                        .height(56.dp),
                     color = stateColor,
                     target = threshold.toFloat()
                 )
             }
         }
 
-        Spacer(Modifier.height(Space.md))
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         Spacer(Modifier.height(Space.sm))
 
-        Row {
+        // One row of the four numbers that matter. The run used to carry two
+        // rows of six cells between them, and the second row repeated the
+        // family of the first one.
+        Row(Modifier.fillMaxWidth()) {
             StatCell(
-                label = "Average",
-                value = fmt(session.avgFps, 1),
+                label = "Avg",
+                value = fmt(session.avgFps, 0),
                 unit = "fps",
                 accent = stateColor,
-                modifier = Modifier.weight(1f).padding(end = Space.sm)
+                modifier = Modifier.weight(1f).padding(end = Space.xs)
             )
             StatCell(
-                label = "Max / min",
-                value = "${fmt(session.maxFps, 0)} / ${fmt(session.minFps, 0)}",
+                label = "Min / max",
+                value = "${fmt(session.minFps, 0)} / ${fmt(session.maxFps, 0)}",
                 accent = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
+                modifier = Modifier.weight(1f).padding(horizontal = Space.xs)
             )
-            StatCell(
-                label = "5% low fps",
-                value = fmt(session.low5Percent, 1),
-                accent = MaterialTheme.status.warn,
-                modifier = Modifier.weight(1f).padding(start = Space.sm)
-            )
-        }
-        Row(Modifier.padding(top = Space.md)) {
             StatCell(
                 label = "1% low",
                 value = fmt(session.low1Percent, 0),
+                unit = "fps",
                 accent = MaterialTheme.status.warn,
-                modifier = Modifier.weight(1f).padding(end = Space.sm)
+                modifier = Modifier.weight(1f).padding(horizontal = Space.xs)
             )
             StatCell(
-                label = "Variance",
-                value = fmt(session.fpsVariance, 1),
-                accent = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
-            )
-            StatCell(
-                label = "≥45 smooth",
-                value = fmt(session.sceneSmoothnessPercent, 0),
-                unit = "%",
-                accent = MaterialTheme.status.good,
-                modifier = Modifier.weight(1f).padding(start = Space.sm)
+                label = "Temp / power",
+                value = sessionTempAndPower(session),
+                accent = MaterialTheme.status.warn,
+                modifier = Modifier.weight(1f).padding(start = Space.xs)
             )
         }
 
         Spacer(Modifier.height(Space.sm))
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Spacer(Modifier.height(Space.xs))
 
-        MetricLine(
-            label = "Duration",
-            value = String.format(
-                "%d:%02d",
-                session.durationMs / 60000,
-                (session.durationMs / 1000) % 60
-            ),
-            accent = MaterialTheme.colorScheme.onSurface
-        )
-        MetricLine(
-            label = "Frames",
-            value = session.totalFrames.toString(),
-            accent = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let {
-            MetricLine(
-                label = "Max temperature",
-                value = "${it.toInt()}°C",
-                accent = MaterialTheme.status.warn
-            )
-        }
-        session.avgPowerW?.let {
-            MetricLine(
-                label = "Average power",
-                value = "${String.format("%.2f", it)} W",
-                accent = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        session.avgCpu?.let {
-            MetricLine(
-                label = "Average CPU",
-                value = "${it.toInt()}%",
-                accent = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        Spacer(Modifier.height(Space.sm))
-        StatusPill(
-            text = if (session.avgFps >= threshold) "Held target" else "Missed target",
-            color = stateColor
+        // Everything else about the run on one quiet line.
+        Text(
+            text = sessionFooter(session, threshold),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
         )
     }
+}
+
+/**
+ * The temperature and the power of a run, side by side.
+ *
+ * A run without them says so, and never carries a number that was not
+ * measured.
+ */
+internal fun sessionTempAndPower(session: SessionRecord): String {
+    val temp = session.maxTempC.plausibleTempC(MAX_HOTSPOT_TEMP_C)?.let { "${it.toInt()}°" }
+    val power = session.avgPowerW?.let { String.format(Locale.US, "%.1fW", it) }
+    return listOfNotNull(temp, power).joinToString(" / ").ifBlank { "--" }
+}
+
+/**
+ * The rest of the run on one line.
+ *
+ * The card is scanned, not read: the numbers that matter are in the row above
+ * and the rest belongs on a single quiet line under it.
+ */
+internal fun sessionFooter(session: SessionRecord, threshold: Int): String {
+    val duration = String.format(
+        Locale.US,
+        "%d:%02d",
+        session.durationMs / 60000,
+        (session.durationMs / 1000) % 60
+    )
+    return listOf(
+        "Duration $duration",
+        "${session.totalFrames} frames",
+        "Variance ${fmt(session.fpsVariance, 1)}",
+        "Smooth ${fmt(session.sceneSmoothnessPercent, 0)}%",
+        if (session.avgFps >= threshold) "Held target" else "Missed target"
+    ).joinToString(" · ")
 }

@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.geometry.CornerRadius
@@ -320,12 +321,21 @@ fun Sparkline(
     gridColor: Color = MaterialTheme.status.grid,
     /** A second, step-like line: the cap the game was actually presenting at. */
     reference: List<Float>? = null,
-    referenceColor: Color = Color(0x99FFC857)
+    referenceColor: Color = Color(0x99FFC857),
+    /**
+     * The top of the scale, when the scale is locked.
+     *
+     * A locked graph keeps the shape of its line while the readings change.
+     * Without it the scale follows the highest reading, so a flat line is drawn
+     * again and again and never looks flat.
+     */
+    scaleCeiling: Float? = null
 ) {
     Canvas(modifier = modifier) {
         if (values.size < 2) return@Canvas
         val refValues = reference?.mapNotNull { it.finiteOrNull()?.takeIf { v -> v > 0f } }.orEmpty()
         val ceiling = maxOf(
+            scaleCeiling ?: 0f,
             target ?: 0f,
             (values.maxOrNull() ?: 1f) * 1.15f,
             (refValues.maxOrNull() ?: 1f) * 1.15f
@@ -556,6 +566,8 @@ fun SettingRow(
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     enabled: Boolean = true,
+    /** How many lines the title may take. One line for a list of long names. */
+    titleMaxLines: Int = 2,
     onClick: (() -> Unit)? = null
 ) {
     Row(
@@ -582,7 +594,9 @@ fun SettingRow(
                     MaterialTheme.colorScheme.onSurface
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
-                }
+                },
+                maxLines = titleMaxLines,
+                overflow = TextOverflow.Ellipsis
             )
             if (!supporting.isNullOrBlank()) {
                 Text(
@@ -676,7 +690,14 @@ fun ChipRow(
     options: List<String>,
     selected: Set<String>,
     onToggle: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * The options that do nothing right now.
+     *
+     * A row of toggles that has no effect is faded out, so the eye is not
+     * sent to a setting that cannot change anything.
+     */
+    dimmed: Set<String> = emptySet()
 ) {
     androidx.compose.foundation.layout.FlowRow(
         modifier = modifier,
@@ -704,6 +725,8 @@ fun ChipRow(
                 label = "chipContent"
             )
             val shape = RoundedCornerShape(8.dp)
+            // A toggle that has no effect right now is faded out.
+            val faded = option in dimmed
             Row(
                 modifier = Modifier
                     .clip(shape)
@@ -724,7 +747,8 @@ fun ChipRow(
                         shape
                     )
                     .clickable { onToggle(option) }
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                    .alpha(if (faded) 0.4f else 1f),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (isSelected) {

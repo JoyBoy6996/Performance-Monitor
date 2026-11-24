@@ -1,6 +1,7 @@
 package com.framescope.monitor.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.ColumnScope
@@ -23,6 +24,8 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -108,7 +111,6 @@ fun DashboardScreen(
     LaunchedEffect(Unit) { crash = CrashLog.last(context) }
     val measuring by container.settings.measurementEnabled.flow.collectAsState()
     val setupDone by container.settings.setupCompleted.flow.collectAsState()
-    val probeReport by container.engine.probeReport.collectAsState()
 
     val accessColor = if (status.state == AccessState.READY) {
         MaterialTheme.status.good
@@ -239,6 +241,11 @@ fun DashboardScreen(
             )
         }
 
+        // The readings the grid above does not carry. They used to live in a
+        // second grid of their own, which showed the CPU, the temperature, the
+        // memory and the power a second time.
+        item { DeviceExtrasPanel(system) }
+
         // A graph without readings is left out, and so is the title of the
         // section: an empty section says less than no section.
         val chosenGraphs = DashboardMetric.fromKeys(graphKeys, DashboardMetric.graphs)
@@ -256,10 +263,6 @@ fun DashboardScreen(
                 )
             }
         }
-
-        item { SectionHeader("Device load") }
-
-        item { SystemPanel(system) }
 
         item { SectionHeader("Frame rate history") }
 
@@ -301,12 +304,6 @@ fun DashboardScreen(
         item { SectionHeader("Device") }
 
         item { DevicePanel(system) }
-
-        if (probeReport.isNotBlank()) {
-            item { SectionHeader("Diagnostics") }
-
-            item { ProbePanel(container = container) }
-        }
 
         item { DiagnosticsRow(container = container) }
     }
@@ -387,7 +384,9 @@ private fun HeroPanel(
                 // that was measured are three different things and are told apart.
                 Row(Modifier.fillMaxWidth()) {
                     MiniStat(
-                        label = "Target",
+                        // The smoothness floor of the app, not the rate of the
+                        // panel. The panel is told apart further down.
+                        label = "Smooth floor",
                         value = "$threshold",
                         unit = "fps",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -425,7 +424,9 @@ private fun HeroPanel(
                         modifier = Modifier.weight(1f)
                     )
                     MiniStat(
-                        label = "Panel",
+                        // The rate of the panel itself. It is not the target of
+                        // the game, and saying so keeps the two apart.
+                        label = "Display",
                         value = system.refreshHz?.let { "$it" } ?: "--",
                         unit = "Hz",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -647,44 +648,6 @@ private fun CrashPanel(text: String, context: Context) {
  * When a reading is wrong this is the evidence: which layers the app owned,
  * how many frames each returned and why one was kept and the others dropped.
  */
-@Composable
-private fun ProbePanel(container: AppContainer) {
-    val context = LocalContext.current
-    val report by container.engine.probeReport.collectAsState()
-    var copied by remember { mutableStateOf(false) }
-
-    if (report.isBlank()) return
-
-    Panel {
-        Text(
-            text = "Frame source",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            text = report.trim(),
-            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = Space.sm)
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = Space.sm),
-            horizontalArrangement = Arrangement.spacedBy(Space.sm)
-        ) {
-            OutlinedButton(
-                onClick = {
-                    Diagnostics.copy(context, report.trim())
-                    copied = true
-                }
-            ) {
-                Text(if (copied) "Copied" else "Copy this")
-            }
-        }
-    }
-}
-
 /** Makes copied evidence harmless if it is pasted into a shell by mistake. */
 private fun shellSafeText(text: String): String =
     text.lines().joinToString("\n") { line -> if (line.isBlank()) "#" else "# $line" }
@@ -706,6 +669,8 @@ private fun DiagnosticsRow(container: AppContainer) {
     var running by remember { mutableStateOf(false) }
     var probeOutput by remember { mutableStateOf("") }
     var probing by remember { mutableStateOf(false) }
+    // The raw output is folded away until it is asked for.
+    var showRawOutput by remember { mutableStateOf(false) }
 
     Panel {
         Text(
@@ -825,31 +790,72 @@ private fun DiagnosticsRow(container: AppContainer) {
 
         if (probeOutput.isNotEmpty()) {
             Spacer(Modifier.height(Space.md))
-            Text(
-                text = "What SurfaceFlinger answers for " +
-                    (lastMeasured ?: "the last app") + " - a screenshot of this is enough to fix it.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(Space.sm))
-            // The same marker is printed by the probe, but it is easy to miss in
-            // a long terminal block. Showing it here means the capture is always
-            // identifiable by eye, even before the text is copied anywhere.
-            Text(
-                text = "captured_from=${lastMeasured ?: "none"} at=" +
-                    (container.engine.debugFrameLog().lastOrNull()?.first?.toString() ?: "0"),
-                style = MonoInline.copy(fontSize = 10.sp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(Space.xs))
-            TerminalBlock(text = probeOutput, maxLines = 40)
+            // The raw answer of the device is forty lines of terminal output.
+            // It is the evidence for a wrong reading, so it belongs to the
+            // diagnostics - but it is not read on the screen, and it is folded
+            // away until it is asked for.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showRawOutput = !showRawOutput },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (showRawOutput) {
+                        "Hide raw SurfaceFlinger output"
+                    } else {
+                        "Show raw SurfaceFlinger output"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    imageVector = if (showRawOutput) {
+                        Icons.Rounded.ExpandLess
+                    } else {
+                        Icons.Rounded.ExpandMore
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            if (showRawOutput) {
+                Spacer(Modifier.height(Space.sm))
+                Text(
+                    text = "What SurfaceFlinger answers for " +
+                        (lastMeasured ?: "the last app") + " - a screenshot of this is enough to fix it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(Space.sm))
+                // The same marker is printed by the probe, but it is easy to miss in
+                // a long terminal block. Showing it here means the capture is always
+                // identifiable by eye, even before the text is copied anywhere.
+                Text(
+                    text = "captured_from=${lastMeasured ?: "none"} at=" +
+                        (container.engine.debugFrameLog().lastOrNull()?.first?.toString() ?: "0"),
+                    style = MonoInline.copy(fontSize = 10.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(Space.xs))
+                TerminalBlock(text = probeOutput, maxLines = 40)
+            }
         }
     }
 }
 
+/**
+ * The readings the telemetry grid does not carry.
+ *
+ * The grid above shows the CPU, the GPU, the temperature, the memory and the
+ * power. What is left - the clock of the GPU, the battery, the thermal state
+ * and how far the phone has cooled - belongs here, so no number is shown
+ * twice on the same screen.
+ */
 @Composable
-private fun SystemPanel(system: SystemMetrics) {
-    val cpu = system.cpuPercent
+private fun DeviceExtrasPanel(system: SystemMetrics) {
     val temp = system.deviceTemperatureC()
     val tempColor = when {
         temp == null -> MaterialTheme.colorScheme.onSurface
@@ -857,41 +863,25 @@ private fun SystemPanel(system: SystemMetrics) {
         temp >= 38 -> MaterialTheme.status.warn
         else -> MaterialTheme.status.good
     }
-    val good = MaterialTheme.status.good
-    val warn = MaterialTheme.status.warn
 
     Panel {
         Row {
-            StatCell(
-                label = "CPU",
-                value = cpu?.roundToInt()?.toString() ?: "--",
-                unit = "%",
-                accent = MaterialTheme.colorScheme.onSurface,
-                meter = cpu?.let { it / 100f },
-                availability = system.availabilityOf(SystemMetric.CPU_PERCENT),
-                modifier = Modifier.weight(1f).padding(end = Space.sm)
-            )
-            VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             StatCell(
                 label = "GPU clock",
                 value = system.gpuFreqMHz?.toString() ?: "--",
                 unit = system.gpuFreqMHz?.let { "MHz" } ?: "",
                 accent = MaterialTheme.colorScheme.onSurface,
                 availability = system.availabilityOf(SystemMetric.GPU_FREQ_MHZ),
-                modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
+                modifier = Modifier.weight(1f).padding(end = Space.sm)
             )
             VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             StatCell(
-                label = "Temp",
-                value = temp?.roundToInt()?.toString() ?: "--",
-                unit = "°C",
-                accent = tempColor,
-                meter = temp?.let { (it / 60f).coerceIn(0f, 1f) },
-                availability = if (system.batteryTempC != null) {
-                    system.availabilityOf(SystemMetric.BATTERY_TEMP_C)
-                } else {
-                    system.availabilityOf(SystemMetric.THERMAL_MAX_C)
-                },
+                label = "Battery",
+                value = system.batteryLevel?.toString() ?: "--",
+                unit = "%",
+                accent = MaterialTheme.status.good,
+                meter = system.batteryLevel?.let { it / 100f },
+                availability = system.availabilityOf(SystemMetric.BATTERY_LEVEL),
                 modifier = Modifier.weight(1f).padding(start = Space.sm)
             )
         }
@@ -899,64 +889,20 @@ private fun SystemPanel(system: SystemMetrics) {
             modifier = Modifier.padding(vertical = Space.md),
             color = MaterialTheme.colorScheme.outlineVariant
         )
-        Row {
-            StatCell(
-                label = "Battery",
-                value = system.batteryLevel?.toString() ?: "--",
-                unit = "%",
-                accent = good,
-                meter = system.batteryLevel?.let { it / 100f },
-                availability = system.availabilityOf(SystemMetric.BATTERY_LEVEL),
-                modifier = Modifier.weight(1f).padding(end = Space.sm)
-            )
-            VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            StatCell(
-                label = "Memory",
-                value = system.ramPercent?.toString() ?: "--",
-                unit = "%",
-                accent = MaterialTheme.colorScheme.onSurface,
-                meter = system.ramPercent?.let { it / 100f },
-                availability = system.availabilityOf(SystemMetric.RAM_PERCENT),
-                modifier = Modifier.weight(1f).padding(horizontal = Space.sm)
-            )
-            VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            StatCell(
-                label = "Power",
-                value = system.powerWatts.finiteOrNull()?.let { String.format("%.1f", it) } ?: "--",
-                unit = "W",
-                accent = warn,
-                availability = system.availabilityOf(SystemMetric.POWER_WATTS),
-                modifier = Modifier.weight(1f).padding(start = Space.sm)
-            )
-        }
         system.thermalStatus?.let { status ->
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = Space.md),
-                color = MaterialTheme.colorScheme.outlineVariant
-            )
             MetricLine(
                 label = "Thermal state",
                 value = thermalStatusLabel(status),
                 accent = if (status > 0) MaterialTheme.status.warn else MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-
-        HorizontalDivider(
-            modifier = Modifier.padding(vertical = Space.md),
-            color = MaterialTheme.colorScheme.outlineVariant
-        )
-        Text(
-            text = "Live temperature",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurface
-        )
         MetricLine(
-            label = "Now",
+            label = "Temperature now",
             value = temp?.let { String.format("%.1f°C", it) } ?: "--",
             accent = tempColor
         )
         MetricLine(
-            label = "Peak",
+            label = "Peak since the run",
             value = system.tempPeakC?.let { String.format("%.1f°C", it) } ?: "--",
             accent = MaterialTheme.status.warn
         )
@@ -990,7 +936,7 @@ private fun HistoryPanel(fps: FpsState, series: List<Float>, layer: String?, thr
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "target $threshold fps",
+                text = "Smoothness floor: $threshold fps",
                 style = MonoInline,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

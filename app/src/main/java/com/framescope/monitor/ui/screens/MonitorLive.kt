@@ -1,5 +1,6 @@
 package com.framescope.monitor.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,9 +10,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -21,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -29,6 +38,7 @@ import com.framescope.monitor.core.LiveHistory
 import com.framescope.monitor.core.MetricAvailability
 import com.framescope.monitor.core.SystemMetric
 import com.framescope.monitor.core.SystemMetrics
+import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.ui.components.ChartEvent
@@ -45,6 +55,7 @@ import com.framescope.monitor.ui.components.Panel
 import com.framescope.monitor.ui.components.SectionHeader
 import com.framescope.monitor.ui.components.Sparkline
 import com.framescope.monitor.ui.components.asChartPoints
+import com.framescope.monitor.ui.components.availabilityLabel
 import com.framescope.monitor.ui.components.frameRateColor
 import com.framescope.monitor.ui.theme.MonoInline
 import com.framescope.monitor.ui.theme.metric
@@ -88,6 +99,11 @@ enum class DashboardMetric(val key: String, val label: String) {
  *
  * Every card shows the number, the unit and how the number moved. A metric that
  * could not be read says why instead of showing a number that was not measured.
+ *
+ * A metric that could not be read does not get a card of its own: a card with
+ * nothing in it is a hole in the screen. The readings that are missing are
+ * gathered into one muted line under the cards, so the reason is still there
+ * without the space.
  */
 @Composable
 fun LiveMetricCards(
@@ -109,8 +125,11 @@ fun LiveMetricCards(
         return
     }
 
+    val missing = metrics.filter { metricAvailability(it, fps, system) != MetricAvailability.AVAILABLE }
+    val shown = metrics.filterNot { it in missing }
+
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Space.sm)) {
-        metrics.chunked(2).forEach { pair ->
+        shown.chunked(2).forEach { pair ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(Space.sm)
@@ -130,7 +149,82 @@ fun LiveMetricCards(
                 if (pair.size == 1) Spacer(Modifier.weight(1f))
             }
         }
+
+        if (missing.isNotEmpty()) {
+            UnavailableMetrics(missing, fps, system)
+        }
     }
+}
+
+/**
+ * The readings that could not be made, on one quiet line.
+ *
+ * Each one says why it is missing, so the gap is explained instead of looking
+ * like a bug.
+ */
+@Composable
+private fun UnavailableMetrics(
+    metrics: List<DashboardMetric>,
+    fps: FpsState,
+    system: SystemMetrics
+) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceContainerLowest)
+            .padding(horizontal = Space.md, vertical = Space.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Info,
+            contentDescription = null,
+            tint = muted,
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(Modifier.width(Space.sm))
+        Text(
+            text = metrics.joinToString(" · ") { metric ->
+                val reason = availabilityLabel(metricAvailability(metric, fps, system))
+                "${metricLabel(metric)} — $reason"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = muted,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+/** The name a metric is known by on the screen. */
+private fun metricLabel(metric: DashboardMetric): String = when (metric) {
+    DashboardMetric.FPS -> "Frame rate"
+    DashboardMetric.CPU -> "CPU"
+    DashboardMetric.GPU -> "GPU"
+    DashboardMetric.TEMPERATURE -> "Temperature"
+    DashboardMetric.RAM -> "Memory"
+    DashboardMetric.POWER -> "Power"
+    DashboardMetric.FRAME_TIME -> "Frame time"
+}
+
+/**
+ * Whether a metric could be read.
+ *
+ * The same rule for every metric: the number is there when the device gave
+ * one, and the reason is there when it did not.
+ */
+private fun metricAvailability(
+    metric: DashboardMetric,
+    fps: FpsState,
+    system: SystemMetrics
+): MetricAvailability = when (metric) {
+    DashboardMetric.FPS, DashboardMetric.FRAME_TIME -> fps.availability
+    DashboardMetric.CPU -> system.availabilityOf(SystemMetric.CPU_PERCENT)
+    DashboardMetric.GPU -> system.availabilityOf(SystemMetric.GPU_PERCENT)
+    DashboardMetric.TEMPERATURE -> temperatureAvailability(system)
+    DashboardMetric.RAM -> system.availabilityOf(SystemMetric.RAM_PERCENT)
+    DashboardMetric.POWER -> system.availabilityOf(SystemMetric.POWER_WATTS)
 }
 
 @Composable
@@ -234,6 +328,10 @@ private fun LiveMetricCardFor(
  * One live graph with the value it shows right now.
  *
  * Tapping it opens the same graph with a finger on it.
+ *
+ * The scale of the graph follows the readings until it is locked. A locked
+ * graph keeps the scale it was locked at, so a line that sits still is a
+ * line that sits still and not a line that is drawn again and again.
  */
 @Composable
 private fun LiveGraphRow(
@@ -245,6 +343,9 @@ private fun LiveGraphRow(
     target: Float?,
     onOpen: () -> Unit
 ) {
+    var lockedCeiling by remember { mutableStateOf<Float?>(null) }
+    val locked = lockedCeiling != null
+
     Panel {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -254,15 +355,45 @@ private fun LiveGraphRow(
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f)
             )
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(text = value, style = MonoInline, color = accent)
-                Text(
-                    text = " $unit",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(text = value, style = MonoInline, color = accent)
+                    Text(
+                        text = " $unit",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(
+                    onClick = {
+                        // The scale is frozen at the moment of the press, so the
+                        // line keeps its shape while the readings move on.
+                        lockedCeiling = if (locked) null else graphCeiling(points, target)
+                    },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = if (locked) {
+                            Icons.Rounded.Lock
+                        } else {
+                            Icons.Rounded.LockOpen
+                        },
+                        contentDescription = if (locked) {
+                            "Unlock the scale of the graph"
+                        } else {
+                            "Lock the scale of the graph"
+                        },
+                        tint = if (locked) {
+                            accent
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
         Spacer(Modifier.height(Space.xs))
@@ -271,9 +402,11 @@ private fun LiveGraphRow(
                 values = points.map { it.value },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp),
+                    .height(56.dp)
+                    .clickable(onClick = onOpen),
                 color = accent,
-                target = target
+                target = target,
+                scaleCeiling = lockedCeiling
             )
         } else {
             Text(
@@ -283,14 +416,22 @@ private fun LiveGraphRow(
                 modifier = Modifier.padding(vertical = Space.sm)
             )
         }
-        Spacer(Modifier.height(Space.xs))
-        Text(
-            text = "Tap to read the graph closely",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-            modifier = Modifier.clickable(onClick = onOpen)
-        )
     }
+}
+
+/**
+ * The scale a graph is locked at.
+ *
+ * It is the scale the readings need, with a little room on top, so a locked
+ * graph keeps the same shape while the readings change.
+ */
+internal fun graphCeiling(
+    points: List<ChartPoint>,
+    target: Float?
+): Float {
+    val values = points.mapNotNull { it.value.finiteOrNull() }
+    val highest = values.maxOrNull() ?: 0f
+    return maxOf(target ?: 0f, highest * 1.15f, 1f)
 }
 
 /**

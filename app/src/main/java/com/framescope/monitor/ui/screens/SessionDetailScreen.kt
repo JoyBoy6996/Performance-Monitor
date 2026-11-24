@@ -55,6 +55,16 @@ fun SessionDetailScreen(
             subtitle = "${formatter.format(Date(session.startedAt))} · " +
                 formatDuration(session.durationMs),
             bottomPadding = bottomPadding,
+            // The way back belongs on the left, where every other app puts it.
+            navigationIcon = {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
             actions = {
                 TextButton(onClick = {
                     SessionShare.exportPdfToDownloads(context, session, threshold)
@@ -65,13 +75,6 @@ fun SessionDetailScreen(
                     Icon(
                         imageVector = Icons.Rounded.Share,
                         contentDescription = "Share session",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                IconButton(onClick = onBack) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }

@@ -43,6 +43,13 @@ fun FrameScopeScreen(
     subtitle: String? = null,
     bottomPadding: Dp = 24.dp,
     listState: LazyListState = rememberLazyListState(),
+    /**
+     * The button that goes back, on the left of the title.
+     *
+     * A screen that is opened from another one has its way back on the left,
+     * where the thumb expects it and where every other app puts it.
+     */
+    navigationIcon: @Composable RowScope.() -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {},
     content: LazyListScope.() -> Unit
 ) {
@@ -67,6 +74,7 @@ fun FrameScopeScreen(
         FrostedHeading(
             title = title,
             subtitle = subtitle,
+            navigationIcon = navigationIcon,
             actions = actions,
             modifier = Modifier
                 .align(Alignment.TopCenter)

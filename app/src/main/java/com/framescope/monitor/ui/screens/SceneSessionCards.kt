@@ -57,6 +57,7 @@ import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.frameTimeCeiling
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.theme.MonoInline
 import java.text.SimpleDateFormat
@@ -390,6 +391,8 @@ fun SceneSessionCards(
     val temps = socTemps(session)
     val peak = peakSoc(session)
     val secondsAbove90 = temps.count { it >= 90f }
+    // The chip temperature, on the scale of its chart.
+    val chipTemps = temps.map { it.coerceIn(0f, 110f) }
 
     Column(
         Modifier.fillMaxWidth().background(Scene.background),
@@ -472,7 +475,9 @@ fun SceneSessionCards(
                 KpiCell("MAX", sfmt(session.maxFps, 1), "FPS")
                 KpiCell("MIN", sfmt(session.minFps, 1), "FPS")
                 KpiCell("AVG", sfmt(session.avgFps, 1), "FPS")
-                KpiCell("JITTER", sfmt(jitter, 1) + "%", "FPS")
+                // The jitter is a percentage of the frame time, not a frame
+                // rate. The unit under it says what it is.
+                KpiCell("JITTER", sfmt(jitter, 1) + "%", "Variance")
             }
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth()) {
@@ -483,6 +488,44 @@ fun SceneSessionCards(
             }
         }
 
+        // A chart without readings is an empty box. The charts of the
+        // hardware are only drawn when the run really measured them, and the
+        // ones that are missing are named in one line instead.
+        val cpuHasData = sPositive(session.cpuSeries).size >= 2 ||
+            session.cpuGroupSeries.any { row -> row.any { it?.finiteOrNull() != null } }
+        val freqHasData = sPositive(session.cpuFreqSeries).size >= 2 ||
+            session.cpuGroupFreqSeries.any { row ->
+                row.any { it?.finiteOrNull() != null }
+            }
+        val tempHasData = chipTemps.size >= 2
+        val missingCharts = listOfNotNull(
+            if (!cpuHasData) "CPU Usage" else null,
+            if (!freqHasData) "CPU Frequency" else null,
+            if (!tempHasData) "CPU Temperature" else null
+        )
+        var showEmptyCharts by remember(session.id) { mutableStateOf(false) }
+        if (missingCharts.isNotEmpty()) {
+            SceneCard {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "CPU & GPU hardware counters were unavailable for this session",
+                        style = tnumBody.copy(color = Scene.muted),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { showEmptyCharts = !showEmptyCharts }) {
+                        Text(
+                            if (showEmptyCharts) "Hide empty charts" else "Show empty charts",
+                            style = tnumSmall.copy(color = Scene.blue)
+                        )
+                    }
+                }
+            }
+        }
+
         // Card 5 - the frame rate and the temperature of the chip on one
         // chart, the way the PDF shows it.
         SceneCard {
@@ -490,24 +533,33 @@ fun SceneSessionCards(
             Spacer(Modifier.height(8.dp))
             val fpsCeiling = (sPositive(session.fpsSeries).maxOrNull() ?: 120f)
                 .let { if (it > 130f) 144f else 120f }
-            val chipTemps = temps.map { it.coerceIn(0f, 110f) }
+            // A line without readings is not drawn, and it is not named in the
+            // legend either: an empty series looks like a flat zero.
+            val fpsLine = ChartLineUi(
+                sClamped(session.fpsSeries, 0f, fpsCeiling), Scene.fps, 0f, fpsCeiling
+            )
+            val tempLine = ChartLineUi(chipTemps, Scene.temp, 0f, 110f)
+            val cpuLine = ChartLineUi(
+                sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f
+            )
+            val gpuLine = ChartLineUi(
+                sClamped(session.gpuPercentSeries, 0f, 100f), Scene.gpu, 0f, 100f
+            )
+            val drawn = listOf(
+                "FPS" to Scene.fps to fpsLine,
+                "TEMP(°C)" to Scene.temp to tempLine,
+                "CPU(%)" to Scene.total to cpuLine,
+                "GPU(%)" to Scene.gpu to gpuLine
+            ).filter { it.second.values.count { value -> value.finiteOrNull() != null } >= 2 }
             SceneLineChart(
-                lines = listOf(
-                    ChartLineUi(sClamped(session.fpsSeries, 0f, fpsCeiling), Scene.fps, 0f, fpsCeiling),
-                    ChartLineUi(chipTemps, Scene.temp, 0f, 110f),
-                    ChartLineUi(sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f),
-                    ChartLineUi(sClamped(session.gpuPercentSeries, 0f, 100f), Scene.gpu, 0f, 100f)
-                ),
+                lines = drawn.map { it.second },
                 leftLabels = (5 downTo 0).map { sfmt(fpsCeiling * it / 5f, 0) },
                 rightLabels = listOf("110", "88", "66", "44", "22", "0"),
                 timeLabels = timeTicks(session)
             )
-            Legend(
-                "FPS" to Scene.fps,
-                "TEMP(°C)" to Scene.temp,
-                "CPU(%)" to Scene.total,
-                "GPU(%)" to Scene.gpu
-            )
+            if (drawn.isNotEmpty()) {
+                Legend(*drawn.map { it.first }.toTypedArray())
+            }
             Text(
                 "TEMP MAX: ${sfmt(chipTemps.maxOrNull(), 1)}°C   " +
                     "MIN: ${sfmt(chipTemps.minOrNull(), 1)}°C   " +
@@ -522,8 +574,9 @@ fun SceneSessionCards(
         SceneCard {
             Text("Frame Time(ms)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
-            val maxFrame = (sPositive(session.frameTimeSeries).maxOrNull() ?: 100f)
-                .coerceAtLeast(100f)
+            // The scale follows the run: a 10 ms run in a 100 ms scale would
+            // hide every stutter in the bottom tenth of the chart.
+            val maxFrame = frameTimeCeiling(session.frameTimeSeries, session.maxFrameTimeMs)
             SceneLineChart(
                 lines = listOf(
                     ChartLineUi(
@@ -544,6 +597,7 @@ fun SceneSessionCards(
 
         // The load of the processor, cluster by cluster. The total has its own
         // chart above, next to the frame rate.
+        if (cpuHasData || showEmptyCharts) {
         SceneCard {
             Row(
                 Modifier.fillMaxWidth(),
@@ -573,8 +627,10 @@ fun SceneSessionCards(
                 }).toTypedArray())
             )
         }
+        }
 
         // Card 8 - full grid even when an old run has no frequency samples.
+        if (freqHasData || showEmptyCharts) {
         SceneCard {
             Row(
                 Modifier.fillMaxWidth(),
@@ -618,6 +674,7 @@ fun SceneSessionCards(
                 modifier = Modifier.fillMaxWidth()
             )
         }
+        }
 
         // Card 9 - Power(W) left axis 0..8, Capacity(%) right axis 0..100.
         SceneCard {
@@ -647,6 +704,7 @@ fun SceneSessionCards(
         }
 
         // Card 10 - dedicated CPU/SoC temperature line, 0..110 °C.
+        if (tempHasData || showEmptyCharts) {
         SceneCard {
             Text("CPU Temperature(°C)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
@@ -665,6 +723,7 @@ fun SceneSessionCards(
                 style = tnumSmall, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
+        }
         }
 
         // Card 11 - one compact Device Detail card, then the real Shell Logs.

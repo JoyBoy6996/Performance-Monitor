@@ -26,6 +26,7 @@ import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.frameTimeCeiling
 import com.framescope.monitor.core.plausibleTempC
 import java.io.File
 import java.io.FileOutputStream
@@ -124,6 +125,8 @@ private const val PLOT_EDGE_GAP = 24f
 private object ReportTheme {
     val background = Color.parseColor("#0D0D0F")
     val card = Color.parseColor("#18191C")
+    /** The bright edge of a card, so a printed page still shows its cards. */
+    val cardBorder = Color.parseColor("#3A3E48")
     val grid = Color.parseColor("#26282E")
     val text = Color.parseColor("#E6E8EC")
     val muted = Color.parseColor("#8E929B")
@@ -185,16 +188,34 @@ private fun cardHeights(session: SessionRecord): List<Float> = buildList {
     // so it must not reserve height either or every later card would shift.
     if ((peakSoc(session) ?: 0f) >= 85f) add(104f) // 1 thermal warning
     add(190f)                 // 2 device info
-    add(96f)                  // 3 note
+    // The note card only exists when there is a note. "Note not set" is a
+    // reminder for the app, not a line of the report.
+    if (session.note.isNotBlank()) add(96f)      // 3 note
     add(350f)                 // 4 game header + 2x4 KPI grid
     add(600f)                 // 5 FPS & temperature
     add(520f)                 // 6 frame time
-    add(560f)                 // 7 CPU usage
-    add(600f)                 // 8 CPU frequency
+    // The charts of the hardware are only drawn when the run measured them.
+    // An empty chart is a box with nothing in it.
+    if (hasCpuUsage(session)) add(560f)          // 7 CPU usage
+    if (hasCpuFrequency(session)) add(600f)      // 8 CPU frequency
     add(520f)                 // 9 power & capacity
-    add(520f)                 // 10 CPU temperature
+    if (hasCpuTemperature(session)) add(520f)    // 10 CPU temperature
     add(detailHeight(session)) // 11 device detail + shell logs
 }
+
+/** True when the run really measured the load of the processor. */
+private fun hasCpuUsage(session: SessionRecord): Boolean =
+    session.cpuSeries.count { it.finiteOrNull() != null } >= 2 ||
+        session.cpuGroupSeries.any { row -> row.any { it?.finiteOrNull() != null } }
+
+/** True when the run really measured the clock of the processor. */
+private fun hasCpuFrequency(session: SessionRecord): Boolean =
+    session.cpuFreqSeries.count { it.finiteOrNull() != null } >= 2 ||
+        session.cpuGroupFreqSeries.any { row -> row.any { it?.finiteOrNull() != null } }
+
+/** True when the run really measured the temperature of the chip. */
+private fun hasCpuTemperature(session: SessionRecord): Boolean =
+    temperatureSeries(session).size >= 2
 
 /** One continuous page: no split cards, no empty pages, no watermark. */
 private fun reportHeight(session: SessionRecord): Int {
@@ -306,6 +327,11 @@ private class SceneReportRenderer(
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
     }
     private val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ReportTheme.card }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ReportTheme.cardBorder
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+    }
     private val warnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ReportTheme.warnBack }
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = ReportTheme.grid
@@ -329,10 +355,11 @@ private class SceneReportRenderer(
     private fun card(back: Paint = cardPaint, draw: (Float, Float, Float, Float) -> Unit) {
         val height = heights.getOrElse(cardIndex) { 200f }
         cardIndex++
-        canvas.drawRoundRect(
-            RectF(MARGIN, cursor, PAGE_W - MARGIN, cursor + height),
-            RADIUS, RADIUS, back
-        )
+        val rect = RectF(MARGIN, cursor, PAGE_W - MARGIN, cursor + height)
+        canvas.drawRoundRect(rect, RADIUS, RADIUS, back)
+        // The card keeps a bright edge on the dark page: a printed report is
+        // read on paper, where a card without an edge is a grey block.
+        canvas.drawRoundRect(rect, RADIUS, RADIUS, borderPaint)
         draw(MARGIN + PAD, cursor + PAD, PAGE_W - MARGIN - PAD, cursor + height - PAD)
         cursor += height + GAP
     }
@@ -449,7 +476,7 @@ private class SceneReportRenderer(
                 Triple("MAX", fmt(session.maxFps, 1), "FPS"),
                 Triple("MIN", fmt(session.minFps, 1), "FPS"),
                 Triple("AVG", fmt(session.avgFps, 1), "FPS"),
-                Triple("JITTER", fmt(jitter, 1) + "%", "FPS"),
+                Triple("JITTER", fmt(jitter, 1) + "%", "Variance"),
                 Triple("1% LOW", fmt(session.low1Percent, 1), "FPS"),
                 Triple("AVG", fmt(avgSoc(session), 1), "SOC(°C)"),
                 Triple("MAX", fmt(maxBattery(session), 1), "Battery(°C)"),
@@ -591,31 +618,35 @@ private class SceneReportRenderer(
             val temps = temperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
             val chartTop = y0 + 44f
             val chartBottom = y1 - 142f
-            drawChart(
-                x0, chartTop, x1, chartBottom,
-                listOf(
+            // A line without readings is not drawn and is not named in the
+            // legend: an empty series looks like a flat zero.
+            val series = listOf(
+                Pair("FPS", ReportTheme.fps) to
                     ChartLine("FPS", session.fpsSeries.clamped(0f, fpsCeil),
                         ReportTheme.fps, 0f, fpsCeil),
+                Pair("TEMP(°C)", ReportTheme.temp) to
                     ChartLine("TEMP(°C)", temps, ReportTheme.temp, 0f, TEMP_MAX_C,
                         temperature = true),
+                Pair("CPU(%)", ReportTheme.cpu) to
                     ChartLine("CPU(%)", session.cpuSeries.clamped(0f, 100f),
                         ReportTheme.cpu, 0f, 100f),
+                Pair("GPU(%)", ReportTheme.gpu) to
                     ChartLine("GPU(%)", session.gpuPercentSeries.clamped(0f, 100f),
                         ReportTheme.gpu, 0f, 100f)
-                ),
+            ).filter { it.second.values.clean().size >= 2 }
+            drawChart(
+                x0, chartTop, x1, chartBottom,
+                series.map { it.second },
                 scale(fpsCeil, 5),
                 scale(TEMP_MAX_C, 5)
             )
             drawTimeTicks(x0, chartBottom + 34f, x1, scale(TEMP_MAX_C, 5), timeLabels(session))
-            legend(
-                x0, x1, y1 - 72f,
-                listOf(
-                    Pair("FPS", ReportTheme.fps),
-                    Pair("TEMP(°C)", ReportTheme.temp),
-                    Pair("CPU(%)", ReportTheme.cpu),
-                    Pair("GPU(%)", ReportTheme.gpu)
+            if (series.isNotEmpty()) {
+                legend(
+                    x0, x1, y1 - 72f,
+                    series.map { it.first }
                 )
-            )
+            }
             centered(
                 "TEMP MAX: ${fmt(temps.maxOrNull(), 1)}°C   " +
                     "MIN: ${fmt(temps.minOrNull(), 1)}°C   " +
@@ -629,8 +660,7 @@ private class SceneReportRenderer(
     fun frameTime(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
             text("Frame Time(ms)", x0, y0, header)
-            val maxFrame = (session.frameTimeSeries.positive().maxOrNull() ?: 100f)
-                .coerceAtLeast(100f)
+            val maxFrame = frameTimeCeiling(session.frameTimeSeries, session.maxFrameTimeMs)
             val chartTop = y0 + 44f
             val chartBottom = y1 - 86f
             drawChart(
@@ -866,14 +896,14 @@ private fun renderReport(context: Context, session: SessionRecord, canvas: Canva
     report.start()
     report.thermalStatus(peakSoc(session), temperatureSeries(session).count { it >= 90f })
     report.deviceRow(session)
-    report.note(session)
+    if (session.note.isNotBlank()) report.note(session)
     report.sessionHeader(session)
     report.fpsTemperature(session)
     report.frameTime(session)
-    report.cpuUsage(session)
-    report.cpuFrequency(session)
+    if (hasCpuUsage(session)) report.cpuUsage(session)
+    if (hasCpuFrequency(session)) report.cpuFrequency(session)
     report.powerCapacity(session)
-    report.cpuTemperature(session)
+    if (hasCpuTemperature(session)) report.cpuTemperature(session)
     report.hardwareDetail(session)
 }
 

@@ -46,6 +46,13 @@ fun FrostedHeading(
     modifier: Modifier = Modifier,
     subtitle: String? = null,
     cornerRadius: Dp = 24.dp,
+    /**
+     * The button that goes back, on the left of the title.
+     *
+     * The way back belongs on the left of a heading, where every other app
+     * puts it, and not among the actions on the right.
+     */
+    navigationIcon: @Composable RowScope.() -> Unit = {},
     actions: @Composable RowScope.() -> Unit = {}
 ) {
     val shape = RoundedCornerShape(bottomStart = cornerRadius, bottomEnd = cornerRadius)
@@ -89,6 +96,7 @@ fun FrostedHeading(
                 .padding(horizontal = Space.gutter, vertical = Space.md),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            navigationIcon()
             Column(Modifier.weight(1f)) {
                 Text(
                     text = title,

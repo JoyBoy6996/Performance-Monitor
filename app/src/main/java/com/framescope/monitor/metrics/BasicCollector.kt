@@ -8,6 +8,47 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
+ * The load of the graphics unit, from what the kernel publishes.
+ *
+ * Some devices publish the busy share directly, and others publish the busy
+ * time against the total time, as "busy total" or as "busy@total". A number
+ * that is not one of those is not a reading.
+ */
+fun gpuLoadFromNodes(directPercent: String?, busyTicks: String?): Float? {
+    val percent = directPercent?.trim()?.toDoubleOrNull()
+    if (percent != null && percent.isFinite()) return percent.toFloat().coerceIn(0f, 100f)
+    val text = busyTicks?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val parts = text.split('@', ' ', '\t', ':').map { it.trim() }.filter { it.isNotEmpty() }
+    if (parts.size >= 2) {
+        val busy = parts[0].toDoubleOrNull() ?: return null
+        val total = parts[1].toDoubleOrNull() ?: return null
+        if (total <= 0.0) return null
+        return ((busy * 100.0) / total).toFloat().coerceIn(0f, 100f)
+    }
+    val single = parts.firstOrNull()?.toDoubleOrNull() ?: return null
+    if (!single.isFinite()) return null
+    return single.toFloat().coerceIn(0f, 100f)
+}
+
+/**
+ * The load of a core from the place of its clock between its two ends.
+ *
+ * A core that sits at its lowest clock is idle and a core at its highest is
+ * busy, so the place of the clock is a real reading of the hardware and not a
+ * guess. Without the two ends of the clock there is no place, and a reading
+ * that was not made is missing and not a hundred percent.
+ */
+fun coreLoadFromClock(khz: Long?, minKhz: Long?, maxKhz: Long?): Float? {
+    val now = khz ?: return null
+    val min = minKhz ?: return null
+    val max = maxKhz ?: return null
+    if (max <= min) return null
+    val span = (max - min).coerceAtLeast(1L)
+    val above = (now - min).coerceAtLeast(0L)
+    return ((above.toFloat() / span.toFloat()) * 100f).coerceIn(2f, 100f)
+}
+
+/**
  * The hardware readings of a phone without a privileged shell.
  *
  * The app's own process cannot read `/proc/stat` on Android 16, and a build
@@ -228,12 +269,11 @@ class BasicCollector(private val context: Context) {
      */
     private fun readCoreLoads(frequenciesKhz: List<Long?>): List<Float?> =
         (0 until coreCount).map { core ->
-            val khz = frequenciesKhz.getOrNull(core) ?: return@map null
-            val min = readLong("$CPU_ROOT/cpu$core/cpufreq/cpuinfo_min_freq") ?: 0L
-            val max = readLong("$CPU_ROOT/cpu$core/cpufreq/cpuinfo_max_freq") ?: 0L
-            val span = (max - min).coerceAtLeast(1L)
-            val above = (khz - min).coerceAtLeast(0L)
-            ((above.toFloat() / span.toFloat()) * 100f).coerceIn(2f, 100f)
+            coreLoadFromClock(
+                khz = frequenciesKhz.getOrNull(core),
+                minKhz = readLong("$CPU_ROOT/cpu$core/cpufreq/cpuinfo_min_freq"),
+                maxKhz = readLong("$CPU_ROOT/cpu$core/cpufreq/cpuinfo_max_freq")
+            )
         }
 
     /**
@@ -286,13 +326,18 @@ class BasicCollector(private val context: Context) {
         if (raw == Int.MIN_VALUE) null else raw / 10f
     }.getOrNull()
 
-    /** The load of the graphics unit, in percent. */
-    fun readGpuLoad(): Float? {
-        val busy = readLong("$GPU_ROOT/gpubusy") ?: return null
-        val total = readLong("$GPU_ROOT/gpu_busy_percentage") ?: return null
-        if (total <= 0L) return null
-        return ((busy * 100f) / total.toFloat()).coerceIn(0f, 100f)
-    }
+    /**
+     * The load of the graphics unit, in percent.
+     *
+     * The kernel publishes the busy share on some devices and the busy time
+     * against the total time on others. Both are real readings, and a device
+     * that publishes neither says so by saying nothing.
+     */
+    fun readGpuLoad(): Float? = gpuLoadFromNodes(
+        directPercent = readText("$GPU_ROOT/gpu_busy_percentage")
+            ?: readText("/sys/class/misc/mali0/device/utilisation"),
+        busyTicks = readText("$GPU_ROOT/gpubusy")
+    )
 
     /** The clock of the graphics unit, in MHz. */
     fun readGpuClock(): Int? {

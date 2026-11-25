@@ -476,3 +476,44 @@ report cut the top of its first card off.
   same time to prove that a snapshot never holds a missing reading.
 - The screen of the run, the scale of the frame time, the icon of BGMI and
   the toggle for the empty charts are the ones of the last version.
+
+## 1.2.14 - the second pass over the collector and the chart
+
+The last version fixed the crash and gave the recorder a collector of its own.
+This one is the second pass over it, and it closed three gaps - the ones a
+phone without Shizuku runs into first.
+
+### The collector answers on every tick
+
+- The app read the hardware by itself only while the shell was missing. The
+  shell answers most of the questions, and the app covers the rest: the clock
+  of the graphics unit, the cores of the processor, the temperature of the
+  chip. The collector answers on every tick of the 1000 ms loop now, and its
+  reading is the fallback wherever the shell has none.
+- A metric that the app filled by itself is available, and the screen says
+  where the number came from. Telling the user to install Shizuku for a
+  number that is already on the screen is wrong.
+- The line that says how the run was measured names the shell that really
+  answered. The local ADB bridge is a shell of uid=2000 as well, and a run
+  that was measured by it is not a run of the basic mode.
+
+### The temperature sits above the frame rate
+
+- The temperature of the chart was the series without the seconds that had no
+  reading, so the line was stretched over the whole width and no longer sat
+  above the line of the frame rate at the same second. The series has one
+  value for every second now, and a second without a reading is a gap in the
+  line.
+- The card of the CPU temperature shows the chip alone. The chart of the frame
+  rate may fall back to the battery of an old run; the card of the processor
+  may not - a battery is not a chip.
+- The button that opens the Shell Logs is only there when there is a log under
+  the first line.
+
+### What was checked
+
+- The collector is asked on every tick, the metric it fills is available, and
+  the mode line names the shell that answered.
+- The temperature of the chart keeps the seconds of the run, the chart draws a
+  gap where a second had no reading, and the footer tells the real maximum,
+  minimum and average of the curve.

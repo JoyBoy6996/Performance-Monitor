@@ -182,16 +182,36 @@ class BasicCollector(private val context: Context) {
      * publishes the model of the chip, which names the same thing.
      */
     fun readPlatform(): String? {
-        val property = runCatching {
-            val clazz = Class.forName("android.os.SystemProperties")
-            val get = clazz.getMethod("get", String::class.java)
-            (get.invoke(null, "ro.board.platform") as? String)?.trim()
-        }.getOrNull()
+        val property = systemProperty("ro.board.platform")
         val value = property?.takeIf { it.isNotBlank() }
-            ?: Build.SOC_MODEL.takeIf { it.isNotBlank() }
+            ?: buildField("SOC_MANUFACTURER")
+            ?: buildField("SOC_MODEL")
             ?: Build.HARDWARE
         return value?.trim()?.takeIf { it.isNotBlank() }?.uppercase(Locale.US)
     }
+
+    /**
+     * A system property, read through the hidden API.
+     *
+     * A build that refuses the reflection simply has no answer here, and the
+     * caller falls back to what the platform publishes itself.
+     */
+    private fun systemProperty(name: String): String? = runCatching {
+        val clazz = Class.forName("android.os.SystemProperties")
+        val get = clazz.getMethod("get", String::class.java)
+        (get.invoke(null, name) as? String)?.trim()
+    }.getOrNull()
+
+    /**
+     * A field of Build, read by its name.
+     *
+     * The model of the chip exists since Android 12, and the app runs on
+     * Android 8 as well. Reading the field by its name means an old device
+     * gets no answer instead of a crash.
+     */
+    private fun buildField(name: String): String? = runCatching {
+        (Build::class.java.getField(name).get(null) as? String)?.trim()
+    }.getOrNull()
 
     /**
      * The performance profile of the device.
@@ -205,11 +225,7 @@ class BasicCollector(private val context: Context) {
         if (power?.isPowerSaveMode == true) return "Power Save"
         // The game mode of Vivo and iQOO is a system property. It is a hidden
         // API like the platform of the chip, and it is read the same way.
-        val gameMode = runCatching {
-            val clazz = Class.forName("android.os.SystemProperties")
-            val get = clazz.getMethod("get", String::class.java)
-            (get.invoke(null, "sys.vivo.game.mode") as? String)?.trim()
-        }.getOrNull()
+        val gameMode = systemProperty("sys.vivo.game.mode")
         if (gameMode == "1") return "Monster"
         return "Balanced"
     }

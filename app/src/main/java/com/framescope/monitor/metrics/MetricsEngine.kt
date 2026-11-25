@@ -344,12 +344,13 @@ class MetricsEngine(
                     },
                     sources = PRIVILEGED_METRICS.associateWith { "privileged shell" }
                 )
-                // Without the shell the app still reads what it may read by
-                // itself: the clock of the processor, the temperature of the
-                // chip and the platform of the device. The reading that could
-                // not be made stays missing.
-                basicSample = runCatching { basicCollector()?.sample() }.getOrNull()
             }
+            // The app reads what it may read by itself on every tick, whatever
+            // the shell says. The shell answers most of it, and the app covers
+            // the rest - the clock of the processor, the temperature of the
+            // chip, the load of the graphics unit. A reading that could not be
+            // made stays missing.
+            basicSample = runCatching { basicCollector()?.sample() }.getOrNull()
             publishSystem()
             val elapsedMs = (System.nanoTime() - started) / 1_000_000L
             delay((PRIVILEGED_INTERVAL_MS - elapsedMs).coerceAtLeast(200L))
@@ -431,7 +432,24 @@ class MetricsEngine(
             availability[SystemMetric.CPU_PERCENT] = MetricAvailability.AVAILABLE
             sources[SystemMetric.CPU_PERCENT] = "CPU counter (app read or privileged shell)"
         }
+        // A reading the app made by itself is a real reading. The metric is
+        // then available, and the screen says where the number came from
+        // instead of telling the user to install Shizuku for a number that is
+        // already on the screen.
         val basic = basicSample
+        basicFilledMetrics(basic).forEach { metric ->
+            if (availability[metric] != MetricAvailability.AVAILABLE) {
+                availability[metric] = MetricAvailability.AVAILABLE
+                // The load of the processor in the basic mode is the place of
+                // the clock of every core between its lowest and its highest.
+                // The screen says so, so the number is read for what it is.
+                sources[metric] = if (metric == SystemMetric.CPU_PERCENT) {
+                    "clock of the processor (app read)"
+                } else {
+                    "app's own reading"
+                }
+            }
+        }
         val basicStart = basicStart
         val merged = SystemMetrics(
             cpuPercent = cpuPercent ?: basic?.cpuPercent,
@@ -687,10 +705,15 @@ class MetricsEngine(
      */
     private fun currentModeLine(): String {
         val status = hub.status.value
-        val shizuku = status.state == AccessState.READY && status.shellSource == "Shizuku"
+        val shell = hub.telemetryShell.value
+        // Both the Shizuku UserService and the local ADB bridge are a shell of
+        // uid=2000, so both answer the question "how was this run measured".
+        val privileged = shell == "Shizuku" || shell == "Local ADB bridge" ||
+            (status.state == AccessState.READY &&
+                (status.shellSource == "Shizuku" || status.shellSource == "Local ADB bridge"))
         val start = basicStart
         return telemetryModeLine(
-            shizukuActive = shizuku,
+            shizukuActive = privileged,
             platform = start?.platform,
             clusters = start?.clusters?.map { it.name }.orEmpty()
         )

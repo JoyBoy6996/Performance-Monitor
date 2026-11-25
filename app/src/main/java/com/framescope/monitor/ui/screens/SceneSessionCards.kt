@@ -165,9 +165,14 @@ private fun chipTempSeries(session: SessionRecord): List<Float> =
 private fun batteryTemps(session: SessionRecord): List<Float> =
     session.batteryTempSeries.mapNotNull { it.plausibleTempC(MAX_BATTERY_TEMP_C) }
 
-/** Mean chip temperature; an old run may only have the recorded session peak. */
+/**
+ * Mean chip temperature; an old run may only have the recorded session peak.
+ *
+ * The chip alone: the chart of the frame rate may fall back to the battery of
+ * an old run, and the mean of the processor may not.
+ */
 private fun avgSocTemp(session: SessionRecord): Float? =
-    socTemps(session).mapNotNull { it.finiteOrNull() }.avgOrNull()
+    chipTempSeries(session).mapNotNull { it.finiteOrNull() }.avgOrNull()
         ?: session.maxTempC?.plausibleTempC(110f)
 
 /** Peak BatteryManager reading; a legacy run may only carry the session peak. */
@@ -175,10 +180,16 @@ private fun maxBatteryTemp(session: SessionRecord): Float? =
     batteryTemps(session).maxOrNull()
         ?: session.maxTempC?.plausibleTempC(MAX_BATTERY_TEMP_C)
 
+/**
+ * The highest temperature of the chip.
+ *
+ * A warning about a hot chip that was triggered by the temperature of the
+ * battery is a false warning.
+ */
 private fun peakSoc(session: SessionRecord): Float? =
     listOfNotNull(
         session.maxTempC,
-        socTemps(session).mapNotNull { it.finiteOrNull() }.maxOrNull()
+        chipTempSeries(session).mapNotNull { it.finiteOrNull() }.maxOrNull()
     )
         .mapNotNull { it.plausibleTempC(110f) }
         .maxOrNull()

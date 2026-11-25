@@ -252,4 +252,29 @@ class SessionLoggerTest {
         assertEquals("com.pubg.imobile", record!!.appPackage)
         assertEquals("BGMI", record.appLabel)
     }
+
+    /**
+     * The temperature of the battery keeps the seconds of the run.
+     *
+     * It may stand in for the temperature of the chip on an old run, and it
+     * has to stand in on the same second.
+     */
+    @Test
+    fun theTemperatureOfTheBatteryKeepsTheSecondsOfTheRun() {
+        val logger = SessionLogger(store())
+        logger.start("com.example.game", "Game", 80)
+
+        logger.onSample(sample(fps = 60f, totalFrames = 120), SystemMetrics(), 60)
+        logger.onSample(sample(fps = 60f, totalFrames = 240), SystemMetrics(), 60)
+        logger.onSample(sample(fps = 60f, totalFrames = 360), SystemMetrics(), 60)
+
+        val record = logger.stop(60)
+        assertTrue(record != null)
+        val seconds = record!!.fpsSeries.size
+        assertEquals(
+            "the temperature of the battery does not have a value for every second",
+            seconds,
+            record.batteryTempSeries.size
+        )
+    }
 }

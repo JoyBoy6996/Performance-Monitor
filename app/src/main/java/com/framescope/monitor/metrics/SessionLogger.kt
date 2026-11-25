@@ -811,7 +811,11 @@ class SessionLogger(private val store: SessionStore) {
             gpuFreqSeries = secondBuckets.map { it.gpuFreqMHz.toFloat() },
             cpuTempSeries = secondBuckets.map { it.cpuTempC },
             socTempSeries = secondBuckets.map { it.socTempC },
-            batteryTempSeries = secondBuckets.mapNotNull { it.batteryTempC },
+            // The temperature of the battery keeps the seconds of the run, so
+            // it can stand in for the temperature of the chip on the same
+            // second. A second without a reading is a zero and not a shift of
+            // everything that comes after it.
+            batteryTempSeries = secondBuckets.map { it.batteryTempC ?: 0f },
             gpuPercentSeries = secondBuckets.map { it.gpuPercent },
             cpuGroupNames = cpuGroupNames,
             cpuGroupSeries = cpuGroupSeries,

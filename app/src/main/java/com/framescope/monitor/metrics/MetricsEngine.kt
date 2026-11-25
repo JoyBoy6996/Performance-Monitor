@@ -468,9 +468,13 @@ class MetricsEngine(
             thermalMaxC = privileged.thermalMaxC ?: basic?.cpuTempC,
             cpuTempC = privileged.cpuTempC ?: basic?.cpuTempC,
             gpuPercent = privileged.gpuPercent ?: basic?.gpuPercent,
-            cpuGroups = privileged.cpuGroups.ifEmpty { basicCpuGroups(basic, basicStart) },
-            cpuCoreLoadPct = privileged.cpuCoreLoadPct.ifEmpty { basic?.perCoreLoadPct.orEmpty() },
-            cpuCoreFreqMHz = privileged.cpuCoreFreqMHz.ifEmpty { basic?.perCoreFreqMhz.orEmpty() },
+            cpuGroups = mergedCpuGroups(privileged.cpuGroups, basic, basicStart),
+            cpuCoreLoadPct = privileged.cpuCoreLoadPct
+                .takeIf { list -> list.any { it != null } }
+                ?: basic?.perCoreLoadPct.orEmpty(),
+            cpuCoreFreqMHz = privileged.cpuCoreFreqMHz
+                .takeIf { list -> list.any { it != null } }
+                ?: basic?.perCoreFreqMhz.orEmpty(),
             ddrFreqMHz = privileged.ddrFreqMHz,
             threadLoads = privileged.threadLoads,
             thermalStatus = privileged.thermalStatus,
@@ -529,6 +533,31 @@ class MetricsEngine(
                 name = cluster.name,
                 percent = sample?.clusterLoadPct?.getOrNull(index),
                 freqMHz = sample?.clusterFreqMhz?.getOrNull(index)
+            )
+        }
+    }
+
+    /**
+     * The clusters of the processor, with the reading of the shell first.
+     *
+     * A cluster that the shell could not measure takes the reading the app
+     * made by itself, if there is one. The two are matched by their name and
+     * not by their place: the shell sorts the clusters by their clock and the
+     * app keeps them in the order of the cores.
+     */
+    private fun mergedCpuGroups(
+        privileged: List<CpuGroupMetric>,
+        sample: BasicCollector.Sample?,
+        start: BasicCollector.SessionStart?
+    ): List<CpuGroupMetric> {
+        val basic = basicCpuGroups(sample, start)
+        if (privileged.isEmpty()) return basic
+        if (basic.isEmpty()) return privileged
+        return privileged.map { group ->
+            val other = basic.firstOrNull { it.name == group.name }
+            group.copy(
+                percent = group.percent ?: other?.percent,
+                freqMHz = group.freqMHz ?: other?.freqMHz
             )
         }
     }

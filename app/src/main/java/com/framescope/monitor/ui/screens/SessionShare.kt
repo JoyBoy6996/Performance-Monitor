@@ -800,10 +800,10 @@ private class SceneReportRenderer(
                 maxOf(session.perCoreLoadSeries.size, session.perCoreFreqSeries.size), 8
             )
             val threadRows = minOf(session.threadNames.size, 6)
-            // The identity is printed only when the shell really answered it.
-            // A line of "--" is not a reading.
-            val identity = ShellLogs.identity(session.shellLogs)
-            val logs = ShellLogs.detailLines(session.shellLogs).take(12)
+            // The first line says how the run was measured. A line of "--" is
+            // not a reading and is never printed.
+            val head = ShellLogs.head(session.shellLogs)
+            val logs = ShellLogs.body(session.shellLogs).take(12)
             var y = y0 + 40f
 
             text("Device Detail", x0, y0, header)
@@ -872,9 +872,9 @@ private class SceneReportRenderer(
 
             text("Shell Logs", x0, y, header)
             y += 34f
-            if (identity != null) {
+            if (head != null) {
                 body.color = ReportTheme.blue
-                text(fit(identity, x1 - x0, body), x0, y, body)
+                text(fit(head, x1 - x0, body), x0, y, body)
                 body.color = ReportTheme.text
                 y += 28f
             } else {

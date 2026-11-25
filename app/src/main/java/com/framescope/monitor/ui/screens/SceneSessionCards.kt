@@ -801,11 +801,12 @@ private fun DetailRow(label: String, value: String) {
 @Composable
 private fun ShellLogsCard(session: SessionRecord) {
     var expanded by remember(session.id) { mutableStateOf(false) }
-    // The identity is printed only when the shell really answered it. A line
-    // full of "--" is not a reading, and printing it next to the other
-    // numbers makes a run look measured when it was not.
-    val identity = ShellLogs.identity(session.shellLogs)
-    val details = ShellLogs.detailLines(session.shellLogs)
+    // The first line says how the run was measured: the privileged shell
+    // answered, or the app read what it could by itself. A line full of "--"
+    // is not a reading, and printing it next to the other numbers makes a run
+    // look measured when it was not.
+    val head = ShellLogs.head(session.shellLogs)
+    val details = ShellLogs.body(session.shellLogs)
     Column {
         Row(
             Modifier.fillMaxWidth().clickable { expanded = !expanded },
@@ -816,8 +817,8 @@ private fun ShellLogsCard(session: SessionRecord) {
             Text(if (expanded) "Hide" else "Expand", style = tnumSmall, color = Scene.blue)
         }
         Spacer(Modifier.height(8.dp))
-        if (identity != null) {
-            Text(identity, style = tnumSmall.copy(color = Scene.blue))
+        if (head != null) {
+            Text(head, style = tnumSmall.copy(color = Scene.blue))
         } else {
             Text(
                 "No shell output was captured for this run.",

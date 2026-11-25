@@ -54,4 +54,16 @@ object ShellLogs {
      */
     fun detailLines(logs: String): List<String> =
         realLines(logs).filterNot { isRealIdentity(it) }
+
+    /**
+     * The first line of the log.
+     *
+     * It is the line that says how the run was measured, and it is printed on
+     * its own. A run that has no line at all is an old run that was recorded
+     * before the diagnostics were kept.
+     */
+    fun head(logs: String): String? = realLines(logs).firstOrNull()
+
+    /** Everything under the first line. */
+    fun body(logs: String): List<String> = realLines(logs).drop(1)
 }

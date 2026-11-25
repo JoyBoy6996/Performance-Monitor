@@ -2,6 +2,7 @@ package com.framescope.monitor.metrics
 
 import android.content.Context
 import com.framescope.monitor.core.AppSettings
+import com.framescope.monitor.core.CpuGroupMetric
 import android.os.SystemClock
 import com.framescope.monitor.core.FpsState
 import com.framescope.monitor.core.LiveHistory
@@ -12,6 +13,7 @@ import com.framescope.monitor.core.SessionDeviceInfo
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.SystemMetric
+import com.framescope.monitor.core.telemetryModeLine
 import com.framescope.monitor.core.SystemMetrics
 import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.shell.AccessState
@@ -49,6 +51,34 @@ class MetricsEngine(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fpsSampler = FpsSampler(hub)
+
+    /**
+     * The readings the app takes by itself, without a privileged shell.
+     *
+     * They are the fallback, never the first choice: the shell answers the
+     * same questions better. But a phone without Shizuku still says what its
+     * chip is and how warm it is, and a run that knows nothing is worse than
+     * a run that knows what it could read.
+     */
+    private var basicCollector: BasicCollector? = null
+
+    /**
+     * The collector of the app's own readings.
+     *
+     * It is built when the context of the app is known, and kept for the
+     * rest of the life of the engine.
+     */
+    private fun basicCollector(): BasicCollector? {
+        basicCollector?.let { return it }
+        val ctx = androidContext ?: return null
+        return BasicCollector(ctx).also { basicCollector = it }
+    }
+
+    /** What the device is, read once when a run starts. */
+    private var basicStart: BasicCollector.SessionStart? = null
+
+    /** The readings of the last tick of the app's own collector. */
+    private var basicSample: BasicCollector.Sample? = null
 
     /** The last app that was measured, for the diagnostics. */
     val lastMeasuredPackage: StateFlow<String?> get() = fpsSampler.lastMeasuredPackage
@@ -314,6 +344,11 @@ class MetricsEngine(
                     },
                     sources = PRIVILEGED_METRICS.associateWith { "privileged shell" }
                 )
+                // Without the shell the app still reads what it may read by
+                // itself: the clock of the processor, the temperature of the
+                // chip and the platform of the device. The reading that could
+                // not be made stays missing.
+                basicSample = runCatching { basicCollector()?.sample() }.getOrNull()
             }
             publishSystem()
             val elapsedMs = (System.nanoTime() - started) / 1_000_000L
@@ -396,11 +431,13 @@ class MetricsEngine(
             availability[SystemMetric.CPU_PERCENT] = MetricAvailability.AVAILABLE
             sources[SystemMetric.CPU_PERCENT] = "CPU counter (app read or privileged shell)"
         }
+        val basic = basicSample
+        val basicStart = basicStart
         val merged = SystemMetrics(
-            cpuPercent = cpuPercent,
-            cpuFreqMHz = privileged.cpuFreqMHz,
+            cpuPercent = cpuPercent ?: basic?.cpuPercent,
+            cpuFreqMHz = privileged.cpuFreqMHz ?: basic?.cpuFreqMhz,
             gpuName = privileged.gpuName,
-            gpuFreqMHz = privileged.gpuFreqMHz,
+            gpuFreqMHz = privileged.gpuFreqMHz ?: basic?.gpuClockMhz,
             batteryLevel = native.batteryLevel,
             batteryTempC = native.batteryTempC,
             powerWatts = native.powerWatts,
@@ -410,17 +447,17 @@ class MetricsEngine(
             batteryCurrentMa = native.batteryCurrentMa,
             batteryVoltageMv = native.batteryVoltageMv,
             batteryCycles = native.batteryCycles,
-            thermalMaxC = privileged.thermalMaxC,
-            cpuTempC = privileged.cpuTempC,
-            gpuPercent = privileged.gpuPercent,
-            cpuGroups = privileged.cpuGroups,
-            cpuCoreLoadPct = privileged.cpuCoreLoadPct,
-            cpuCoreFreqMHz = privileged.cpuCoreFreqMHz,
+            thermalMaxC = privileged.thermalMaxC ?: basic?.cpuTempC,
+            cpuTempC = privileged.cpuTempC ?: basic?.cpuTempC,
+            gpuPercent = privileged.gpuPercent ?: basic?.gpuPercent,
+            cpuGroups = privileged.cpuGroups.ifEmpty { basicCpuGroups(basic, basicStart) },
+            cpuCoreLoadPct = privileged.cpuCoreLoadPct.ifEmpty { basic?.perCoreLoadPct.orEmpty() },
+            cpuCoreFreqMHz = privileged.cpuCoreFreqMHz.ifEmpty { basic?.perCoreFreqMhz.orEmpty() },
             ddrFreqMHz = privileged.ddrFreqMHz,
             threadLoads = privileged.threadLoads,
             thermalStatus = privileged.thermalStatus,
-            platform = privileged.platform,
-            performanceProfile = privileged.performanceProfile,
+            platform = privileged.platform ?: basicStart?.platform,
+            performanceProfile = privileged.performanceProfile ?: basicStart?.profile,
             telemetryDetail = privileged.telemetryDetail,
             telemetryRaw = privileged.telemetryRaw,
             refreshHz = native.refreshHz,
@@ -456,6 +493,28 @@ class MetricsEngine(
         _liveHistory.value = historyBuffer.snapshot()
     }
 
+    /**
+     * The clusters of the processor, as the app read them itself.
+     *
+     * The names are the same as the ones of the privileged shell, so a run
+     * measured in the basic mode and a run measured with the shell show the
+     * same chart.
+     */
+    private fun basicCpuGroups(
+        sample: BasicCollector.Sample?,
+        start: BasicCollector.SessionStart?
+    ): List<CpuGroupMetric> {
+        val clusters = start?.clusters.orEmpty()
+        if (clusters.isEmpty()) return emptyList()
+        return clusters.mapIndexed { index, cluster ->
+            CpuGroupMetric(
+                name = cluster.name,
+                percent = sample?.clusterLoadPct?.getOrNull(index),
+                freqMHz = sample?.clusterFreqMhz?.getOrNull(index)
+            )
+        }
+    }
+
     /** Where the foreground answer came from, in words a user can read. */
     fun foregroundSourceName(): String = when (fpsSampler.foregroundSource) {
         ForegroundDetector.Source.PRIVILEGED -> "privileged window manager"
@@ -477,10 +536,13 @@ class MetricsEngine(
             .replace(Regex("^vivo\\s+", RegexOption.IGNORE_CASE), "")
             .takeIf { it.isNotBlank() }
         // Build.HARDWARE is a compile-time guess ("qcom"). The chip platform comes
-        // only from getprop ro.board.platform on the privileged Shizuku shell.
+        // from getprop ro.board.platform on the privileged Shizuku shell, and from
+        // the same property read by the app itself when there is no shell.
         val kernelPlatform = _system.value.platform
         val platform = kernelPlatform?.takeIf { it.isNotBlank() }?.uppercase()
+            ?: basicStart?.platform
         val profile = _system.value.performanceProfile?.takeIf { it.isNotBlank() }
+            ?: basicStart?.profile
         val metrics = android.util.DisplayMetrics()
         runCatching {
             val manager = ctx.getSystemService(Context.WINDOW_SERVICE)
@@ -502,6 +564,10 @@ class MetricsEngine(
 
     fun startRecording() {
         if (_recording.value) return
+        // What the device is, read at the moment the run starts. The shell
+        // answers this better, but a run without Shizuku still knows the
+        // platform of its chip and the clusters of its processor.
+        basicStart = runCatching { basicCollector()?.sessionStart() }.getOrNull()
         // The Record button is tapped inside FrameScope, so the foreground app at
         // that moment is FrameScope, not the game the run belongs to. The sampler
         // remembers the last real game while FrameScope is in front; use it for
@@ -598,15 +664,35 @@ class MetricsEngine(
     }
 
     /**
-     * Identity line captured the moment Record was pressed.
+     * The lines that were captured the moment Record was pressed.
      *
-     * When the shell has not answered yet there is no identity line. An empty
-     * line says that; a line full of "--" pretends to be a reading, and a
-     * report that shows placeholders looks like a report that was measured.
+     * The first line always says how the run was measured: the privileged
+     * shell answered, or the app read what it could by itself. A run that
+     * says nothing was captured looks like a run that was not measured, and
+     * it was.
      */
-    private fun telemetryHeaderLine(): String {
+    private fun telemetryHeaderLine(): String = buildString {
+        appendLine(currentModeLine())
         val detail = _system.value.telemetryDetail.trim()
-        return if (ShellLogs.isRealIdentity(detail)) detail else ""
+        if (ShellLogs.isRealIdentity(detail)) appendLine(detail)
+    }.trim()
+
+    /**
+     * The line that says which of the two ways the run was measured.
+     *
+     * The privileged shell reads the hardware as the device itself reads it.
+     * Without it the app reads what the system lets it read, and the line
+     * says so instead of leaving a gap.
+     */
+    private fun currentModeLine(): String {
+        val status = hub.status.value
+        val shizuku = status.state == AccessState.READY && status.shellSource == "Shizuku"
+        val start = basicStart
+        return telemetryModeLine(
+            shizukuActive = shizuku,
+            platform = start?.platform,
+            clusters = start?.clusters?.map { it.name }.orEmpty()
+        )
     }
 
     /**

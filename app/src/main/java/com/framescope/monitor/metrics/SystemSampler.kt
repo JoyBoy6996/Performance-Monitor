@@ -307,8 +307,15 @@ class SystemSampler(private val hub: ShellHub) {
         }
     }
 
+    /**
+     * The name of a cluster of cores.
+     *
+     * A single core is "CPU 7" and a range is "CPU 0~1". The name of the
+     * app's own collector is the same, so a run measured with the shell and a
+     * run measured without it show the same chart.
+     */
     private fun groupLabel(cores: List<Int>): String = if (cores.size == 1) {
-        "CPU${cores.first()}"
+        "CPU ${cores.first()}"
     } else {
         "CPU ${cores.first()}~${cores.last()}"
     }

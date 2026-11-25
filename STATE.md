@@ -517,3 +517,41 @@ phone without Shizuku runs into first.
 - The temperature of the chart keeps the seconds of the run, the chart draws a
   gap where a second had no reading, and the footer tells the real maximum,
   minimum and average of the curve.
+
+## 1.2.15 - the readings that were not readings
+
+The third pass over the collector. It found five places where the app could
+show a number that was not a reading, or hide a reading that it had.
+
+### The battery is not the chip
+
+- The chart of the frame rate may fall back to the battery of an old run that
+  stored nothing else. The warning about a hot chip and the mean of the
+  processor may not, and they were taking the very same series: a phone whose
+  chip never reported a temperature would show the warning "Soc temperature
+  too high" because the battery was warm. The app and the report now use the
+  chip alone for both, and they say the same thing about the same run.
+- The temperature of the battery now keeps the seconds of the run. It was
+  shorter than the run, so the battery of an old run stood in for the chip on
+  the wrong second.
+
+### The load of a core needs the two ends of its clock
+
+- The load of a core is the place of its clock between its lowest and its
+  highest clock. Without the two ends there is no place, and the reading was
+  a hundred percent - a reading that was never made.
+
+### The load of the graphics unit
+
+- The kernel publishes the busy share of the graphics unit on some devices and
+  the busy time against the total time on others. The app read only the
+  second shape and needed both numbers at once, so a device that publishes
+  the busy share alone had no load of the graphics unit at all. It reads the
+  ready share, the Mali utilisation and both shapes of the busy time now.
+
+### The clusters are matched by their name
+
+- The shell sorts the clusters by their clock and the app keeps them in the
+  order of the cores, so the two lists are not in the same order. They were
+  matched by their place, and a cluster could show the reading of another
+  one. They are matched by their name now.

@@ -58,6 +58,7 @@ import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.chartTemperatures
+import com.framescope.monitor.core.chipTemperatureSeries
 import com.framescope.monitor.core.hardwareCharts
 import com.framescope.monitor.core.frameTimeCeiling
 import com.framescope.monitor.core.plausibleTempC
@@ -143,16 +144,30 @@ private fun sColumns(values: List<List<Float?>>, index: Int): List<Float> =
 private fun List<Float>.avgOrNull(): Float? =
     if (isEmpty()) null else average().toFloat().finiteOrNull()
 
-/** Chip/SoC sensor, 0..110 °C. Battery skin temperature is never used here. */
+/**
+ * Chip/SoC sensor, 0..110 °C. Battery skin temperature is never used here.
+ *
+ * The list has one value for every second of the run, so the line of the
+ * temperature sits above the line of the frame rate at the same second. A
+ * second without a reading is a gap and not a drop to zero.
+ */
 private fun socTemps(session: SessionRecord): List<Float> =
-    session.chartTemperatures().mapNotNull { it.plausibleTempC(110f) }
+    session.chartTemperatures().map { it.takeIf { value -> value.isFinite() && value > 0f && value <= 110f } ?: Float.NaN }
+
+/**
+ * The temperature of the chip, on every second of the run.
+ *
+ * The battery is never part of it, and a second without a reading is a gap.
+ */
+private fun chipTempSeries(session: SessionRecord): List<Float> =
+    session.chipTemperatureSeries().map { it.takeIf { value -> value.isFinite() && value > 0f && value <= 110f } ?: Float.NaN }
 
 private fun batteryTemps(session: SessionRecord): List<Float> =
     session.batteryTempSeries.mapNotNull { it.plausibleTempC(MAX_BATTERY_TEMP_C) }
 
 /** Mean chip temperature; an old run may only have the recorded session peak. */
 private fun avgSocTemp(session: SessionRecord): Float? =
-    socTemps(session).avgOrNull()
+    socTemps(session).mapNotNull { it.finiteOrNull() }.avgOrNull()
         ?: session.maxTempC?.plausibleTempC(110f)
 
 /** Peak BatteryManager reading; a legacy run may only carry the session peak. */
@@ -161,7 +176,10 @@ private fun maxBatteryTemp(session: SessionRecord): Float? =
         ?: session.maxTempC?.plausibleTempC(MAX_BATTERY_TEMP_C)
 
 private fun peakSoc(session: SessionRecord): Float? =
-    listOfNotNull(session.maxTempC, socTemps(session).maxOrNull())
+    listOfNotNull(
+        session.maxTempC,
+        socTemps(session).mapNotNull { it.finiteOrNull() }.maxOrNull()
+    )
         .mapNotNull { it.plausibleTempC(110f) }
         .maxOrNull()
 
@@ -259,29 +277,46 @@ private fun SceneLineChart(
                 drawLine(Scene.border, Offset(x, 0f), Offset(x, bottom), 1f)
             }
             lines.forEach { line ->
-                val values = line.values.mapNotNull { it.finiteOrNull() }
-                if (values.size < 2) return@forEach
+                // The x of a reading is the moment it was taken. A second
+                // without a reading is a gap in the line and not a point that
+                // pulls the rest of the run to the left.
+                val values = line.values
+                if (values.count { it.finiteOrNull() != null } < 2) return@forEach
                 val span = (line.max - line.min).takeIf { it > 0f } ?: 1f
-                val step = size.width / (values.size - 1)
+                val step = size.width / (values.size - 1).coerceAtLeast(1)
                 // Zero at the bottom, maximum at the top for every line.
                 fun yOf(value: Float): Float =
                     bottom - ((value - line.min) / span).coerceIn(0f, 1f) * bottom
                 if (line.spikes) {
                     values.forEachIndexed { index, value ->
+                        val real = value.finiteOrNull() ?: return@forEachIndexed
                         val x = index * step
                         drawLine(
-                            line.color, Offset(x, bottom), Offset(x, yOf(value)),
+                            line.color, Offset(x, bottom), Offset(x, yOf(real)),
                             line.strokeWidth
                         )
                     }
                 } else {
-                    val path = Path().apply {
-                        moveTo(0f, yOf(values.first()))
-                        values.forEachIndexed { index, value ->
-                            if (index > 0) lineTo(index * step, yOf(value))
+                    val path = Path()
+                    var started = false
+                    values.forEachIndexed { index, value ->
+                        val real = value.finiteOrNull()
+                        if (real == null) {
+                            // The line starts again after the gap.
+                            started = false
+                            return@forEachIndexed
+                        }
+                        val x = index * step
+                        if (!started) {
+                            path.moveTo(x, yOf(real))
+                            started = true
+                        } else {
+                            path.lineTo(x, yOf(real))
                         }
                     }
-                    drawPath(path, line.color, style = Stroke(width = line.strokeWidth))
+                    if (started) {
+                        drawPath(path, line.color, style = Stroke(width = line.strokeWidth))
+                    }
                 }
             }
         }
@@ -388,7 +423,8 @@ fun SceneSessionCards(
     threshold: Int,
     onUpdateNote: (String) -> Unit
 ) {
-    val temps = socTemps(session)
+    // The temperature of the chip: the battery is never part of it.
+    val temps = chipTempSeries(session)
     val peak = peakSoc(session)
     val secondsAbove90 = temps.count { it >= 90f }
     // The chip temperature, on the scale of its chart.
@@ -533,7 +569,7 @@ fun SceneSessionCards(
             val fpsLine = ChartLineUi(
                 sClamped(session.fpsSeries, 0f, fpsCeiling), Scene.fps, 0f, fpsCeiling
             )
-            val tempLine = ChartLineUi(chipTemps, Scene.temp, 0f, 110f)
+            val tempLine = ChartLineUi(socTemps(session), Scene.temp, 0f, 110f)
             val cpuLine = ChartLineUi(
                 sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f
             )
@@ -546,6 +582,7 @@ fun SceneSessionCards(
                 "CPU(%)" to Scene.total to cpuLine,
                 "GPU(%)" to Scene.gpu to gpuLine
             ).filter { it.second.values.count { value -> value.finiteOrNull() != null } >= 2 }
+            val tempValues = socTemps(session).mapNotNull { it.finiteOrNull() }
             SceneLineChart(
                 lines = drawn.map { it.second },
                 leftLabels = (5 downTo 0).map { sfmt(fpsCeiling * it / 5f, 0) },
@@ -556,9 +593,9 @@ fun SceneSessionCards(
                 Legend(*drawn.map { it.first }.toTypedArray())
             }
             Text(
-                "TEMP MAX: ${sfmt(chipTemps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${sfmt(chipTemps.minOrNull(), 1)}°C   " +
-                    "AVG: ${sfmt(chipTemps.avgOrNull(), 1)}°C",
+                "TEMP MAX: ${sfmt(tempValues.maxOrNull(), 1)}°C   " +
+                    "MIN: ${sfmt(tempValues.minOrNull(), 1)}°C   " +
+                    "AVG: ${sfmt(tempValues.avgOrNull(), 1)}°C",
                 style = tnumSmall, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -703,6 +740,7 @@ fun SceneSessionCards(
         SceneCard {
             Text("CPU Temperature(°C)", style = tnumBody.copy(fontWeight = FontWeight.Bold))
             Spacer(Modifier.height(8.dp))
+            val tempValues = temps.mapNotNull { it.finiteOrNull() }
             SceneLineChart(
                 lines = listOf(
                     ChartLineUi(temps.map { it.coerceIn(0f, 110f) }, Scene.chipTemp, 0f, 110f)
@@ -712,9 +750,9 @@ fun SceneSessionCards(
                 height = 150.dp
             )
             Text(
-                "MAX: ${sfmt(temps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${sfmt(temps.minOrNull(), 1)}°C   " +
-                    "AVG: ${sfmt(temps.avgOrNull(), 1)}°C",
+                "MAX: ${sfmt(tempValues.maxOrNull(), 1)}°C   " +
+                    "MIN: ${sfmt(tempValues.minOrNull(), 1)}°C   " +
+                    "AVG: ${sfmt(tempValues.avgOrNull(), 1)}°C",
                 style = tnumSmall, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -804,12 +842,15 @@ private fun ShellLogsCard(session: SessionRecord) {
     val details = ShellLogs.body(session.shellLogs)
     Column {
         Row(
-            Modifier.fillMaxWidth().clickable { expanded = !expanded },
+            Modifier.fillMaxWidth().clickable(enabled = details.isNotEmpty()) { expanded = !expanded },
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Shell Logs", style = tnumBody.copy(fontWeight = FontWeight.Bold))
-            Text(if (expanded) "Hide" else "Expand", style = tnumSmall, color = Scene.blue)
+            // A button that opens nothing is a button that does nothing.
+            if (details.isNotEmpty()) {
+                Text(if (expanded) "Hide" else "Expand", style = tnumSmall, color = Scene.blue)
+            }
         }
         Spacer(Modifier.height(8.dp))
         if (head != null) {

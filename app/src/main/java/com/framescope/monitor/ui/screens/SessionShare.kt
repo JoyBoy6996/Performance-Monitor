@@ -27,6 +27,7 @@ import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.chartTemperatures
+import com.framescope.monitor.core.chipTemperatureSeries
 import com.framescope.monitor.core.chipTemperatures
 import com.framescope.monitor.core.frameTimeCeiling
 import com.framescope.monitor.core.hardwareCharts
@@ -96,7 +97,7 @@ private fun temperatureSeries(session: SessionRecord): List<Float> =
  * stored nothing else.
  */
 private fun chartTemperatureSeries(session: SessionRecord): List<Float> =
-    session.chartTemperatures().hotspot()
+    session.chartTemperatures()
 
 private fun batteryTemperatureSeries(session: SessionRecord): List<Float> =
     session.batteryTempSeries.battery()
@@ -532,10 +533,14 @@ private class SceneReportRenderer(
         }
 
         lines.forEach { line ->
-            val values = line.values.clean()
-            if (values.size < 2) return@forEach
+            // The x of a reading is the moment it was taken. A second without
+            // a reading is a gap in the line and not a point that pulls the
+            // rest of the run to the left, so the temperature sits above the
+            // frame rate at the same second.
+            val values = line.values
+            if (values.count { it.finiteOrNull() != null } < 2) return@forEach
             val span = (line.max - line.min).takeIf { it > 0f } ?: 1f
-            val step = (plotRight - plotLeft) / (values.size - 1)
+            val step = (plotRight - plotLeft) / (values.size - 1).coerceAtLeast(1)
             fun yOf(value: Float): Float = if (line.temperature) {
                 // Exact Card 5 / Card 10 temperature mapping, 0..110 °C.
                 chartBottom - ((value.coerceIn(0f, TEMP_MAX_C) / TEMP_MAX_C) * chartHeight)
@@ -546,18 +551,27 @@ private class SceneReportRenderer(
             linePaint.strokeWidth = line.width
             if (line.spikes) {
                 values.forEachIndexed { index, value ->
+                    val real = value.finiteOrNull() ?: return@forEachIndexed
                     val x = plotLeft + step * index
-                    canvas.drawLine(x, chartBottom, x, yOf(value), linePaint)
+                    canvas.drawLine(x, chartBottom, x, yOf(real), linePaint)
                 }
             } else {
-                var previousX = plotLeft
-                var previousY = yOf(values.first())
-                for (index in 1 until values.size) {
+                var previousX = 0f
+                var previousY = 0f
+                var started = false
+                values.forEachIndexed { index, value ->
+                    val real = value.finiteOrNull()
+                    if (real == null) {
+                        // The line starts again after the gap.
+                        started = false
+                        return@forEachIndexed
+                    }
                     val x = plotLeft + step * index
-                    val y = yOf(values[index])
-                    canvas.drawLine(previousX, previousY, x, y, linePaint)
+                    val y = yOf(real)
+                    if (started) canvas.drawLine(previousX, previousY, x, y, linePaint)
                     previousX = x
                     previousY = y
+                    started = true
                 }
             }
         }
@@ -620,6 +634,7 @@ private class SceneReportRenderer(
             val fpsCeil = (session.fpsSeries.positive().maxOrNull() ?: 120f)
                 .let { if (it > 130f) 144f else 120f }
             val temps = chartTemperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
+            val tempValues = temps.mapNotNull { it.finiteOrNull() }
             val chartTop = y0 + 44f
             val chartBottom = y1 - 142f
             // A line without readings is not drawn and is not named in the
@@ -652,9 +667,9 @@ private class SceneReportRenderer(
                 )
             }
             centered(
-                "TEMP MAX: ${fmt(temps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${fmt(temps.minOrNull(), 1)}°C   " +
-                    "AVG: ${fmt(temps.avgOrNull(), 1)}°C",
+                "TEMP MAX: ${fmt(tempValues.maxOrNull(), 1)}°C   " +
+                    "MIN: ${fmt(tempValues.minOrNull(), 1)}°C   " +
+                    "AVG: ${fmt(tempValues.avgOrNull(), 1)}°C",
                 x0, x1, y1 - 24f, body
             )
         }
@@ -776,7 +791,10 @@ private class SceneReportRenderer(
     fun cpuTemperature(session: SessionRecord) {
         card { x0, y0, x1, y1 ->
             text("CPU Temperature(°C)", x0, y0, header)
-            val temps = temperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
+            // The chip alone: the battery is never the temperature of the
+            // processor.
+            val temps = session.chipTemperatureSeries().map { it.coerceIn(0f, TEMP_MAX_C) }
+            val tempValues = temps.mapNotNull { it.finiteOrNull() }
             val chartTop = y0 + 44f
             val chartBottom = y1 - 86f
             drawChart(
@@ -789,9 +807,9 @@ private class SceneReportRenderer(
             )
             drawTimeTicks(x0, chartBottom + 34f, x1, emptyList(), timeLabels(session))
             centered(
-                "MAX: ${fmt(temps.maxOrNull(), 1)}°C   " +
-                    "MIN: ${fmt(temps.minOrNull(), 1)}°C   " +
-                    "AVG: ${fmt(temps.avgOrNull(), 1)}°C",
+                "MAX: ${fmt(tempValues.maxOrNull(), 1)}°C   " +
+                    "MIN: ${fmt(tempValues.minOrNull(), 1)}°C   " +
+                    "AVG: ${fmt(tempValues.avgOrNull(), 1)}°C",
                 x0, x1, y1 - 16f, body
             )
         }

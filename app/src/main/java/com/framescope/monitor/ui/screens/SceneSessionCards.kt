@@ -59,7 +59,9 @@ import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.chartTemperatures
 import com.framescope.monitor.core.chipTemperatureSeries
+import com.framescope.monitor.core.columnWithGaps
 import com.framescope.monitor.core.hardwareCharts
+import com.framescope.monitor.core.loadWithGaps
 import com.framescope.monitor.core.frameTimeCeiling
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.theme.MonoInline
@@ -138,8 +140,15 @@ private fun sPositive(values: List<Float>): List<Float> =
 private fun sClamped(values: List<Float>, min: Float, max: Float): List<Float> =
     values.mapNotNull { it.finiteOrNull() }.map { it.coerceIn(min, max) }
 
+/**
+ * The values of one cluster or one core, second by second.
+ *
+ * The rows are the clusters and the cores, and the values of one of them are
+ * the seconds of the run. Taking the index-th second of every row would be a
+ * column of the wrong axis.
+ */
 private fun sColumns(values: List<List<Float?>>, index: Int): List<Float> =
-    values.mapNotNull { it.getOrNull(index)?.finiteOrNull() }
+    values.getOrNull(index)?.mapNotNull { it?.finiteOrNull() } ?: emptyList()
 
 private fun List<Float>.avgOrNull(): Float? =
     if (isEmpty()) null else average().toFloat().finiteOrNull()
@@ -581,11 +590,13 @@ fun SceneSessionCards(
                 sClamped(session.fpsSeries, 0f, fpsCeiling), Scene.fps, 0f, fpsCeiling
             )
             val tempLine = ChartLineUi(socTemps(session), Scene.temp, 0f, 110f)
+            // A second without a reading is a gap in the line and not a dip
+            // to zero: the load of the processor is never at a zero percent.
             val cpuLine = ChartLineUi(
-                sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f
+                session.cpuSeries.loadWithGaps(), Scene.total, 0f, 100f
             )
             val gpuLine = ChartLineUi(
-                sClamped(session.gpuPercentSeries, 0f, 100f), Scene.gpu, 0f, 100f
+                session.gpuPercentSeries.loadWithGaps(), Scene.gpu, 0f, 100f
             )
             val drawn = listOf(
                 "FPS" to Scene.fps to fpsLine,
@@ -653,13 +664,13 @@ fun SceneSessionCards(
             Spacer(Modifier.height(8.dp))
             val groupLines = session.cpuGroupNames.mapIndexed { index, _ ->
                 ChartLineUi(
-                    sClamped(sColumns(session.cpuGroupSeries, index), 0f, 100f),
+                    session.cpuGroupSeries.columnWithGaps(index),
                     Scene.cluster[index % Scene.cluster.size], 0f, 100f
                 )
             }
             SceneLineChart(
                 lines = listOf(
-                    ChartLineUi(sClamped(session.cpuSeries, 0f, 100f), Scene.total, 0f, 100f)
+                    ChartLineUi(session.cpuSeries.loadWithGaps(), Scene.total, 0f, 100f)
                 ) + groupLines,
                 leftLabels = listOf("100", "80", "60", "40", "20", "0"),
                 timeLabels = timeTicks(session)
@@ -689,12 +700,12 @@ fun SceneSessionCards(
             ).ifEmpty { sPositive(session.cpuFreqSeries) }
             val ceiling = maxOf(4000f, (allFreq.maxOrNull() ?: 0f) * 1.05f)
             val groupLines = if (session.cpuGroupNames.isEmpty()) {
-                listOf(ChartLineUi(sClamped(session.cpuFreqSeries, 0f, ceiling),
+                listOf(ChartLineUi(session.cpuFreqSeries.loadWithGaps(),
                     Scene.cluster[0], 0f, ceiling))
             } else {
                 session.cpuGroupNames.mapIndexed { index, _ ->
                     ChartLineUi(
-                        sClamped(sColumns(session.cpuGroupFreqSeries, index), 0f, ceiling),
+                        session.cpuGroupFreqSeries.columnWithGaps(index),
                         Scene.cluster[index % Scene.cluster.size], 0f, ceiling
                     )
                 }

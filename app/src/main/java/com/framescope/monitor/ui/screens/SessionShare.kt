@@ -30,7 +30,9 @@ import com.framescope.monitor.core.chartTemperatures
 import com.framescope.monitor.core.chipTemperatureSeries
 import com.framescope.monitor.core.chipTemperatures
 import com.framescope.monitor.core.frameTimeCeiling
+import com.framescope.monitor.core.columnWithGaps
 import com.framescope.monitor.core.hardwareCharts
+import com.framescope.monitor.core.loadWithGaps
 import com.framescope.monitor.core.plausibleTempC
 import java.io.File
 import java.io.FileOutputStream
@@ -55,11 +57,18 @@ private fun List<Float>.clamped(min: Float, max: Float): List<Float> =
 private fun List<Float>.avgOrNull(): Float? =
     clean().takeIf { it.isNotEmpty() }?.average()?.toFloat()
 
+/**
+ * The values of one cluster or one core, second by second.
+ *
+ * The rows are the clusters and the cores, and the values of one of them are
+ * the seconds of the run. Taking the index-th second of every row would be a
+ * column of the wrong axis.
+ */
 private fun column(rows: List<List<Float?>>, index: Int): List<Float> =
-    rows.mapNotNull { it.getOrNull(index)?.finiteOrNull() }
+    rows.getOrNull(index)?.mapNotNull { it?.finiteOrNull() } ?: emptyList()
 
 private fun intColumn(rows: List<List<Int?>>, index: Int): List<Float> =
-    rows.mapNotNull { it.getOrNull(index)?.toFloat()?.finiteOrNull() }
+    rows.getOrNull(index)?.mapNotNull { it?.toFloat()?.finiteOrNull() } ?: emptyList()
 
 private fun duration(ms: Long): String {
     val total = ms / 1000
@@ -223,7 +232,7 @@ private fun cardHeights(session: SessionRecord): List<Float> = buildList {
 
 
 /** One continuous page: no split cards, no empty pages, no watermark. */
-private fun reportHeight(session: SessionRecord): Int {
+internal fun reportHeight(session: SessionRecord): Int {
     val heights = cardHeights(session)
     return (heights.sum() + GAP * (heights.size - 1) + TOP_MARGIN + BOTTOM_MARGIN).toInt()
 }
@@ -647,10 +656,10 @@ private class SceneReportRenderer(
                     ChartLine("TEMP(°C)", temps, ReportTheme.temp, 0f, TEMP_MAX_C,
                         temperature = true),
                 Pair("CPU(%)", ReportTheme.cpu) to
-                    ChartLine("CPU(%)", session.cpuSeries.clamped(0f, 100f),
+                    ChartLine("CPU(%)", session.cpuSeries.loadWithGaps(),
                         ReportTheme.cpu, 0f, 100f),
                 Pair("GPU(%)", ReportTheme.gpu) to
-                    ChartLine("GPU(%)", session.gpuPercentSeries.clamped(0f, 100f),
+                    ChartLine("GPU(%)", session.gpuPercentSeries.loadWithGaps(),
                         ReportTheme.gpu, 0f, 100f)
             ).filter { it.second.values.clean().size >= 2 }
             drawChart(
@@ -703,13 +712,13 @@ private class SceneReportRenderer(
             text("CPU Usage(%)", x0, y0, header)
             chartOptions(x1, y0)
             val lines = mutableListOf(
-                ChartLine("Total", session.cpuSeries.clamped(0f, 100f),
+                ChartLine("Total", session.cpuSeries.loadWithGaps(),
                     ReportTheme.total, 0f, 100f)
             )
             session.cpuGroupNames.forEachIndexed { index, name ->
                 lines.add(
                     ChartLine(
-                        name, column(session.cpuGroupSeries, index).clamped(0f, 100f),
+                        name, session.cpuGroupSeries.columnWithGaps(index),
                         ReportTheme.cluster[index % ReportTheme.cluster.size], 0f, 100f
                     )
                 )
@@ -733,7 +742,7 @@ private class SceneReportRenderer(
                 ChartLine(
                     name,
                     if (session.cpuGroupNames.isEmpty()) emptyList()
-                    else column(session.cpuGroupFreqSeries, index).positive(),
+                    else session.cpuGroupFreqSeries.columnWithGaps(index),
                     ReportTheme.cluster[index % ReportTheme.cluster.size], 0f, ceiling
                 )
             }
@@ -913,7 +922,7 @@ private class SceneReportRenderer(
     }
 }
 
-private fun renderReport(context: Context, session: SessionRecord, canvas: Canvas) {
+internal fun renderReport(context: Context, session: SessionRecord, canvas: Canvas) {
     val report = SceneReportRenderer(context, canvas, session)
     report.start()
     report.thermalStatus(peakSoc(session), temperatureSeries(session).count { it >= 90f })
@@ -951,7 +960,7 @@ private fun buildPdf(
     }
 }
 
-private fun buildImage(context: Context, session: SessionRecord): Bitmap {
+internal fun buildImage(context: Context, session: SessionRecord): Bitmap {
     val bitmap = Bitmap.createBitmap(PAGE_W, reportHeight(session), Bitmap.Config.ARGB_8888)
     renderReport(context, session, Canvas(bitmap))
     return bitmap

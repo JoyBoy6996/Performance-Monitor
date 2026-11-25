@@ -33,12 +33,37 @@ data class HardwareCharts(
  * of them, and the charts are left out instead of being drawn empty.
  */
 fun SessionRecord.hardwareCharts(): HardwareCharts = HardwareCharts(
-    cpuUsage = cpuSeries.count { it.finiteOrNull() != null } >= 2 ||
-        cpuGroupSeries.any { row -> row.any { it?.finiteOrNull() != null } },
-    cpuFrequency = cpuFreqSeries.count { it.finiteOrNull() != null } >= 2 ||
-        cpuGroupFreqSeries.any { row -> row.any { it?.finiteOrNull() != null } },
+    // A zero of the load of the processor is not a reading: the processor is
+    // never at a zero percent. A second without a reading is stored as a
+    // zero, and a chart of zeros is not a chart.
+    cpuUsage = cpuSeries.count { (it.finiteOrNull() ?: 0f) > 0f } >= 2 ||
+        cpuGroupSeries.any { row -> row.any { (it ?: 0f) > 0f } },
+    cpuFrequency = cpuFreqSeries.count { (it.finiteOrNull() ?: 0f) > 0f } >= 2 ||
+        cpuGroupFreqSeries.any { row -> row.any { (it ?: 0f) > 0f } },
     // The card of the CPU temperature shows the chip, so it needs a reading of
     // the chip. The chart of the frame rate may fall back to the battery of an
     // old run; the card of the processor may not.
     cpuTemperature = chipTemperatureSeries().count { it.finiteOrNull() != null } >= 2
 )
+
+/**
+ * The values of a load, with the seconds without a reading as gaps.
+ *
+ * A second without a reading is stored as a zero, and a zero of the load of
+ * the processor is not a reading. A line would show a dip that never
+ * happened, so the seconds without a reading are gaps instead.
+ */
+fun List<Float>.loadWithGaps(): List<Float> =
+    map { value -> if (value.isFinite() && value > 0f) value else Float.NaN }
+
+/**
+ * The values of one cluster, with the seconds without a reading as gaps.
+ *
+ * The rows are the clusters, and the values of one of them are the seconds of
+ * the run. The list keeps one value for every second, so the line of the
+ * cluster sits above the line of the total at the same second.
+ */
+fun List<List<Float?>>.columnWithGaps(index: Int): List<Float> =
+    getOrNull(index)?.map { value ->
+        value?.takeIf { it.isFinite() && it > 0f } ?: Float.NaN
+    } ?: emptyList()

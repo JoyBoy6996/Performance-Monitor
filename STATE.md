@@ -416,3 +416,63 @@ have a shell it can read the hardware with.
   Shizuku is an alternative, not a requirement.
 - The crash is copied from the tools, and an app that has no name of its own
   gets one that a person can read.
+
+## 1.2.13 - the crash on the dashboard, and a run that says what it measured
+
+Three problems reached the app at once: the dashboard crashed while it drew,
+a run of BGMI on Android 16 had no platform and no shell output, and the
+report cut the top of its first card off.
+
+### The crash on the dashboard
+
+- The live readings are written on a background thread and read by the
+  dashboard while it draws. The buffer was walked and copied without a lock,
+  so the copy could see a slot that was being written - a reading that was
+  not there, and a `NullPointerException` on `LivePoint.getValue()`.
+- Every buffer now has one lock. The reader gets a copy that cannot change
+  under it, and the copy is handed to Compose as an immutable list.
+- The graph does not trust the buffer either: a missing reading and a
+  reading that is not a number are left out before the line is drawn. The
+  history is honest about the readings it does not have (`List<LivePoint?>`).
+
+### A run says how it was measured
+
+- The hardware collector is wired into the active 1000 ms loop of the
+  recorder, and it answers at the start of the run too: the platform of the
+  chip, the performance profile and the clusters of the processor.
+- It works with and without Shizuku. With the shell, the shell answers.
+  Without it, the app reads what the system lets it read: the platform
+  through the hidden `SystemProperties` API, the game mode of Vivo and iQOO
+  the same way, the clusters of the processor from `cpuinfo_max_freq`, the
+  clock of every core from `scaling_cur_freq`, the load of a core from the
+  place of its clock between its lowest and its highest, the temperature
+  from a thermal zone or from the headroom of the system next to the
+  temperature of the battery, and the graphics unit from `kgsl`.
+- A reading that could not be made stays missing. A zero would be a reading
+  that was never made.
+- Every run carries the line that says which of the two ways it was
+  measured - `Mode: Shizuku (uid=2000)` or
+  `Mode: Basic | Platform: SUN | Clusters: CPU 0~1, CPU 2~4, CPU 7` - and the
+  Shell Logs of a new run never says that nothing was captured.
+- The clusters are named the same way in both modes: `CPU 0~1` for a range
+  and `CPU 7` for a single core.
+
+### The report keeps its edges
+
+- The page starts 48 px below the top edge and ends 48 px above the bottom
+  one. The labels and the icons of the first card were cut off by the edge
+  of the paper.
+- The chart of the frame rate carries the temperature again, in orange, on
+  the right axis, and the footer tells the real maximum, minimum and
+  average of the curve.
+- The charts of the hardware are drawn when the run measured them. The app
+  and the report ask the same question now, so a run without counters shows
+  the same thing on the screen and on the paper.
+
+### What was checked
+
+- `ChartCore.asChartPoints`, `MonitorLive.livePointsOf` and the buffer
+  behind them are null-safe, and a test writes and reads the buffer at the
+  same time to prove that a snapshot never holds a missing reading.
+- The screen of the run, the scale of the frame time, the icon of BGMI and
+  the toggle for the empty charts are the ones of the last version.

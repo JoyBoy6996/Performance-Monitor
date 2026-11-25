@@ -26,7 +26,10 @@ import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.chartTemperatures
+import com.framescope.monitor.core.chipTemperatures
 import com.framescope.monitor.core.frameTimeCeiling
+import com.framescope.monitor.core.hardwareCharts
 import com.framescope.monitor.core.plausibleTempC
 import java.io.File
 import java.io.FileOutputStream
@@ -83,10 +86,17 @@ private fun timeLabels(session: SessionRecord): List<String> =
     (0..5).map { tick(session.durationMs * it / 5L) }
 
 /** Named CPU/SoC sensor, with honest legacy fallbacks. Battery skin never wins. */
-private fun temperatureSeries(session: SessionRecord): List<Float> = session.cpuTempSeries
-    .ifEmpty { session.socTempSeries }
-    .ifEmpty { session.tempSeries }
-    .hotspot()
+private fun temperatureSeries(session: SessionRecord): List<Float> =
+    session.chipTemperatures().hotspot()
+
+/**
+ * The temperature the chart of the frame rate draws.
+ *
+ * It is the temperature of the chip, and the battery of an old run that
+ * stored nothing else.
+ */
+private fun chartTemperatureSeries(session: SessionRecord): List<Float> =
+    session.chartTemperatures().hotspot()
 
 private fun batteryTemperatureSeries(session: SessionRecord): List<Float> =
     session.batteryTempSeries.battery()
@@ -114,7 +124,11 @@ private const val TEMP_MAX_C = 110f
 private const val PAGE_W = 1080
 // The report is 1080px wide, so one dp is three pixels: the outer margin is
 // 40px, the radius of a card is 12dp and the gap between two cards is 10dp.
+// The page keeps 48px above the first card and 48px below the last one, so
+// the top row of the device card is never cut off by the edge of the paper.
 private const val MARGIN = 40f
+private const val TOP_MARGIN = 48f
+private const val BOTTOM_MARGIN = 48f
 private const val PAD = 36f
 private const val GAP = 30f
 private const val RADIUS = 36f
@@ -195,32 +209,22 @@ private fun cardHeights(session: SessionRecord): List<Float> = buildList {
     add(600f)                 // 5 FPS & temperature
     add(520f)                 // 6 frame time
     // The charts of the hardware are only drawn when the run measured them.
-    // An empty chart is a box with nothing in it.
-    if (hasCpuUsage(session)) add(560f)          // 7 CPU usage
-    if (hasCpuFrequency(session)) add(600f)      // 8 CPU frequency
+    // An empty chart is a box with nothing in it, and the app and the report
+    // use the same answer.
+    val charts = session.hardwareCharts()
+    if (charts.cpuUsage) add(560f)           // 7 CPU usage
+    if (charts.cpuFrequency) add(600f)       // 8 CPU frequency
     add(520f)                 // 9 power & capacity
-    if (hasCpuTemperature(session)) add(520f)    // 10 CPU temperature
+    if (charts.cpuTemperature) add(520f)     // 10 CPU temperature
     add(detailHeight(session)) // 11 device detail + shell logs
 }
 
-/** True when the run really measured the load of the processor. */
-private fun hasCpuUsage(session: SessionRecord): Boolean =
-    session.cpuSeries.count { it.finiteOrNull() != null } >= 2 ||
-        session.cpuGroupSeries.any { row -> row.any { it?.finiteOrNull() != null } }
 
-/** True when the run really measured the clock of the processor. */
-private fun hasCpuFrequency(session: SessionRecord): Boolean =
-    session.cpuFreqSeries.count { it.finiteOrNull() != null } >= 2 ||
-        session.cpuGroupFreqSeries.any { row -> row.any { it?.finiteOrNull() != null } }
-
-/** True when the run really measured the temperature of the chip. */
-private fun hasCpuTemperature(session: SessionRecord): Boolean =
-    temperatureSeries(session).size >= 2
 
 /** One continuous page: no split cards, no empty pages, no watermark. */
 private fun reportHeight(session: SessionRecord): Int {
     val heights = cardHeights(session)
-    return (heights.sum() + GAP * (heights.size - 1) + MARGIN * 2f).toInt()
+    return (heights.sum() + GAP * (heights.size - 1) + TOP_MARGIN + BOTTOM_MARGIN).toInt()
 }
 
 /** Crisp vector glyphs, replacing solid squares in the device row. */
@@ -294,7 +298,7 @@ private class SceneReportRenderer(
 ) {
     private val heights = cardHeights(session)
     private var cardIndex = 0
-    private var cursor = MARGIN
+    private var cursor = TOP_MARGIN
 
     private fun paint(size: Float, style: Int, color: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = size
@@ -615,7 +619,7 @@ private class SceneReportRenderer(
             text("FPS & Temperature(°C)", x0, y0, header)
             val fpsCeil = (session.fpsSeries.positive().maxOrNull() ?: 120f)
                 .let { if (it > 130f) 144f else 120f }
-            val temps = temperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
+            val temps = chartTemperatureSeries(session).map { it.coerceIn(0f, TEMP_MAX_C) }
             val chartTop = y0 + 44f
             val chartBottom = y1 - 142f
             // A line without readings is not drawn and is not named in the
@@ -900,10 +904,11 @@ private fun renderReport(context: Context, session: SessionRecord, canvas: Canva
     report.sessionHeader(session)
     report.fpsTemperature(session)
     report.frameTime(session)
-    if (hasCpuUsage(session)) report.cpuUsage(session)
-    if (hasCpuFrequency(session)) report.cpuFrequency(session)
+    val charts = session.hardwareCharts()
+    if (charts.cpuUsage) report.cpuUsage(session)
+    if (charts.cpuFrequency) report.cpuFrequency(session)
     report.powerCapacity(session)
-    if (hasCpuTemperature(session)) report.cpuTemperature(session)
+    if (charts.cpuTemperature) report.cpuTemperature(session)
     report.hardwareDetail(session)
 }
 

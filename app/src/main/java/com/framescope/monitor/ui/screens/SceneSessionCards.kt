@@ -57,6 +57,8 @@ import com.framescope.monitor.core.MAX_BATTERY_TEMP_C
 import com.framescope.monitor.core.SessionRecord
 import com.framescope.monitor.core.ShellLogs
 import com.framescope.monitor.core.finiteOrNull
+import com.framescope.monitor.core.chartTemperatures
+import com.framescope.monitor.core.hardwareCharts
 import com.framescope.monitor.core.frameTimeCeiling
 import com.framescope.monitor.core.plausibleTempC
 import com.framescope.monitor.ui.theme.MonoInline
@@ -142,10 +144,8 @@ private fun List<Float>.avgOrNull(): Float? =
     if (isEmpty()) null else average().toFloat().finiteOrNull()
 
 /** Chip/SoC sensor, 0..110 °C. Battery skin temperature is never used here. */
-private fun socTemps(session: SessionRecord): List<Float> = session.cpuTempSeries
-    .ifEmpty { session.socTempSeries }
-    .ifEmpty { session.tempSeries }
-    .mapNotNull { it.plausibleTempC(110f) }
+private fun socTemps(session: SessionRecord): List<Float> =
+    session.chartTemperatures().mapNotNull { it.plausibleTempC(110f) }
 
 private fun batteryTemps(session: SessionRecord): List<Float> =
     session.batteryTempSeries.mapNotNull { it.plausibleTempC(MAX_BATTERY_TEMP_C) }
@@ -491,18 +491,13 @@ fun SceneSessionCards(
         // A chart without readings is an empty box. The charts of the
         // hardware are only drawn when the run really measured them, and the
         // ones that are missing are named in one line instead.
-        val cpuHasData = sPositive(session.cpuSeries).size >= 2 ||
-            session.cpuGroupSeries.any { row -> row.any { it?.finiteOrNull() != null } }
-        val freqHasData = sPositive(session.cpuFreqSeries).size >= 2 ||
-            session.cpuGroupFreqSeries.any { row ->
-                row.any { it?.finiteOrNull() != null }
-            }
-        val tempHasData = chipTemps.size >= 2
-        val missingCharts = listOfNotNull(
-            if (!cpuHasData) "CPU Usage" else null,
-            if (!freqHasData) "CPU Frequency" else null,
-            if (!tempHasData) "CPU Temperature" else null
-        )
+        // One answer for the app and for the report: which charts of the
+        // hardware this run really measured.
+        val charts = session.hardwareCharts()
+        val cpuHasData = charts.cpuUsage
+        val freqHasData = charts.cpuFrequency
+        val tempHasData = charts.cpuTemperature
+        val missingCharts = charts.missing
         var showEmptyCharts by remember(session.id) { mutableStateOf(false) }
         if (missingCharts.isNotEmpty()) {
             SceneCard {

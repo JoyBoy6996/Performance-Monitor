@@ -555,3 +555,36 @@ show a number that was not a reading, or hide a reading that it had.
   order of the cores, so the two lists are not in the same order. They were
   matched by their place, and a cluster could show the reading of another
   one. They are matched by their name now.
+
+## 1.2.16 - the report, drawn and looked at
+
+The fourth pass over the collector and the report. This one added a test that
+draws the page and reads its pixels, because a check that only reads the
+source cannot tell a drawn curve from a curve that was meant to be drawn.
+
+### The report is drawn, not assumed
+
+- The page is drawn with the real graphics of the system and read back: it is
+  one dark sheet of 1080 px, the paper above the first card is empty and the
+  card starts at the margin, the curve of the temperature is on the page, a
+  run without counters has no card of the load of the processor, and a note
+  adds its card.
+- The preview that comes with this version is that page, drawn from a run of
+  one minute.
+
+### A zero of the load is not a reading
+
+- A second without a reading is stored as a zero, and the processor is never
+  at a zero percent. The lines of the load and of the clock treated those
+  zeros as readings and drew a dip that never happened; the chart of the
+  hardware is not drawn at all when the run never measured it.
+- The line of a cluster keeps the seconds of the run, so it sits above the
+  line of the total at the same second instead of being stretched over the
+  whole width.
+
+### The platform of the chip on every device
+
+- The model of the chip exists since Android 12 and the app runs on Android
+  8 as well. It was read as a field, which throws on an old device instead
+  of answering. It is read by its name now, and the maker of the chip is the
+  answer before the model.

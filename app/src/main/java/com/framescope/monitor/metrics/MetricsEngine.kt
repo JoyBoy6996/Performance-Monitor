@@ -615,7 +615,8 @@ class MetricsEngine(
                 sessionLogger.adoptTelemetry(
                     detail = fresh.telemetryDetail,
                     platform = fresh.platform,
-                    profile = fresh.performanceProfile
+                    profile = fresh.performanceProfile,
+                    mode = currentModeLine()
                 )
             }
         }

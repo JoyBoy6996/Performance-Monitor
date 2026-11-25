@@ -252,9 +252,25 @@ class SessionLogger(private val store: SessionStore) {
      * no value is ever invented to fill the gap.
      */
     @Synchronized
-    fun adoptTelemetry(detail: String, platform: String?, profile: String?) {
+    fun adoptTelemetry(
+        detail: String,
+        platform: String?,
+        profile: String?,
+        mode: String = ""
+    ) {
         if (!isRecording) return
-        if (detail.isNotBlank()) initialShellLog = detail.trim()
+        if (detail.isNotBlank()) {
+            // The line that says how the run was measured stays the first line.
+            // The shell that answered later does not erase it, it only adds
+            // its own answer under it.
+            val first = initialShellLog.lineSequence()
+                .firstOrNull { it.startsWith("Mode:") }
+                .orEmpty()
+            val modeLine = mode.ifBlank { first }
+            initialShellLog = listOf(modeLine, detail.trim())
+                .filter { it.isNotBlank() }
+                .joinToString("\n")
+        }
         deviceInfo = deviceInfo.copy(
             platform = platform?.takeIf { it.isNotBlank() }?.uppercase(java.util.Locale.US)
                 ?: deviceInfo.platform,

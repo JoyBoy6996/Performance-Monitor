@@ -37,5 +37,8 @@ fun SessionRecord.hardwareCharts(): HardwareCharts = HardwareCharts(
         cpuGroupSeries.any { row -> row.any { it?.finiteOrNull() != null } },
     cpuFrequency = cpuFreqSeries.count { it.finiteOrNull() != null } >= 2 ||
         cpuGroupFreqSeries.any { row -> row.any { it?.finiteOrNull() != null } },
-    cpuTemperature = chartTemperatures().count { it.finiteOrNull() != null } >= 2
+    // The card of the CPU temperature shows the chip, so it needs a reading of
+    // the chip. The chart of the frame rate may fall back to the battery of an
+    // old run; the card of the processor may not.
+    cpuTemperature = chipTemperatureSeries().count { it.finiteOrNull() != null } >= 2
 )

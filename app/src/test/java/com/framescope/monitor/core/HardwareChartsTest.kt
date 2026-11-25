@@ -80,8 +80,11 @@ class HardwareChartsTest {
     fun `the temperature of the chart falls back to the battery of an old run`() {
         val old = session().copy(batteryTempSeries = listOf(31f, 32f, 33f))
 
-        assertTrue(old.hardwareCharts().cpuTemperature)
+        // The chart of the frame rate may use the battery of an old run...
         assertEquals(listOf(31f, 32f, 33f), old.chartTemperatures())
+        // ...but the card of the processor shows the chip, and the battery is
+        // not the chip.
+        assertFalse(old.hardwareCharts().cpuTemperature)
     }
 
     @Test

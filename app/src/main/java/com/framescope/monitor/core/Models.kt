@@ -390,14 +390,19 @@ data class LivePoint(val timeMs: Long, val value: Float)
  * It only exists so the graphs on the dashboard have something to draw. It is
  * bounded, so a phone that runs all night does not collect a history of the
  * whole night.
+ *
+ * The readings of a metric are nullable on purpose. They are filled on a
+ * background thread and read on the screen, and a reader that is told that a
+ * reading can be missing has to look. A reader that is told that it cannot be
+ * missing trusts the promise and crashes when it is broken.
  */
 data class LiveHistory(
-    val fps: List<LivePoint> = emptyList(),
-    val frameTimeMs: List<LivePoint> = emptyList(),
-    val cpuPercent: List<LivePoint> = emptyList(),
-    val temperatureC: List<LivePoint> = emptyList(),
-    val ramPercent: List<LivePoint> = emptyList(),
-    val gpuPercent: List<LivePoint> = emptyList()
+    val fps: List<LivePoint?> = emptyList(),
+    val frameTimeMs: List<LivePoint?> = emptyList(),
+    val cpuPercent: List<LivePoint?> = emptyList(),
+    val temperatureC: List<LivePoint?> = emptyList(),
+    val ramPercent: List<LivePoint?> = emptyList(),
+    val gpuPercent: List<LivePoint?> = emptyList()
 )
 
 /** Aggregated numbers for the session that is currently being recorded. */

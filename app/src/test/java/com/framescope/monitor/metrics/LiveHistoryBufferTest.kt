@@ -21,8 +21,8 @@ class LiveHistoryBufferTest {
 
         val history = buffer.snapshot()
         assertEquals(3, history.fps.size)
-        assertEquals(52f, history.fps.first().value, 0.01f)
-        assertEquals(54f, history.fps.last().value, 0.01f)
+        assertEquals(52f, history.fps.filterNotNull().first().value, 0.01f)
+        assertEquals(54f, history.fps.filterNotNull().last().value, 0.01f)
     }
 
     @Test
@@ -32,9 +32,9 @@ class LiveHistoryBufferTest {
         buffer.addFrames(timeMs = 1_400L, fpsValue = 58f, frameTimeValue = 17.2f)
 
         val history = buffer.snapshot()
-        assertEquals(1_000L, history.fps.first().timeMs)
-        assertEquals(1_400L, history.fps.last().timeMs)
-        assertEquals(16.6f, history.frameTimeMs.first().value, 0.01f)
+        assertEquals(1_000L, history.fps.filterNotNull().first().timeMs)
+        assertEquals(1_400L, history.fps.filterNotNull().last().timeMs)
+        assertEquals(16.6f, history.frameTimeMs.filterNotNull().first().value, 0.01f)
     }
 
     @Test
@@ -46,8 +46,8 @@ class LiveHistoryBufferTest {
 
         val history = buffer.snapshot()
         assertEquals(2, history.cpuPercent.size)
-        assertEquals(30f, history.cpuPercent.first().value, 0.01f)
-        assertEquals(31f, history.cpuPercent.last().value, 0.01f)
+        assertEquals(30f, history.cpuPercent.filterNotNull().first().value, 0.01f)
+        assertEquals(31f, history.cpuPercent.filterNotNull().last().value, 0.01f)
     }
 
     @Test
@@ -70,13 +70,13 @@ class LiveHistoryBufferTest {
 
         val history = buffer.snapshot()
         assertEquals(2, history.temperatureC.size)
-        assertEquals(500L, history.temperatureC.first().timeMs)
-        assertEquals(3_500L, history.temperatureC.last().timeMs)
+        assertEquals(500L, history.temperatureC.filterNotNull().first().timeMs)
+        assertEquals(3_500L, history.temperatureC.filterNotNull().last().timeMs)
         assertEquals(2, history.ramPercent.size)
         // The device that does not report the load of the graphics chip says so
         // by saying nothing at all.
         assertEquals(1, history.gpuPercent.size)
-        assertEquals(12f, history.gpuPercent.first().value, 0.01f)
+        assertEquals(12f, history.gpuPercent.filterNotNull().first().value, 0.01f)
     }
 
     @Test

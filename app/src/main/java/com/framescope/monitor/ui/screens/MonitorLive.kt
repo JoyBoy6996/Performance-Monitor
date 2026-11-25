@@ -559,14 +559,21 @@ private fun temperatureAvailability(system: SystemMetrics): MetricAvailability =
     }
 
 /** The readings of one metric, as chart points. */
+/**
+ * The readings of one metric, as chart points.
+ *
+ * The list comes from a buffer that a background thread keeps writing to, so
+ * it is copied and cleaned before it is read. A reading that is not there is
+ * left out, and it never reaches the graph.
+ */
 fun livePointsOf(metric: DashboardMetric, history: LiveHistory): List<ChartPoint> =
     when (metric) {
-        DashboardMetric.FPS -> history.fps.asChartPoints()
-        DashboardMetric.FRAME_TIME -> history.frameTimeMs.asChartPoints()
-        DashboardMetric.CPU -> history.cpuPercent.asChartPoints()
-        DashboardMetric.GPU -> history.gpuPercent.asChartPoints()
-        DashboardMetric.TEMPERATURE -> history.temperatureC.asChartPoints()
-        DashboardMetric.RAM -> history.ramPercent.asChartPoints()
+        DashboardMetric.FPS -> history.fps.orEmpty().filterNotNull().asChartPoints()
+        DashboardMetric.FRAME_TIME -> history.frameTimeMs.orEmpty().filterNotNull().asChartPoints()
+        DashboardMetric.CPU -> history.cpuPercent.orEmpty().filterNotNull().asChartPoints()
+        DashboardMetric.GPU -> history.gpuPercent.orEmpty().filterNotNull().asChartPoints()
+        DashboardMetric.TEMPERATURE -> history.temperatureC.orEmpty().filterNotNull().asChartPoints()
+        DashboardMetric.RAM -> history.ramPercent.orEmpty().filterNotNull().asChartPoints()
         DashboardMetric.POWER -> emptyList()
     }
 

@@ -265,11 +265,18 @@ fun hasRealTimes(timesMs: List<Long>, values: List<Float>): Boolean =
  *
  * The moments are made relative to the first one, so the time axis of a live
  * graph starts at zero instead of at the uptime of the phone.
+ *
+ * The list is read while the thread that fills it keeps working, so an empty
+ * slot is possible in a list that should not have one. Every reading is
+ * therefore checked before it is used: a missing one is left out, and a
+ * reading that is not a number is left out as well. A graph with fewer points
+ * is wrong for a moment; a graph that crashes the app is wrong for good.
  */
-fun List<LivePoint>.asChartPoints(): List<ChartPoint> {
-    if (isEmpty()) return emptyList()
-    val first = first().timeMs
-    return mapNotNull { point ->
+fun List<LivePoint?>.asChartPoints(): List<ChartPoint> {
+    val points = filterNotNull()
+    if (points.isEmpty()) return emptyList()
+    val first = points.first().timeMs
+    return points.mapNotNull { point ->
         if (!point.value.isFinite()) return@mapNotNull null
         ChartPoint(point.timeMs - first, point.value)
     }

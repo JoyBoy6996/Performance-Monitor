@@ -681,3 +681,18 @@ single frame rate was read.
 - The engine is built over and over in the test of this, and the switch is
   turned on and off, so a field that is read too early fails the test instead
   of the phone.
+
+## 1.2.20 - the pill stops saying "old" on every screen
+
+The pill said "- 2646 ms old" on one screen and "- 3395 ms old" on the next,
+over and over, while the number next to it was the best one there was.
+
+A rate is the growth between two counters of the compositor, and every one of
+those counters costs the phone a second and a half when the dump holds every
+layer of the device. A reading is therefore nearly three seconds old by the
+time it reaches the pill, and the two seconds that used to be the line for
+"out of date" called every one of them out of date.
+
+Four seconds is the line now. A reading younger than that is as fresh as this
+device can make it, and an older one is still marked. The exact age stays on
+the Monitor tab.

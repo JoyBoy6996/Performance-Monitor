@@ -618,7 +618,7 @@ class OverlayService : Service() {
 
         // A reading that is older than a couple of seconds is not a live reading, and
         // it says so instead of looking like a current number.
-        val stale = fpsState.valid && fpsState.sampleAgeMs > STALE_AFTER_MS
+        val stale = fpsState.valid && OverlayFreshness.isStale(fpsState.sampleAgeMs)
 
         fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
         fpsText?.setTextColor(
@@ -743,9 +743,6 @@ class OverlayService : Service() {
         private const val REC_STATUS_MS = 1_500L
         private const val CHANNEL_ID = "framescope_overlay_channel"
         private const val NOTIFICATION_ID = 4040
-
-        /** A reading older than this is shown as out of date rather than as live. */
-        private const val STALE_AFTER_MS = 2_000L
 
         /** The colour of a reading that is too old to be live. */
         private val STALE_COLOR = Color.parseColor("#94A3B8")

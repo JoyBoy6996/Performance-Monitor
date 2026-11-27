@@ -19,6 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
@@ -46,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.text.font.FontFamily
@@ -61,7 +69,6 @@ import com.framescope.monitor.core.deviceTemperatureC
 import com.framescope.monitor.core.finiteOrNull
 import com.framescope.monitor.core.thermalStatusLabel
 import com.framescope.monitor.shell.AccessState
-import com.framescope.monitor.ui.FrameScopeScreen
 import com.framescope.monitor.ui.components.BarMeter
 import com.framescope.monitor.ui.components.FpsGauge
 import com.framescope.monitor.ui.components.InfoRow
@@ -118,194 +125,272 @@ fun DashboardScreen(
         MaterialTheme.status.warn
     }
 
-    FrameScopeScreen(
-        title = "Monitor",
-        subtitle = foreground?.let { "Monitoring $it" } ?: "Waiting for a foreground app",
-        bottomPadding = bottomPadding,
-        actions = {
-            StatusPill(
-                text = when {
-                    status.commandVerified -> "Verified"
-                    !status.permissionGranted -> "Permission needed"
-                    !status.binderAvailable -> "Shizuku stopped"
-                    status.state == AccessState.UNAVAILABLE -> "Connection error"
-                    status.userServiceConnected -> "Verifying"
-                    else -> "Connecting"
-                },
-                color = accessColor,
-                modifier = Modifier.padding(end = Space.lg)
-            )
-        }
-    ) {
-        if (crash != null) {
-            item { CrashPanel(crash.orEmpty(), context) }
-        }
+    // The screen owns its own header. A header that floats over the list lets
+    // the content scroll under it, and the numbers of the chart end up behind
+    // the title and the status bar.
+    val screenBg = MaterialTheme.colorScheme.background
+    val listState = rememberLazyListState()
 
-        if (status.state != AccessState.READY) {
-            // Shizuku only gates the readings that genuinely need a privileged shell.
-            // The native ones - battery, memory, refresh rate - keep working, so this
-            // is a note about what is missing rather than a blocker for everything.
-            item {
-                AccessBanner(
-                    title = if (setupDone) "Frame timing needs Shizuku" else "Privileged access needed",
-                    detail = if (setupDone) {
-                        status.detail.ifBlank {
-                            "Shizuku is not answering, so the frame rate and the CPU and GPU " +
-                                "readings are paused. Battery, memory and refresh rate keep working."
-                        }
-                    } else {
-                        status.detail.ifBlank {
-                            "Run the one-time setup to unlock the frame rate. Battery, memory " +
-                                "and refresh rate work without it."
-                        }
-                    },
-                    onOpenSettings = onOpenSettings
-                )
-            }
-        } else if (!fps.valid && !diagnostic.isNullOrBlank()) {
-            item {
-                AccessBanner(
-                    title = "No frame data yet",
-                    detail = diagnostic.orEmpty(),
-                    onOpenSettings = onOpenSettings
-                )
+    // The memory of the phone, as a pair of numbers a person can read. The
+    // kernel hands it over with seven decimals; the card shows one.
+    val liveSystem = system.copy(
+        ramUsedGb = system.ramUsedGb?.let { Math.round(it * 10f) / 10f },
+        ramTotalGb = system.ramTotalGb?.let { Math.round(it * 10f) / 10f }
+    )
+
+    // The cards that have something to say. A metric that cannot be read is
+    // left out of the line that names the reason, when the reason would point
+    // at a problem that is not there: a paused measurement and a GPU the
+    // chip does not publish are not faults, and the panel above the cards
+    // already says the measurement is paused.
+    val liveMetrics = DashboardMetric.fromKeys(cardKeys, DashboardMetric.cards)
+        .filterNot { metric ->
+            when (metric) {
+                DashboardMetric.FPS, DashboardMetric.FRAME_TIME -> !measuring
+                DashboardMetric.GPU -> status.state == AccessState.READY &&
+                    system.gpuPercent == null
+                else -> false
             }
         }
 
-        // The reading comes first. Everything below it explains the reading.
-        item {
-            HeroPanel(
-                fps = if (measuring) fps else FpsState(),
-                layer = if (measuring) layer else null,
-                threshold = threshold,
-                system = system
-            )
-        }
-
-        item {
-            MeasurementPanel(
-                measuring = measuring,
-                onToggle = { container.settings.measurementEnabled.value = !measuring }
-            )
-        }
-
-        if (foreground == BuildConfig.APPLICATION_ID) {
-            item {
-                SelfMeasureNotice()
-            }
-        }
-
-        item {
-            SectionHeader("Live metrics") {
-                TextButton(
-                    onClick = { customising = !customising },
-                    modifier = Modifier.padding(end = Space.sm)
-                ) {
-                    Text(if (customising) "Done" else "Customise")
-                }
-            }
-        }
-
-        if (customising) {
-            item {
-                Panel {
+    Column(modifier = Modifier.fillMaxSize().background(screenBg)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(screenBg)
+                .statusBarsPadding()
+                .padding(horizontal = Space.gutter)
+                .padding(top = Space.sm, bottom = Space.sm)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
                     Text(
-                        text = "Choose what the dashboard shows",
-                        style = MaterialTheme.typography.bodySmall,
+                        text = "Monitor",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = foreground?.let { "Monitoring $it" }
+                            ?: "Waiting for a foreground app",
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(Modifier.height(Space.sm))
-                    DashboardCustomisation(
-                        cards = cardKeys,
-                        graphs = graphKeys,
-                        onCardsChange = { keys ->
-                            container.settings.dashboardCards.value =
-                                DashboardMetric.cards.filter { it.key in keys }.joinToString(",") { it.key }
-                        },
-                        onGraphsChange = { keys ->
-                            container.settings.dashboardGraphs.value =
-                                DashboardMetric.graphs.filter { it.key in keys }.joinToString(",") { it.key }
-                        }
-                    )
                 }
-            }
-        }
-
-        item {
-            LiveMetricCards(
-                fps = if (measuring) fps else FpsState(),
-                system = system,
-                history = liveHistory,
-                threshold = threshold,
-                metrics = DashboardMetric.fromKeys(cardKeys, DashboardMetric.cards)
-            )
-        }
-
-        // The readings the grid above does not carry. They used to live in a
-        // second grid of their own, which showed the CPU, the temperature, the
-        // memory and the power a second time.
-        item { DeviceExtrasPanel(system) }
-
-        // A graph without readings is left out, and so is the title of the
-        // section: an empty section says less than no section.
-        val chosenGraphs = DashboardMetric.fromKeys(graphKeys, DashboardMetric.graphs)
-            .filter { livePointsOf(it, liveHistory).size >= 2 }
-        if (chosenGraphs.isNotEmpty()) {
-            item { SectionHeader("Live graphs") }
-
-            item {
-                LiveGraphs(
-                    fps = if (measuring) fps else FpsState(),
-                    system = system,
-                    history = liveHistory,
-                    threshold = threshold,
-                    metrics = chosenGraphs
+                StatusPill(
+                    text = when {
+                        status.commandVerified -> "Verified"
+                        !status.permissionGranted -> "Permission needed"
+                        !status.binderAvailable -> "Shizuku stopped"
+                        status.state == AccessState.UNAVAILABLE -> "Connection error"
+                        status.userServiceConnected -> "Verifying"
+                        else -> "Connecting"
+                    },
+                    color = accessColor,
+                    modifier = Modifier.padding(start = Space.sm)
                 )
             }
         }
 
-        item { SectionHeader("Frame rate history") }
+        LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clipToBounds(),
+                contentPadding = PaddingValues(
+                    start = Space.gutter,
+                    end = Space.gutter,
+                    top = 8.dp,
+                    bottom = bottomPadding
+                ),
+                verticalArrangement = Arrangement.spacedBy(Space.lg)
+            ) {
+            if (crash != null) {
+                item { CrashPanel(crash.orEmpty(), context) }
+            }
 
-        item { HistoryPanel(fps = fps, series = liveSeries, layer = layer, threshold = threshold) }
+            if (status.state != AccessState.READY) {
+                // Shizuku only gates the readings that genuinely need a privileged shell.
+                // The native ones - battery, memory, refresh rate - keep working, so this
+                // is a note about what is missing rather than a blocker for everything.
+                item {
+                    AccessBanner(
+                        title = if (setupDone) "Frame timing needs Shizuku" else "Privileged access needed",
+                        detail = if (setupDone) {
+                            status.detail.ifBlank {
+                                "Shizuku is not answering, so the frame rate and the CPU and GPU " +
+                                    "readings are paused. Battery, memory and refresh rate keep working."
+                            }
+                        } else {
+                            status.detail.ifBlank {
+                                "Run the one-time setup to unlock the frame rate. Battery, memory " +
+                                    "and refresh rate work without it."
+                            }
+                        },
+                        onOpenSettings = onOpenSettings
+                    )
+                }
+            } else if (!fps.valid && !diagnostic.isNullOrBlank()) {
+                item {
+                    AccessBanner(
+                        title = "No frame data yet",
+                        detail = diagnostic.orEmpty(),
+                        onOpenSettings = onOpenSettings
+                    )
+                }
+            }
 
-        item { SectionHeader("Session") }
+            // The reading comes first. Everything below it explains the reading.
+            item {
+                HeroPanel(
+                    fps = if (measuring) fps else FpsState(),
+                    layer = if (measuring) layer else null,
+                    threshold = threshold,
+                    system = system
+                )
+            }
 
-        item {
-            SessionPanel(
-                recording = recording,
-                avgFps = live.avgFps,
-                maxFps = live.maxFps,
-                minFps = live.minFps,
-                low1 = live.low1Percent,
-                low5 = live.low5Percent,
-                smoothness = live.smoothness,
-                totalFrames = live.totalFrames,
-                jankFrames = live.jankFrames,
-                durationMs = live.durationMs,
-                maxTempC = live.maxTempC,
-                avgCpu = live.avgCpu,
-                peakThermalStatus = live.peakThermalStatus,
-                throttledSeconds = live.throttledSeconds,
-                threshold = threshold,
-                onToggleRecording = {
-                    if (recording) {
-                        container.engine.stopRecordingManually()
-                        val stopIntent = android.content.Intent(context, com.framescope.monitor.recorder.ScreenRecorderService::class.java).apply {
-                            action = com.framescope.monitor.recorder.ScreenRecorderService.ACTION_STOP
-                        }
-                        context.startService(stopIntent)
+            item {
+                MeasurementPanel(
+                    measuring = measuring,
+                    onToggle = {
+                    // One action turns the measurement on, and the overlay uses
+                    // the same one: the two cannot drift apart.
+                    if (measuring) {
+                        container.settings.measurementEnabled.value = false
                     } else {
-                        onRequestScreenRecord()
+                        container.engine.startMeasurement()
                     }
                 }
-            )
+                )
+            }
+
+            if (foreground == BuildConfig.APPLICATION_ID) {
+                item {
+                    SelfMeasureNotice()
+                }
+            }
+
+            item {
+                SectionHeader("Live metrics") {
+                    TextButton(
+                        onClick = { customising = !customising },
+                        modifier = Modifier.padding(end = Space.sm)
+                    ) {
+                        Text(if (customising) "Done" else "Customise")
+                    }
+                }
+            }
+
+            if (customising) {
+                item {
+                    Panel {
+                        Text(
+                            text = "Choose what the dashboard shows",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.height(Space.sm))
+                        DashboardCustomisation(
+                            cards = cardKeys,
+                            graphs = graphKeys,
+                            onCardsChange = { keys ->
+                                container.settings.dashboardCards.value =
+                                    DashboardMetric.cards.filter { it.key in keys }.joinToString(",") { it.key }
+                            },
+                            onGraphsChange = { keys ->
+                                container.settings.dashboardGraphs.value =
+                                    DashboardMetric.graphs.filter { it.key in keys }.joinToString(",") { it.key }
+                            }
+                        )
+                    }
+                }
+            }
+
+            item {
+                LiveMetricCards(
+                    fps = if (measuring) fps else FpsState(),
+                    system = liveSystem,
+                    history = liveHistory,
+                    threshold = threshold,
+                    metrics = liveMetrics
+                )
+            }
+
+            // The readings the grid above does not carry. They used to live in a
+            // second grid of their own, which showed the CPU, the temperature, the
+            // memory and the power a second time.
+            item {
+                // A chip that does not expose a GPU node has no clock to show.
+                // An empty "--" next to "needs Shizuku" sends the user looking for
+                // a problem that is not there.
+                DeviceExtrasPanel(
+                    system = system,
+                    showGpu = system.gpuFreqMHz != null || status.state != AccessState.READY
+                )
+            }
+
+            // A graph without readings is left out, and so is the title of the
+            // section: an empty section says less than no section.
+            val chosenGraphs = DashboardMetric.fromKeys(graphKeys, DashboardMetric.graphs)
+                .filter { livePointsOf(it, liveHistory).size >= 2 }
+            if (chosenGraphs.isNotEmpty()) {
+                item { SectionHeader("Live graphs") }
+
+                item {
+                    LiveGraphs(
+                        fps = if (measuring) fps else FpsState(),
+                        system = system,
+                        history = liveHistory,
+                        threshold = threshold,
+                        metrics = chosenGraphs
+                    )
+                }
+            }
+
+            item { SectionHeader("Frame rate history") }
+
+            item { HistoryPanel(fps = fps, series = liveSeries, layer = layer, threshold = threshold) }
+
+            item { SectionHeader("Session") }
+
+            item {
+                SessionPanel(
+                    recording = recording,
+                    avgFps = live.avgFps,
+                    maxFps = live.maxFps,
+                    minFps = live.minFps,
+                    low1 = live.low1Percent,
+                    low5 = live.low5Percent,
+                    smoothness = live.smoothness,
+                    totalFrames = live.totalFrames,
+                    jankFrames = live.jankFrames,
+                    durationMs = live.durationMs,
+                    maxTempC = live.maxTempC,
+                    avgCpu = live.avgCpu,
+                    peakThermalStatus = live.peakThermalStatus,
+                    throttledSeconds = live.throttledSeconds,
+                    threshold = threshold,
+                    onToggleRecording = {
+                        if (recording) {
+                            container.engine.stopRecordingManually()
+                            val stopIntent = android.content.Intent(context, com.framescope.monitor.recorder.ScreenRecorderService::class.java).apply {
+                                action = com.framescope.monitor.recorder.ScreenRecorderService.ACTION_STOP
+                            }
+                            context.startService(stopIntent)
+                        } else {
+                            onRequestScreenRecord()
+                        }
+                    }
+                )
+            }
+
+            item { SectionHeader("Device") }
+
+            item { DevicePanel(system) }
+
+            item { DiagnosticsRow(container = container) }
         }
-
-        item { SectionHeader("Device") }
-
-        item { DevicePanel(system) }
-
-        item { DiagnosticsRow(container = container) }
     }
 }
 
@@ -386,7 +471,7 @@ private fun HeroPanel(
                     MiniStat(
                         // The smoothness floor of the app, not the rate of the
                         // panel. The panel is told apart further down.
-                        label = "Smooth floor",
+                        label = "Smooth",
                         value = "$threshold",
                         unit = "fps",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -427,8 +512,11 @@ private fun HeroPanel(
                         // The rate of the panel itself. It is not the target of
                         // the game, and saying so keeps the two apart.
                         label = "Display",
-                        value = system.refreshHz?.let { "$it" } ?: "--",
-                        unit = "Hz",
+                        // The kernel gives the refresh rate as a float with four
+                        // decimals. "120.0000 Hz" is noise; "120 Hz" is the
+                        // number the user is looking for.
+                        value = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--",
+                        unit = "",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f)
                     )
@@ -554,7 +642,7 @@ private fun MeasurementPanel(measuring: Boolean, onToggle: () -> Unit) {
         ) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = if (measuring) "Measurement is running" else "Measurement is off",
+                    text = if (measuring) "Measurement is running" else "Measurement paused",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurface
                 )
@@ -683,7 +771,8 @@ private fun DiagnosticsRow(container: AppContainer) {
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = Space.md),
-            horizontalArrangement = Arrangement.spacedBy(Space.sm)
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             FilledTonalButton(
                 enabled = !probing,
@@ -703,7 +792,10 @@ private fun DiagnosticsRow(container: AppContainer) {
                         }
                         probing = false
                     }
-                }
+                },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp)
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Refresh,
@@ -712,6 +804,8 @@ private fun DiagnosticsRow(container: AppContainer) {
                 )
                 Text(
                     if (lastMeasured.isNullOrBlank()) "Raw probe" else "Raw probe (${lastMeasured})",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(start = 6.dp)
                 )
             }
@@ -753,14 +847,16 @@ private fun DiagnosticsRow(container: AppContainer) {
                         message = "Copied report + raw probe - paste it in the chat."
                         running = false
                     }
-                }
+                },
+                modifier = Modifier.size(44.dp),
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(0.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Rounded.Refresh,
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp)
+                    imageVector = Icons.Rounded.ContentCopy,
+                    contentDescription = "Copy the report and the raw probe",
+                    modifier = Modifier.size(18.dp)
                 )
-                Text("Copy all", modifier = Modifier.padding(start = 6.dp))
             }
         }
         if (message != null) {
@@ -855,7 +951,7 @@ private fun DiagnosticsRow(container: AppContainer) {
  * twice on the same screen.
  */
 @Composable
-private fun DeviceExtrasPanel(system: SystemMetrics) {
+private fun DeviceExtrasPanel(system: SystemMetrics, showGpu: Boolean = true) {
     val temp = system.deviceTemperatureC()
     val tempColor = when {
         temp == null -> MaterialTheme.colorScheme.onSurface
@@ -866,15 +962,17 @@ private fun DeviceExtrasPanel(system: SystemMetrics) {
 
     Panel {
         Row {
-            StatCell(
-                label = "GPU clock",
-                value = system.gpuFreqMHz?.toString() ?: "--",
-                unit = system.gpuFreqMHz?.let { "MHz" } ?: "",
-                accent = MaterialTheme.colorScheme.onSurface,
-                availability = system.availabilityOf(SystemMetric.GPU_FREQ_MHZ),
-                modifier = Modifier.weight(1f).padding(end = Space.sm)
-            )
-            VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (showGpu) {
+                StatCell(
+                    label = "GPU clock",
+                    value = system.gpuFreqMHz?.toString() ?: "--",
+                    unit = system.gpuFreqMHz?.let { "MHz" } ?: "",
+                    accent = MaterialTheme.colorScheme.onSurface,
+                    availability = system.availabilityOf(SystemMetric.GPU_FREQ_MHZ),
+                    modifier = Modifier.weight(1f).padding(end = Space.sm)
+                )
+                VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             StatCell(
                 label = "Battery",
                 value = system.batteryLevel?.toString() ?: "--",

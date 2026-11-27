@@ -588,3 +588,45 @@ source cannot tell a drawn curve from a curve that was meant to be drawn.
   8 as well. It was read as a field, which throws on an old device instead
   of answering. It is read by its name now, and the maker of the chip is the
   answer before the model.
+
+## 1.2.17 - the Monitor tab, the overlay and the first reading
+
+The Monitor tab was written against a screenshot of an older build, and the
+overlay could be on while nothing was being measured. Both are fixed here.
+
+### The Monitor tab holds still
+
+- The header of the Monitor tab was a transparent block over a list, so the
+  numbers of the chart went behind the title and the status bar while the
+  page was scrolled. The screen owns its header now: an opaque block with the
+  status bar padding, and the list strictly below it.
+- The copy button of the diagnostics card was stretched into a tall capsule
+  with a small icon in the middle of it. It is a square icon button now, next
+  to the probe button, and both are the same height.
+- The label of the smoothness floor was cut to "Smooth fl…". It is "Smooth".
+- The refresh rate of the panel was shown as "120.0000 Hz" and the memory as
+  "6.5280495 / 10.877453 GB". The kernel gives the numbers with seven
+  decimals; the screen shows one, and the refresh rate as a whole number.
+
+### A reason that points at a problem that is not there
+
+- The line under the cards said "Frame rate — not reported · GPU — needs
+  Shizuku" while the badge above said the shell was verified. The frame rate
+  was missing because the measurement was paused, and the GPU was missing
+  because the chip does not publish that node. The panel above the cards now
+  says "Measurement paused", and neither of the two is named as a fault any
+  more. The empty GPU clock is left out when the chip has no GPU node.
+
+### The overlay starts the measurement, and the first reading is fast
+
+- Turning the floating overlay on left the measurement off, so the pill
+  appeared with "-- FPS" on it. The overlay now starts the measurement
+  through the same action the Resume button uses, so the three ways of
+  turning it on - the overlay screen, the quick settings tile and the button
+  on the Monitor tab - cannot drift apart. Turning the overlay off does not
+  stop a recording that is running.
+- The loop of the frame rate waited for a whole interval before it looked at
+  the shell again. The wait now ends at once when the measurement is turned
+  on, and the first two samples are 150 ms apart, so the counters have a
+  window to grow into. The ring buffer of SurfaceFlinger already holds the
+  frames that were presented, so the reading of the first poll is a real one.

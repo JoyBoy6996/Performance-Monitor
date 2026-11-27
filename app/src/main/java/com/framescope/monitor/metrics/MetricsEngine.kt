@@ -24,6 +24,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,6 +54,20 @@ class MetricsEngine(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fpsSampler = FpsSampler(hub)
+
+    init {
+        // Turning the measurement on has to end the wait of the frame rate
+        // loop at once, wherever the switch was touched: the overlay, the
+        // Resume button of the Monitor tab or the Setup screen.
+        scope.launch {
+            settings.measurementEnabled.flow.collect { enabled ->
+                if (enabled) {
+                    freshStart = true
+                    wakeUp.value = wakeUp.value + 1
+                }
+            }
+        }
+    }
 
     /**
      * The readings the app takes by itself, without a privileged shell.
@@ -167,6 +184,31 @@ class MetricsEngine(
     private var nativeJob: Job? = null
     private var privilegedJob: Job? = null
     private var cpuJob: Job? = null
+
+    /**
+     * Wakes the frame rate loop up.
+     *
+     * The loop waits between two samples so a slow command cannot pile up.
+     * When the measurement is turned on the wait has to end at once: the
+     * overlay appears with "-- FPS" on it and that is not a reading.
+     */
+    private val wakeUp = MutableStateFlow(0)
+
+    /** Set while the first sample of a fresh measurement is still missing. */
+    private var freshStart = false
+
+    /**
+     * Turns the measurement on and takes the first sample at once.
+     *
+     * This is the one action that turns the measurement on. The overlay, the
+     * Resume button and the quick settings tile all come through here, so they
+     * cannot drift apart.
+     */
+    fun startMeasurement() {
+        settings.measurementEnabled.value = true
+        freshStart = true
+        wakeUp.value = wakeUp.value + 1
+    }
 
     fun start() {
         if (fpsJob?.isActive == true) return
@@ -293,8 +335,23 @@ class MetricsEngine(
             }
 
             val elapsedMs = (System.nanoTime() - started) / 1_000_000L
-            val wait = (settings.sampleIntervalMs.value - elapsedMs).coerceAtLeast(60L)
-            delay(wait)
+
+            // A fresh start wants a number now: the first poll sets the
+            // baselines and the second one answers. The short wait is used
+            // once, right after the measurement was turned on.
+            val fastRetry = freshStart
+            freshStart = false
+            val wait = if (fastRetry) {
+                150L
+            } else {
+                (settings.sampleIntervalMs.value - elapsedMs).coerceAtLeast(60L)
+            }
+
+            // The wait ends early when the measurement is turned on again.
+            val marker = wakeUp.value
+            withTimeoutOrNull(wait) {
+                wakeUp.first { it != marker }
+            }
         }
     }
 

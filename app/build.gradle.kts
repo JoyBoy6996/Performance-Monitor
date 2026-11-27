@@ -12,8 +12,8 @@ android {
         applicationId = "com.qstats.fpsmonitor"
         minSdk = 26
         targetSdk = 36
-        versionCode = 35
-        versionName = "1.2.16"
+        versionCode = 36
+        versionName = "1.2.17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -7,8 +7,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** Starts and stops the floating overlay service. */
-class OverlayController(private val context: Context) {
+/**
+ * Starts and stops the floating overlay service.
+ *
+ * @param onEnabled called whenever the overlay is turned on. The measurement
+ * starts with it: a pill that appears with "-- FPS" on it is not a reading.
+ */
+class OverlayController(
+    private val context: Context,
+    private val onEnabled: () -> Unit = {}
+) {
 
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
@@ -17,6 +25,7 @@ class OverlayController(private val context: Context) {
         val intent = Intent(context, OverlayService::class.java)
         ContextCompat.startForegroundService(context, intent)
         _running.value = true
+        onEnabled()
     }
 
     fun stop() {

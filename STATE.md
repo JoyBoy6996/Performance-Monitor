@@ -664,3 +664,20 @@ long cannot produce a reading before the next one starts.
 - The pill shows the rate of the panel next to the rate of the game: a phone
   that presents 144 frames a second says so, and the game that gives 115 of
   them is a different number.
+
+## 1.2.19 - the app opens again
+
+The build before this one died on the first frame after the launch, before a
+single frame rate was read.
+
+### The watcher that read a field too early
+
+- The coroutine that watches the measurement switch was started while the
+  engine was still being built. It runs on another thread at once, and the
+  field it reads had not been given its value yet - it was still null. The
+  exception left the coroutine, nothing caught it, and the process died.
+- The watcher is started with the engine now, never while it is built, and
+  nothing it does may take the app down.
+- The engine is built over and over in the test of this, and the switch is
+  turned on and off, so a field that is read too early fails the test instead
+  of the phone.

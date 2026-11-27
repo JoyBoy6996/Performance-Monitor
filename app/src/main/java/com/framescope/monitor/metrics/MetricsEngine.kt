@@ -55,20 +55,6 @@ class MetricsEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val fpsSampler = FpsSampler(hub)
 
-    init {
-        // Turning the measurement on has to end the wait of the frame rate
-        // loop at once, wherever the switch was touched: the overlay, the
-        // Resume button of the Monitor tab or the Setup screen.
-        scope.launch {
-            settings.measurementEnabled.flow.collect { enabled ->
-                if (enabled) {
-                    freshStart = true
-                    wakeUp.value = wakeUp.value + 1
-                }
-            }
-        }
-    }
-
     /**
      * The readings the app takes by itself, without a privileged shell.
      *
@@ -198,6 +184,20 @@ class MetricsEngine(
     private var freshStart = false
 
     /**
+     * The watcher of the measurement switch.
+     *
+     * It is started with the engine and not while the engine is built: a
+     * coroutine that starts in the constructor runs on another thread at once,
+     * and a field of the engine that has not been given its value yet is still
+     * null. Reading it there took the whole app down on the first frame after
+     * the launch.
+     */
+    private var switchWatcher: Job? = null
+
+    /** The number of times the frame rate loop was woken up. */
+    internal fun wakeUpCount(): Int = wakeUp.value
+
+    /**
      * Turns the measurement on and takes the first sample at once.
      *
      * This is the one action that turns the measurement on. The overlay, the
@@ -211,6 +211,23 @@ class MetricsEngine(
     }
 
     fun start() {
+        if (switchWatcher == null) {
+            // Turning the measurement on has to end the wait of the frame rate
+            // loop at once, wherever the switch was touched: the overlay, the
+            // Resume button of the Monitor tab or the Setup screen.
+            switchWatcher = scope.launch {
+                settings.measurementEnabled.flow.collect { enabled ->
+                    // Nothing that happens in here may take the app down. The
+                    // frame rate of a game is worth less than the game.
+                    runCatching {
+                        if (enabled) {
+                            freshStart = true
+                            wakeUp.value = wakeUp.value + 1
+                        }
+                    }
+                }
+            }
+        }
         if (fpsJob?.isActive == true) return
         fpsJob = scope.launch { fpsLoop() }
         nativeJob = scope.launch { nativeLoop() }

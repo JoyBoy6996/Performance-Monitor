@@ -85,7 +85,7 @@ class MainActivity : ComponentActivity() {
         if (app == null) {
             setContent {
                 Text(
-                    text = "FrameScope could not start.\n\n" +
+                    text = "Qstats could not start.\n\n" +
                         (CrashLog.last(this) ?: "No details were saved."),
                     style = androidx.compose.material3.MaterialTheme.typography.bodyMedium
                 )

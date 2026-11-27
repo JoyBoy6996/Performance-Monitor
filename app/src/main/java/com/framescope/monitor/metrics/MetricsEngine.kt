@@ -493,7 +493,10 @@ class MetricsEngine(
             ramPercent = memoryValue?.let {
                 if (it.totalBytes > 0L) (it.usedBytes * 100 / it.totalBytes).toInt() else null
             },
-            refreshHz = panelRefreshHz ?: refresh.value,
+            // The panel runs at its own rate; a window of this app can be held
+            // below it. The fastest of the two is what the screen can show.
+            refreshHz = maxOf(panelRefreshHz ?: 0f, refresh.value ?: 0f)
+                .takeIf { it > 0f },
             updatedAt = System.currentTimeMillis(),
             availability = availability,
             sources = sources,

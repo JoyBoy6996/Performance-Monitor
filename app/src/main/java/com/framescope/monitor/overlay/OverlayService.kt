@@ -278,7 +278,7 @@ class OverlayService : Service() {
             }
         }
 
-        titleText = OverlayViews.label(this, "FRAMESCOPE", Color.parseColor("#FFA500")).apply {
+        titleText = OverlayViews.label(this, "QSTATS", Color.parseColor("#FFA500")).apply {
             textSize = 9f * currentScale
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
         }
@@ -318,7 +318,7 @@ class OverlayService : Service() {
         }
 
         if (currentStyle == OverlayStyle.DETAILED) {
-            titleText = OverlayViews.label(this, "FRAMESCOPE", Color.parseColor("#64748B")).apply {
+            titleText = OverlayViews.label(this, "QSTATS", Color.parseColor("#64748B")).apply {
                 textSize = 8f * currentScale
             }
             layout.addView(titleText)
@@ -648,7 +648,7 @@ class OverlayService : Service() {
         titleText?.text = if (currentStyle == OverlayStyle.RTSS && appName.isNotBlank()) {
             appName.substringAfterLast('.').uppercase()
         } else {
-            "FRAMESCOPE"
+            "QSTATS"
         }
 
         // Cap is deliberately absent: it belongs to the saved session detail,
@@ -719,7 +719,7 @@ class OverlayService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("FrameScope Overlay Active")
+            .setContentTitle("Qstats Overlay Active")
             .setContentText("Monitoring FPS and device telemetry")
             .setSmallIcon(R.drawable.ic_tile)
             .setContentIntent(openIntent)

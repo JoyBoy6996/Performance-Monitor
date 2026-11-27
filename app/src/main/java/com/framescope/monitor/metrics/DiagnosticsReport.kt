@@ -29,7 +29,7 @@ object DiagnosticsReport {
     ): String {
         val sb = StringBuilder()
 
-        sb.appendLine("=== FrameScope diagnostics ===")
+        sb.appendLine("=== Qstats diagnostics ===")
         sb.appendLine("generated: ${java.util.Date()}")
         sb.appendLine(
             "captured_from=${engine.lastMeasuredPackage.value ?: "(none)"} at=${SystemClock.uptimeMillis()}"

@@ -430,7 +430,7 @@ private fun HudPreview(
                 Spacer(Modifier.height(Space.xs))
                 if (style.uppercase() == "RTSS" || style.uppercase() == "DETAILED") {
                     Text(
-                        text = "FRAMESCOPE",
+                        text = "QSTATS",
                         style = MonoBlock.copy(fontSize = 9.sp, letterSpacing = 1.sp),
                         color = HudMuted
                     )

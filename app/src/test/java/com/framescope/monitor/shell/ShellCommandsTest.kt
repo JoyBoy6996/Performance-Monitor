@@ -13,9 +13,14 @@ class ShellCommandsTest {
     fun deviceWideCounterUsesTheFirstTotalFramesLine() {
         val command = ShellCommands.surfaceTotalFrames()
 
-        // The first totalFrames of the dump is the screen-wide counter. A filter
-        // that stops at layerName used to make the home screen show "--" forever.
-        assertTrue(command.contains("grep -m1 'totalFrames'"))
+        // Two counters live in the dump: the total of the display at the top and
+        // the total of the first layer below it. Both are taken, so the screen
+        // can be measured by the frames it presented and a game by the frames
+        // its own layer drew. A filter that stops at layerName used to make the
+        // home screen show "--" forever.
+        assertTrue(command.contains("Total frames rendered"))
+        assertTrue(command.contains("totalFrames"))
+        assertTrue(command.contains("grep -m2"))
         assertFalse(command.contains("awk"))
     }
 

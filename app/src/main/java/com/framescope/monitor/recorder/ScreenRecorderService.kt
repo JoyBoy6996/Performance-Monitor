@@ -123,7 +123,7 @@ class ScreenRecorderService : Service() {
             val moviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: File(filesDir, "Movies")
             if (!moviesDir.exists()) moviesDir.mkdirs()
 
-            val file = File(moviesDir, "FrameScope_${System.currentTimeMillis()}.mp4")
+            val file = File(moviesDir, "Qstats_${System.currentTimeMillis()}.mp4")
             outputFile = file
 
             val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -230,7 +230,7 @@ class ScreenRecorderService : Service() {
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Screen Recording Active")
-            .setContentText("FrameScope is recording video to Movies")
+            .setContentText("Qstats is recording video to Movies")
             .setSmallIcon(R.drawable.ic_tile)
             .setContentIntent(openIntent)
             .addAction(android.R.drawable.ic_media_pause, "Stop Recording", stopIntent)

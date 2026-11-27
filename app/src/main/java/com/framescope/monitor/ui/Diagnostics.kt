@@ -101,6 +101,6 @@ object Diagnostics {
     /** Puts the text on the clipboard so it can be pasted into a chat. */
     fun copy(context: Context, text: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return
-        clipboard.setPrimaryClip(ClipData.newPlainText("FrameScope diagnostics", text))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Qstats diagnostics", text))
     }
 }

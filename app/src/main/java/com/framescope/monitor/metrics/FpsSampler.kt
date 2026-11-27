@@ -429,7 +429,11 @@ class FpsSampler(
         // On the home screen and other apps it IS the live screen FPS, so it is
         // tried first: it cannot be blocked by a slow per-layer probe.
         val fromGlobalEarly = if (!gameTarget) {
-            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg)
+            // A screen that is not a game is measured by the frames the
+            // DISPLAY presented. That is the rate a home screen scrolls at;
+            // the counter of a single layer is the rate of that layer, and a
+            // standing layer has none.
+            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg, displayCounter = true)
         } else null
         if (fromGlobalEarly != null) return fromGlobalEarly
 
@@ -561,6 +565,8 @@ class FpsSampler(
         val fps: Float,
         val frameTimeMs: Float,
         val layer: String,
+        /** True when the counter is the display's own, not a layer's. */
+        val display: Boolean = false,
         val totalFrames: Long,
         val elapsedMs: Long,
         val appPackage: String?,
@@ -586,7 +592,8 @@ class FpsSampler(
     private suspend fun readGlobalFrames(
         pkg: String,
         nowUptime: Long,
-        appPackage: String? = pkg
+        appPackage: String? = pkg,
+        displayCounter: Boolean = false
     ): GlobalFpsReading? {
         // The whole device is printed for this one number. The gate keeps it
         // to one dump a second; the counters grow into a window in that time.
@@ -596,7 +603,13 @@ class FpsSampler(
             ShellCommands.surfaceTotalFrames(),
             GLOBAL_COUNTER_TIMEOUT_MS
         )?.out.orEmpty()
-        val frames = GLOBAL_FRAMES_RE.find(dump)?.groupValues?.get(1)?.toLongOrNull()
+        // The counter of the display itself is the number of frames the screen
+        // presented - the rate a home screen scrolls at. The counter of a layer
+        // is the number of frames that layer drew, which is what a game needs
+        // and what a standing screen does not have.
+        val layerFrames = layerPresentedFrames(dump)
+        val displayFrames = displayPresentedFrames(dump)
+        val frames = if (displayCounter) displayFrames ?: layerFrames else layerFrames
         if (frames == null) {
             // The dump did not answer. The slow per-layer sources may still work.
             globalCounterUnavailable = true
@@ -653,7 +666,12 @@ class FpsSampler(
         return GlobalFpsReading(
             fps = settledFps,
             frameTimeMs = 1_000f / settledFps,
-            layer = "the frames presented while $pkg was in front",
+            layer = if (displayCounter) {
+                "the display"
+            } else {
+                "the frames presented while $pkg was in front"
+            },
+            display = displayCounter,
             totalFrames = frames - baseline.second,
             elapsedMs = elapsedMs,
             appPackage = appPackage,
@@ -670,9 +688,13 @@ class FpsSampler(
         publish(
             fps = reading.fps,
             frameTimeMs = reading.frameTimeMs,
-            source = "SurfaceFlinger presented frames",
+            source = if (reading.display) {
+                "the frames the display presented"
+            } else {
+                "SurfaceFlinger presented frames"
+            },
             kind = FpsSourceKind.TIMESTATS,
-            layer = reading.layer,
+            layer = if (reading.display) "the display" else reading.layer,
             totalFrames = reading.totalFrames,
             jankFrames = 0L,
             sampleAgeMs = ageMs,
@@ -687,9 +709,10 @@ class FpsSampler(
     private suspend fun sampleFromGlobalCounter(
         pkg: String,
         nowUptime: Long,
-        appPackage: String? = pkg
+        appPackage: String? = pkg,
+        displayCounter: Boolean = false
     ): FpsState? {
-        val reading = readGlobalFrames(pkg, nowUptime, appPackage) ?: return null
+        val reading = readGlobalFrames(pkg, nowUptime, appPackage, displayCounter) ?: return null
         return publishGlobalFrames(reading)
     }
 

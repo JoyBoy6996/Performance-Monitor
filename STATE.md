@@ -696,3 +696,21 @@ time it reaches the pill, and the two seconds that used to be the line for
 Four seconds is the line now. A reading younger than that is as fresh as this
 device can make it, and an older one is still marked. The exact age stays on
 the Monitor tab.
+
+## 1.2.21 - Qstats, and the rate of the panel
+
+### The name
+
+- The overlay, its notification and the report now say Qstats. The name of
+  the app was already Qstats; only the overlay and the notification still
+  said the old name.
+
+### The panel is 144 Hz
+
+- The rate of the panel was read from the mode this app's own window happens
+  to be held at, which is 120 Hz while the panel does 144 Hz. The fastest
+  mode the display supports is the panel, and that is what is shown now.
+- A screen that is not a game is measured by the frames the DISPLAY
+  presented, so a home screen that is scrolled shows the rate of the screen
+  and not the rate of one standing layer of it. The counter of a game is
+  still the counter of its own layer.

@@ -123,7 +123,15 @@ class NativeCollectors(private val context: Context) {
                 error = "No display"
             )
 
-        val rate = display.mode?.refreshRate
+        // The rate of the panel, not the rate this window happens to be held
+        // at. A phone whose panel does 144 Hz is told 120 while its own window
+        // is held down, and a player who wants to know what the screen can do
+        // was told a number that is not the one. The fastest mode the display
+        // supports is the panel.
+        val rate = display.supportedModes
+            .maxOfOrNull { it.refreshRate }
+            ?.takeIf { it > 0f }
+            ?: display.mode?.refreshRate
         if (rate == null || rate <= 0f) {
             return MetricValue.unavailable<Float>(
                 source = "DisplayManager",

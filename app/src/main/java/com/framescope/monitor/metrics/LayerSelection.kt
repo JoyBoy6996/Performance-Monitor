@@ -451,3 +451,19 @@ private fun kindPriority(kind: LayerKind): Int = when (kind) {
     LayerKind.UNKNOWN -> 1
     LayerKind.SYSTEM -> 0
 }
+
+/**
+ * The counter of the display itself: the frames the screen presented.
+ *
+ * This is the number that answers "how fast is this screen", and it is not
+ * the counter of any one layer. A layer of the home screen draws a handful
+ * of frames and then stands still while the display keeps presenting.
+ */
+internal fun displayPresentedFrames(dump: String): Long? =
+    Regex("""Total frames rendered:\s*(\d+)""").find(dump)
+        ?.groupValues?.get(1)?.toLongOrNull()
+
+/** The counter of the first layer in the dump: the frames that layer drew. */
+internal fun layerPresentedFrames(dump: String): Long? =
+    Regex("""totalFrames\s*=\s*(\d+)""").find(dump)
+        ?.groupValues?.get(1)?.toLongOrNull()

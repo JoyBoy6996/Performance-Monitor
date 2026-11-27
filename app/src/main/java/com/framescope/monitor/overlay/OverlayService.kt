@@ -56,6 +56,7 @@ class OverlayService : Service() {
     private var fpsText: TextView? = null
     private var unitText: TextView? = null
     private var frameText: TextView? = null
+    private var refreshText: TextView? = null
     private var recText: TextView? = null
     private var pillBackground: GradientDrawable? = null
     private var titleText: TextView? = null
@@ -200,7 +201,7 @@ class OverlayService : Service() {
      */
     private fun overlayWidthPx(): Int {
         val styleWidth = when (currentStyle) {
-            OverlayStyle.PILL -> 132f
+            OverlayStyle.PILL -> 182f
             OverlayStyle.COMPACT -> 108f
             OverlayStyle.CLASSIC -> 126f
             OverlayStyle.DETAILED -> 138f
@@ -235,6 +236,12 @@ class OverlayService : Service() {
             textSize = 9f * currentScale
         }
         frameText = OverlayViews.value(this, "", Color.parseColor("#CBD5E1"), 11f * currentScale)
+        // The rate of the panel itself. A phone that runs at 144 Hz and a game
+        // that gives 115 fps are two different numbers, and only the first one
+        // says what the phone could do.
+        refreshText = OverlayViews.label(this, "", Color.parseColor("#94A3B8")).apply {
+            textSize = 9f * currentScale
+        }
 
         layout.addView(recText, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -249,11 +256,17 @@ class OverlayService : Service() {
             LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) })
+        layout.addView(refreshText, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { marginStart = OverlayViews.dp(this@OverlayService, 6f) })
 
         attachTouchAndWindow(layout, settings)
     }
 
     private fun buildRtss(settings: AppSettings) {
+        // Only the pill shows the rate of the panel next to the number.
+        refreshText = null
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val pad = OverlayViews.dp(this@OverlayService, 8f * currentScale)
@@ -292,6 +305,7 @@ class OverlayService : Service() {
     }
 
     private fun buildStandard(settings: AppSettings) {
+        refreshText = null
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val pad = OverlayViews.dp(this@OverlayService, 10f * currentScale)
@@ -618,6 +632,13 @@ class OverlayService : Service() {
             stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs)
             else -> "%.1f ms".format(fpsState.frameTimeMs)
         }
+
+        // The rate of the panel. The number of the game and the number the
+        // phone could show are two different things, and a phone that runs at
+        // 144 Hz says so on the pill.
+        refreshText?.text = system.refreshHz?.finiteOrNull()?.let {
+            "${it.roundToInt()} Hz"
+        } ?: ""
 
         if (fpsState.history.isNotEmpty()) {
             graphView?.setValues(fpsState.history, target.toFloat())

@@ -344,7 +344,14 @@ class MetricsEngine(
             val wait = if (fastRetry) {
                 150L
             } else {
-                (settings.sampleIntervalMs.value - elapsedMs).coerceAtLeast(60L)
+                // The gap between two polls is never shorter than the gap the
+                // shell needs to breathe. A poll that asks SurfaceFlinger for
+                // the counters of the whole device takes a moment, and asking
+                // again before the last answer has been read keeps the
+                // compositor busy - which the game feels as a stutter.
+                val interval = settings.sampleIntervalMs.value
+                    .coerceAtLeast(MIN_POLL_GAP_MS)
+                (interval - elapsedMs).coerceAtLeast(60L)
             }
 
             // The wait ends early when the measurement is turned on again.
@@ -858,9 +865,21 @@ class MetricsEngine(
          *
          * It has to cover the slowest source inside it - the counters wait up to
          * four seconds for SurfaceFlinger - or the sample is cancelled before the
-         * source that works for a game gets its turn.
+         * source that works for a game gets its turn. It does not have to be
+         * twelve seconds: a poll that hangs for that long leaves the pill on
+         * "--" for that long and keeps the shell busy while the game is played.
          */
-        private const val SAMPLE_TIMEOUT_MS = 12_000L
+        private const val SAMPLE_TIMEOUT_MS = 5_000L
+
+        /**
+         * The smallest gap between two frame-rate polls.
+         *
+         * The setting of the user is honoured above this. Below it, the polls
+         * come so fast that the shell is asked for the counters of the whole
+         * device more often than the counters can grow into a window - and
+         * the compositor is kept busy while the game is played.
+         */
+        private const val MIN_POLL_GAP_MS = 800
 
         /** How often the native device metrics are read. */
         private const val NATIVE_INTERVAL_MS = 1_000L

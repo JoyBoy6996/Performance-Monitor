@@ -1,5 +1,6 @@
 package com.framescope.monitor.metrics
 
+import android.os.SystemClock
 import com.framescope.monitor.shell.ShellCommands
 import com.framescope.monitor.shell.ShellHub
 
@@ -128,6 +129,16 @@ class FpsPollingEngine(
      */
     suspend fun tick(foregroundPackage: String, displayHz: Float? = null): Tick? {
         if (!ensureEnabled()) return null
+
+        // The dump prints the counters of every layer of the phone and the
+        // compositor holds its lock while it does. Asking for it twice in a
+        // second is felt in the game as a stutter, so the whole device is
+        // asked at most once in that time. The reading of the previous poll
+        // stays on the pill until the next dump has grown into a window.
+        if (!HeavyDumpGate.take(SystemClock.elapsedRealtime())) {
+            lastReason = "Waiting for the frame counters of the device"
+            return null
+        }
 
         // Only the blocks of the app in front are asked for. The dump of the
         // whole device is hundreds of kilobytes and arrives cut in half, and a

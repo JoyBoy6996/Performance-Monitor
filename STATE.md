@@ -630,3 +630,37 @@ overlay could be on while nothing was being measured. Both are fixed here.
   on, and the first two samples are 150 ms apart, so the counters have a
   window to grow into. The ring buffer of SurfaceFlinger already holds the
   frames that were presented, so the reading of the first poll is a real one.
+
+## 1.2.18 - the game runs again, and the panel says its rate
+
+The overlay could be on while the measurement ran, and the measurement was
+too heavy for a match: the counters of every layer of the phone were printed
+two or three times a second, and the compositor holds its lock while it prints
+them. The game felt every one of those dumps. The pill also blanked to
+"-- FPS" for four to eight seconds at a time, because a poll that takes that
+long cannot produce a reading before the next one starts.
+
+### One dump a second, and one at a time
+
+- The counters of the whole device are printed at most once a second, and the
+  device-wide counter and the counter of the app in front share that one
+  window: they cannot both print the device at the same moment.
+- The device-wide read is only warmed up when the own layer of the game stops
+  answering. While that layer answers, the whole-device dump buys nothing -
+  it is only the fallback.
+- The gap between two polls is never shorter than 800 ms, and a poll is
+  cancelled after five seconds instead of twelve. A poll that hangs for
+  twelve seconds leaves the pill on "--" for twelve seconds.
+
+### The number stays on the pill
+
+- A reading that a missed poll cannot replace is kept for ten seconds, and its
+  age grows with the monotonic clock, so the pill says how old the number is
+  instead of pretending it is current. It can never look like the old
+  five-minute "stuck FPS" bug.
+
+### The rate of the panel is on the pill
+
+- The pill shows the rate of the panel next to the rate of the game: a phone
+  that presents 144 frames a second says so, and the game that gives 115 of
+  them is a different number.

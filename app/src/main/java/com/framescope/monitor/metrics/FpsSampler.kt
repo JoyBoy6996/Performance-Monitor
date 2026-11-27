@@ -181,6 +181,15 @@ class FpsSampler(
     private var globalCounterUnavailable = false
 
     /**
+     * When the own layer of the game last answered.
+     *
+     * While it answers, the device-wide counter is only a fallback and its
+     * dump - the counters of every layer of the phone - buys nothing. The
+     * fallback is warmed up again as soon as the own layer stops answering.
+     */
+    private var ownLayerWorkedAtMs = 0L
+
+    /**
      * The frame counters of SurfaceFlinger.
      *
      * This is the source that works for games: a game draws into a buffer
@@ -428,7 +437,13 @@ class FpsSampler(
         // the slow layer probes. Their dumps can take longer than the two-second
         // baseline window, which used to clear it on every poll and leave the
         // fallback with no window to measure at all.
-        val earlyGlobalReading = if (gameTarget) {
+        //
+        // The warm-up is only needed when the own layer of the game is not
+        // answering. When it does answer, the device-wide read is a whole
+        // device dump that buys nothing: it is the fallback, and the fallback
+        // is only needed when the first source fails.
+        val ownLayerAnswers = nowMs - ownLayerWorkedAtMs < OWN_LAYER_TRUST_MS
+        val earlyGlobalReading = if (gameTarget && !ownLayerAnswers) {
             readGlobalFrames(pkg, nowUptime, appPackage = pkg)
         } else null
 
@@ -465,7 +480,10 @@ class FpsSampler(
         } else {
             readOwnLayer()
         }
-        if (fromOwnLayer != null) return fromOwnLayer
+        if (fromOwnLayer != null) {
+            ownLayerWorkedAtMs = nowMs
+            return fromOwnLayer
+        }
 
         // A game's own layer can stop answering entirely (many ROMs keep no
         // present counter for the game's buffer). Without this fallback the pill
@@ -570,6 +588,10 @@ class FpsSampler(
         nowUptime: Long,
         appPackage: String? = pkg
     ): GlobalFpsReading? {
+        // The whole device is printed for this one number. The gate keeps it
+        // to one dump a second; the counters grow into a window in that time.
+        if (!HeavyDumpGate.take(SystemClock.elapsedRealtime())) return null
+
         val dump = hub.execOrNull(
             ShellCommands.surfaceTotalFrames(),
             GLOBAL_COUNTER_TIMEOUT_MS
@@ -1557,13 +1579,18 @@ class FpsSampler(
         availability: MetricAvailability
     ): FpsState {
         val last = _state.value
-        // One slow or empty shell call must not blank the pill. More than a
-        // second without fresh frames is stale though: keep the reading and its
-        // own, already clock-checked age, but never recompute that age from wall
-        // time - that is how the "134117 ms old" line was produced.
+        // One slow or empty shell call must not blank the pill. The reading is
+        // kept, and its age grows with the monotonic clock so the pill can say
+        // how old the number is. Wall time is never used for that: that is how
+        // the "134117 ms old" line was produced.
         val nowElapsedNs = SystemClock.elapsedRealtimeNanos()
         val keep = last.fps > 0f &&
             nowElapsedNs - last.measuredAtElapsedNanos < KEEP_LAST_READING_NS
+        val ageMs = if (keep) {
+            keptReadingAgeMs(nowElapsedNs, last.measuredAtElapsedNanos)
+        } else {
+            0L
+        }
         return FpsState(
             fps = if (keep) last.fps else 0f,
             frameTimeMs = if (keep) last.frameTimeMs else 0f,
@@ -1576,7 +1603,7 @@ class FpsSampler(
             reason = reason,
             availability = if (keep) MetricAvailability.AVAILABLE else availability,
             measuredAtElapsedNanos = if (keep) last.measuredAtElapsedNanos else nowElapsedNs,
-            sampleAgeMs = if (keep) last.sampleAgeMs else 0L,
+            sampleAgeMs = if (keep) ageMs else 0L,
             measurementWindowMs = if (keep) last.measurementWindowMs else 0L,
             sourceKind = kind,
             low1PercentFps = if (keep) last.low1PercentFps else null,
@@ -1745,11 +1772,20 @@ class FpsSampler(
 
         /**
          * How long one real reading survives missed polls. A privileged shell
-         * call can take a couple of seconds under load; three seconds keeps the
-         * last true number through that, then blanks it. It can never look like
-         * the old five-minute "stuck FPS" bug.
+         * call can take a couple of seconds under load, and the dumps of the
+         * whole device are now asked for once a second, so a poll that misses
+         * is a normal thing and not a fault. Ten seconds keeps the last true
+         * number through that - with its own age on the pill, so it cannot
+         * look like a current reading - and then blanks it. It can never look
+         * like the old five-minute "stuck FPS" bug.
          */
-        private const val KEEP_LAST_READING_NS = 3_000_000_000L
+        private const val KEEP_LAST_READING_NS = 10_000_000_000L
+
+        /**
+         * How long the own layer of the game keeps the device-wide fallback
+         * switched off.
+         */
+        private const val OWN_LAYER_TRUST_MS = 10_000L
 
         /**
          * How long the game that was just in front stays the measurement target
@@ -1930,3 +1966,14 @@ private class GameCapTracker {
 
     private fun current(): CapReading? = cap?.let { CapReading(it, cause ?: "measured") }
 }
+
+/**
+ * The age of a reading that is kept because the poll missed.
+ *
+ * The age is counted on the monotonic clock - the same clock the reading was
+ * stamped on - so it grows while the reading waits and never jumps because a
+ * clock was changed. Wall time is never used for that: that is how the
+ * "134117 ms old" line was produced.
+ */
+internal fun keptReadingAgeMs(nowElapsedNs: Long, measuredAtElapsedNs: Long): Long =
+    ((nowElapsedNs - measuredAtElapsedNs) / 1_000_000L).coerceAtLeast(0L)

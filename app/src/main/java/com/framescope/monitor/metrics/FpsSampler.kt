@@ -239,6 +239,10 @@ class FpsSampler(
      */
     private var idleSweepNextAt = 0L
 
+    /** The fastest rate the display of the phone supports, and when it was read. */
+    private var hardwareMaxHz: Float? = null
+    private var hardwareMaxHzAtMs = 0L
+
     private val history = ArrayDeque<Float>()
 
     /**
@@ -609,7 +613,12 @@ class FpsSampler(
         // and what a standing screen does not have.
         val layerFrames = layerPresentedFrames(dump)
         val displayFrames = displayPresentedFrames(dump)
-        val frames = if (displayCounter) displayFrames ?: layerFrames else layerFrames
+        // The counter of the display is the rate of the screen. The counter of
+        // one layer is the rate of that layer, and a standing layer of a
+        // launcher has none - the window layer of the app in front is measured
+        // instead, which is the layer that really draws while a finger is on
+        // the glass.
+        val frames = if (displayCounter) displayFrames else layerFrames
         if (frames == null) {
             // The dump did not answer. The slow per-layer sources may still work.
             globalCounterUnavailable = true
@@ -1082,11 +1091,38 @@ class FpsSampler(
      * why the interface used to stop at 120 on a 144 Hz panel.
      */
     private fun refreshRateHz(): Float? {
-        _displayHz.value?.takeIf {
-            it > 0f && SystemClock.elapsedRealtime() - displayHzAtMs < DISPLAY_HZ_EXPIRE_MS
-        }?.let { return it }
-        val ctx = context ?: return null
-        return NativeCollectors(ctx.applicationContext).refreshRate().value
+        val now = SystemClock.elapsedRealtime()
+        val shell = _displayHz.value?.takeIf {
+            it > 0f && now - displayHzAtMs < DISPLAY_HZ_EXPIRE_MS
+        }
+        val ctx = context ?: return shell
+        val hardware = hardwareMaxHz(now, ctx)
+        // The panel can do more than it does at this very moment. An LTPO
+        // screen holds 120 Hz while it is idle and reaches 144 Hz while a
+        // finger is on it, and SurfaceFlinger reports the rate it is running
+        // at now. The ceiling has to be the fastest the panel can do, or a
+        // scroll that really runs at 144 is cut down to the idle rate.
+        return maxOf(shell ?: 0f, hardware ?: 0f).takeIf { it > 0f }
+    }
+
+    /**
+     * The fastest rate the display of the phone supports.
+     *
+     * This is the hardware, not the mode the window of this app happens to be
+     * held at. It is read from the display manager, which answers without a
+     * shell, and it is kept for a few seconds because it cannot change while
+     * the app runs.
+     */
+    private fun hardwareMaxHz(nowMs: Long, ctx: Context): Float? {
+        if (hardwareMaxHzAtMs != 0L && nowMs - hardwareMaxHzAtMs < HARDWARE_HZ_EXPIRE_MS) {
+            return hardwareMaxHz
+        }
+        val rate = NativeCollectors(ctx.applicationContext).refreshRate().value
+        if (rate != null && rate > 0f) {
+            hardwareMaxHz = rate
+            hardwareMaxHzAtMs = nowMs
+        }
+        return hardwareMaxHz
     }
 
     /** Refreshes the panel rate at most once every few seconds. */
@@ -1473,7 +1509,12 @@ class FpsSampler(
         gfxCounter.frameBudgetNs = frameBudgetNs(targetFps)
 
         val result = gfxCounter.onSample(pkg, timestamps, nowUptime)
-        val rawFps = result.recentFps
+        // The frames of the last 550 ms. On a 144 Hz panel that is about 79
+        // frames, well inside the history the system keeps, so a scroll that
+        // runs at the rate of the panel reaches it - the frames are counted
+        // over their own window instead of over the one of the counter.
+        val windowFps = gfxWindowFps(timestamps, nowUptime, now)
+        val rawFps = windowFps ?: result.recentFps
         // A number that no screen can show is a timestamp that was read wrong,
         // not a frame rate. The 144 Hz panel cannot present 298 frames, and
         // that is what the interface showed before this check.
@@ -1853,6 +1894,9 @@ class FpsSampler(
          * genuinely standing still.
          */
         private const val IDLE_SWEEP_COOLDOWN_MS = 3_000L
+
+        /** How long the fastest rate of the display is kept. */
+        private const val HARDWARE_HZ_EXPIRE_MS = 30_000L
     }
 }
 
@@ -2000,3 +2044,32 @@ private class GameCapTracker {
  */
 internal fun keptReadingAgeMs(nowElapsedNs: Long, measuredAtElapsedNs: Long): Long =
     ((nowElapsedNs - measuredAtElapsedNs) / 1_000_000L).coerceAtLeast(0L)
+
+/**
+ * The rate of the frames that were completed in the last 550 ms.
+ *
+ * The frames are counted over their own window. A 144 Hz panel presents
+ * about 79 frames in that time, so the answer is the rate of the panel while
+ * a finger is on the glass and not the rate of the idle screen.
+ *
+ * The frames are stamped on whichever clock the system used, so both clocks
+ * are offered and the one that holds the more frames of the window wins.
+ */
+internal fun gfxWindowFps(
+    timestamps: List<Long>,
+    nowUptimeNs: Long,
+    nowElapsedNs: Long,
+    windowNs: Long = 550_000_000L
+): Float? {
+    if (timestamps.size < 2) return null
+    val uptimeFrames = timestamps.filter { nowUptimeNs - it in 0L..windowNs }
+    val elapsedFrames = timestamps.filter { nowElapsedNs - it in 0L..windowNs }
+    val frames = if (uptimeFrames.size >= elapsedFrames.size) uptimeFrames else elapsedFrames
+    if (frames.size < 2) return null
+    // The order of the frames is not the order of the dump: the window is
+    // counted over the oldest and the newest of them, whatever order they
+    // were written in.
+    val span = frames.max() - frames.min()
+    if (span <= 0L) return null
+    return (frames.size - 1) * 1_000_000_000f / span
+}

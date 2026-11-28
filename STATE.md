@@ -714,3 +714,27 @@ the Monitor tab.
   presented, so a home screen that is scrolled shows the rate of the screen
   and not the rate of one standing layer of it. The counter of a game is
   still the counter of its own layer.
+
+## 1.2.22 - the 144 Hz scroll is a 144 Hz scroll again
+
+### The ceiling was the idle rate
+
+- The panel of an LTPO screen holds 120 Hz while it is idle and reaches
+  144 Hz while a finger is on it. SurfaceFlinger reports the rate it is
+  running at now, so the frame rate of a scroll that really ran at 144 was
+  cut down to 120 - or refused as impossible. The ceiling is now the fastest
+  rate the display supports, and the rate of the panel is only the shell's
+  answer when it is higher.
+
+### A screen that is not a game
+
+- A launcher, a messenger and the Play Store draw into the window of their
+  activity, not into a surface of their own. Their rate is the rate of that
+  window layer, and it is measured from the frames that layer presented.
+- The frames of the last 550 ms are counted over their own window in the
+  gfxinfo fallback as well. A 144 Hz panel presents about 79 frames in that
+  time, so the scroll reaches 144 frames a second (6.9 ms).
+- The frames that the system marked are left out of gfxinfo: a frame that
+  was skipped is not a frame of the app.
+- The counter of a game is still the counter of its own layer, and the game
+  still locks at 60, 90 and 120 frames a second.

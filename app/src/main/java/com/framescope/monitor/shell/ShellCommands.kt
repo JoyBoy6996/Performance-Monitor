@@ -513,6 +513,7 @@ object Parsers {
         val header = lines[headerIndex].split(",").map { it.trim() }
         val completedIndex = header.indexOfFirst { it.equals("FrameCompleted", true) }
         if (completedIndex < 0) return emptyList()
+        val flagsIndex = header.indexOfFirst { it.equals("Flags", true) }
         val out = ArrayList<Long>()
         for (i in headerIndex + 1 until lines.size) {
             val line = lines[i].trim()
@@ -522,6 +523,13 @@ object Parsers {
             }
             val cols = line.split(",")
             if (cols.size <= completedIndex) continue
+            // A frame that was skipped or that the system marked is not a
+            // frame of the app. Only the frames that completed without a flag
+            // say how fast the app really drew.
+            if (flagsIndex >= 0) {
+                val flags = cols.getOrNull(flagsIndex)?.trim()?.toLongOrNull() ?: 0L
+                if (flags != 0L) continue
+            }
             cols[completedIndex].trim().toLongOrNull()?.let { if (it > 0) out.add(it) }
         }
         return out

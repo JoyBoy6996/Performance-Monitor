@@ -62,11 +62,16 @@ class AppContainer(context: Context) {
     val engine = MetricsEngine(hub, settings, store)
     // The overlay and the measurement are one thing to the user. Turning the
     // overlay on starts the measurement with it, so the pill has a number the
-    // moment it appears. Turning it off leaves the measurement alone: a
-    // recording that is running keeps running.
-    val overlay = OverlayController(context.applicationContext) {
-        engine.startMeasurement()
-    }
+    // moment it appears; turning it off stops the measurement with it, so the
+    // phone is not asked for frame counters that nobody is looking at.
+    //
+    // A recording that is running is left alone: it keeps its own state and
+    // it is not closed behind the user's back.
+    val overlay = OverlayController(
+        context = context.applicationContext,
+        onEnabled = { engine.startMeasurement() },
+        onDisabled = { engine.stopMeasurement() }
+    )
 
     init {
         // The overlay follows the master switch: with the measurement off

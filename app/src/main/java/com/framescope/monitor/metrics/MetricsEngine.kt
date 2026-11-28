@@ -210,6 +210,23 @@ class MetricsEngine(
         wakeUp.value = wakeUp.value + 1
     }
 
+    /**
+     * Turns the measurement off.
+     *
+     * The overlay and the measurement are one thing to the user: with the
+     * overlay gone there is nothing to show the frame rate on, and a sampler
+     * that keeps asking SurfaceFlinger for counters is work the phone does
+     * for nothing.
+     *
+     * A running recording is left alone. It keeps its own state and it stops
+     * receiving frames; it is not closed behind the user's back.
+     */
+    fun stopMeasurement() {
+        settings.measurementEnabled.value = false
+        freshStart = false
+        wakeUp.value = wakeUp.value + 1
+    }
+
     fun start() {
         if (switchWatcher == null) {
             // Turning the measurement on has to end the wait of the frame rate

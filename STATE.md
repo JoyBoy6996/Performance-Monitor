@@ -807,3 +807,22 @@ taken is a detail of the report, where it belongs.
 - The frames the display presented are the last resort now, and only for a
   screen that is not a game: they belong to the screen, not to the app, so
   they are published only when the app itself has no layer that can be read.
+
+## 1.2.27 - the overlay and the measurement are one switch
+
+### The gap
+
+- Turning the overlay on started the measurement with it: the pill had a
+  number the moment it appeared.
+- Turning the overlay off left the measurement running. The sampler kept
+  asking the compositor for counters that nobody was looking at, and the
+  phone paid for it.
+
+### What it is now
+
+- The overlay is the switch. On means the measurement runs, off means it
+  stops - the same one switch Scene keeps.
+- The Stop button of the notification closes the overlay, so the measurement
+  goes with it there too.
+- A recording that is running is left alone. It keeps its own state and it
+  is not closed behind the user's back.

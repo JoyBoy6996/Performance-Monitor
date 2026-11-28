@@ -105,6 +105,10 @@ class OverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            // The notification closes the overlay, so the measurement goes with
+            // it: with no pill on the screen there is nothing to show the
+            // frame rate on. A recording that is running is left alone.
+            (applicationContext as? FrameScopeApp)?.container?.engine?.stopMeasurement()
             removeOverlay()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

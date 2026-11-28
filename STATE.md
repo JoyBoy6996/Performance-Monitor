@@ -759,3 +759,17 @@ the Monitor tab.
   144. The pill says "120/144 Hz" while the screen runs at 120 and "144
   Hz" when the panel is at its fastest, and the Monitor tab shows the
   fastest rate the panel can do.
+
+## 1.2.24 - a game is 120, everything else is 144
+
+A game is measured by the frames of its own layer, so BGMI at its 120 fps
+cap reads 120 - that number belongs to the game and nothing else may
+replace it.
+
+Every other app is measured by the rate of the panel. The screen
+presents at that rate whatever the app draws into it; a launcher that is
+scrolled does not present fewer frames, it presents them in another
+layer. Reading that layer gave 119 next to a label of 144, and it looked
+like a fault of the app while it was a fact about the layer. The pill
+reads 144 outside a game and 120 in BGMI, and the label says the rate the
+panel can do.

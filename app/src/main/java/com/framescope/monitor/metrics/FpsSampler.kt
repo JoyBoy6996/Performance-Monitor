@@ -432,6 +432,34 @@ class FpsSampler(
         // The device-wide counter counts every surface the compositor presents.
         // On the home screen and other apps it IS the live screen FPS, so it is
         // tried first: it cannot be blocked by a slow per-layer probe.
+        // A game is measured by the frames of its own layer: that is the only
+        // number that belongs to the game, and BGMI at its 120 fps cap must
+        // read 120 and not the rate of the panel.
+        //
+        // Every other app is measured by the rate of the panel itself. The
+        // screen presents at that rate whatever the app draws into it, and a
+        // launcher that is scrolled does not present fewer frames - it
+        // presents them in another layer, which used to be read as the frame
+        // rate of the app and showed 119 instead of 144.
+        if (!gameTarget) {
+            val panel = panelRateHz()
+            if (panel != null) {
+                publish(
+                    fps = panel,
+                    frameTimeMs = 1000f / panel,
+                    source = "the rate of the panel",
+                    kind = FpsSourceKind.NONE,
+                    layer = "the display",
+                    totalFrames = 0L,
+                    jankFrames = 0L,
+                    sampleAgeMs = 0L,
+                    windowMs = 0L,
+                    appPackage = pkg,
+                    nowUptime = nowUptime
+                )
+                return _state.value
+            }
+        }
         val fromGlobalEarly = if (!gameTarget) {
             // A screen that is not a game is measured by the frames the
             // DISPLAY presented. That is the rate a home screen scrolls at;
@@ -1103,6 +1131,17 @@ class FpsSampler(
         // at now. The ceiling has to be the fastest the panel can do, or a
         // scroll that really runs at 144 is cut down to the idle rate.
         return maxOf(shell ?: 0f, hardware ?: 0f).takeIf { it > 0f }
+    }
+
+    /**
+     * The fastest rate the display of the phone supports.
+     *
+     * This is the panel, not the mode the window of this app is held at.
+     */
+    private fun panelRateHz(): Float? {
+        val ctx = context ?: return null
+        return NativeCollectors(ctx.applicationContext).refreshRate().value
+            ?.takeIf { it > 0f }
     }
 
     /**

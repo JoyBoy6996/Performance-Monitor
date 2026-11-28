@@ -636,14 +636,10 @@ class OverlayService : Service() {
         // The rate of the panel. The number of the game and the number the
         // phone could show are two different things, and a phone that runs at
         // 144 Hz says so on the pill.
-        refreshText?.text = system.refreshHz?.finiteOrNull()?.let { now ->
-            val max = system.refreshHzMax?.finiteOrNull()
-            if (max != null && max > now + 0.5f) {
-                "${now.roundToInt()}/${max.roundToInt()} Hz"
-            } else {
-                "${now.roundToInt()} Hz"
-            }
-        } ?: ""
+        refreshText?.text = panelRateLabel(
+            system.refreshHzMax?.finiteOrNull(),
+            system.refreshHz?.finiteOrNull()
+        )
 
         if (fpsState.history.isNotEmpty()) {
             graphView?.setValues(fpsState.history, target.toFloat())

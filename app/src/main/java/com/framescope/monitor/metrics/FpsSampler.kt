@@ -224,6 +224,15 @@ class FpsSampler(
     /** Which provider produced the reading that is on screen. */
     private var activeSource: FpsSourceKind = FpsSourceKind.NONE
 
+    /**
+     * Whether the target of this poll is a game.
+     *
+     * A game is held to the caps it runs at - 60, 90, 120 - because the
+     * compositor adds a few frames on top of them. An ordinary app is not: it
+     * is shown exactly what it presented, so 138 stays 138 and 125 stays 125.
+     */
+    private var measuringGame = false
+
     /** Set when a layer was found but has not drawn two frames yet. */
     private var pendingWarmUpReason: String? = null
 
@@ -409,6 +418,7 @@ class FpsSampler(
         // is drawing, and the device-wide counter is then the real screen FPS.
         val gameTarget = (detectedGame || (rememberedFresh && pkg == remembered)) &&
             looksLikeGameTarget(pkg, nowMs)
+        measuringGame = gameTarget
 
         if (pkg != foregroundApp) {
             // Reset only the per-layer baselines. Never blank the published FPS
@@ -436,39 +446,6 @@ class FpsSampler(
         // number that belongs to the game, and BGMI at its 120 fps cap must
         // read 120 and not the rate of the panel.
         //
-        // Every other app is measured by the rate of the panel itself. The
-        // screen presents at that rate whatever the app draws into it, and a
-        // launcher that is scrolled does not present fewer frames - it
-        // presents them in another layer, which used to be read as the frame
-        // rate of the app and showed 119 instead of 144.
-        if (!gameTarget) {
-            val panel = panelRateHz()
-            if (panel != null) {
-                publish(
-                    fps = panel,
-                    frameTimeMs = 1000f / panel,
-                    source = "the rate of the panel",
-                    kind = FpsSourceKind.NONE,
-                    layer = "the display",
-                    totalFrames = 0L,
-                    jankFrames = 0L,
-                    sampleAgeMs = 0L,
-                    windowMs = 0L,
-                    appPackage = pkg,
-                    nowUptime = nowUptime
-                )
-                return _state.value
-            }
-        }
-        val fromGlobalEarly = if (!gameTarget) {
-            // A screen that is not a game is measured by the frames the
-            // DISPLAY presented. That is the rate a home screen scrolls at;
-            // the counter of a single layer is the rate of that layer, and a
-            // standing layer has none.
-            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg, displayCounter = true)
-        } else null
-        if (fromGlobalEarly != null) return fromGlobalEarly
-
         // For a game, warm the device-wide baseline with one quick read before
         // the slow layer probes. Their dumps can take longer than the two-second
         // baseline window, which used to clear it on every poll and leave the
@@ -483,6 +460,58 @@ class FpsSampler(
             readGlobalFrames(pkg, nowUptime, appPackage = pkg)
         } else null
 
+        // A game is measured from the frames of its own layer. That is the
+        // only number that belongs to the game: BGMI at its 120 fps cap
+        // presents 120 frames a second in its own surface, and the phone and
+        // the processor decide whether it can hold that rate. The device-wide
+        // counter is the fallback for a game whose own counter is frozen.
+        suspend fun readOwnLayer(): FpsState? =
+            sampleFromSceneLatency(pkg, nowUptime)
+                ?: sampleFromCounters(pkg, targetFps, nowUptime)
+                // Fallbacks for a game whose own counter entry is frozen. The
+                // unnamed "active layer" probe is not used: while the pill is
+                // dragged it answers for Qstats' own surface at 144 Hz.
+                ?: sampleFromLatency(pkg, targetFps, nowUptime)
+                ?: sampleFromGfxInfo(pkg, targetFps, nowUptime)
+
+        // Every other app is measured from the frames that APP presented, the
+        // same way a game is: the present timestamps of its own window, and
+        // then the frames its graphics pipeline drew over the last 550 ms.
+        // That is the real rate of the app - 144 when it really draws 144,
+        // 138 when frames are missed, 60 for a video, 30 for a slow screen.
+        //
+        // It used to publish the rate the panel can do - a constant 144 on
+        // this phone - so every app read 144 whatever it was really doing.
+        // The panel's rate is the ceiling of the reading and is shown beside
+        // it, but it is never the reading itself.
+        suspend fun readAppWindow(): FpsState? =
+            sampleFromSceneLatency(pkg, nowUptime)
+                ?: sampleFromGfxInfo(pkg, targetFps, nowUptime)
+                ?: sampleFromCounters(pkg, targetFps, nowUptime)
+                ?: sampleFromLatency(pkg, targetFps, nowUptime)
+
+        // The layer read has a budget so that a cancelled layer dump cannot
+        // consume the whole poll: the honest device-wide fallback has to fit
+        // inside the sample timeout.
+        val fromOwnLayer = if (gameTarget) {
+            withTimeoutOrNull(OWN_LAYER_BUDGET_MS) { readOwnLayer() }
+        } else {
+            withTimeoutOrNull(OWN_LAYER_BUDGET_MS) { readAppWindow() }
+        }
+        if (fromOwnLayer != null) {
+            ownLayerWorkedAtMs = nowMs
+            return fromOwnLayer
+        }
+
+        // The frames the DISPLAY presented are the last resort for a screen
+        // that is not a game. They belong to the screen, not to the app, so
+        // they are only published when the app itself has no layer that can
+        // be read.
+        val fromGlobalEarly = if (!gameTarget) {
+            sampleFromGlobalCounter(pkg, nowUptime, appPackage = pkg, displayCounter = true)
+        } else null
+        if (fromGlobalEarly != null) return fromGlobalEarly
+
         // A short window is only a delay; the next poll must arrive quickly so
         // the window can finish. Do not start second-long layer probes here,
         // they used to push the next poll past the window forever.
@@ -494,31 +523,6 @@ class FpsSampler(
                 availability = MetricAvailability.WARMING_UP,
                 nowUptime = nowUptime
             )
-        }
-
-        // Scene measures the target from the frames of its own layer. A game's
-        // layer is the honest source for its FPS and is tried first for a game;
-        // on other screens these are only a fallback to the device-wide counter.
-        suspend fun readOwnLayer(): FpsState? =
-            sampleFromSceneLatency(pkg, nowUptime)
-                ?: sampleFromCounters(pkg, targetFps, nowUptime)
-                // Fallbacks for a game whose own counter entry is frozen. The
-                // unnamed "active layer" probe is not used: while the pill is
-                // dragged it answers for Qstats' own surface at 144 Hz.
-                ?: sampleFromLatency(pkg, targetFps, nowUptime)
-                ?: sampleFromGfxInfo(pkg, targetFps, nowUptime)
-
-        // The game path still owns the first attempt, but it has a budget that
-        // leaves room for the honest device-wide fallback inside the sample
-        // timeout. A cancelled layer dump must not consume the whole poll.
-        val fromOwnLayer = if (gameTarget) {
-            withTimeoutOrNull(OWN_LAYER_BUDGET_MS) { readOwnLayer() }
-        } else {
-            readOwnLayer()
-        }
-        if (fromOwnLayer != null) {
-            ownLayerWorkedAtMs = nowMs
-            return fromOwnLayer
         }
 
         // A game's own layer can stop answering entirely (many ROMs keep no
@@ -699,7 +703,7 @@ class FpsSampler(
         // overlay frames can therefore push a 90 fps lobby to 92 or a 120 fps
         // match to 129. Hold the number at the cap it just crossed; never push a
         // reading upward, and leave every other source untouched.
-        val settledFps = settleToGameCap(fps, displayHz)
+        val settledFps = settleReading(fps, displayHz)
         return GlobalFpsReading(
             fps = settledFps,
             frameTimeMs = 1_000f / settledFps,
@@ -795,7 +799,7 @@ class FpsSampler(
         val fps = stats.fps
         val displayHz = refreshRateHz()
         if (fps < MIN_GAME_FPS || !isPlausibleFps(fps, displayHz)) return null
-        val settled = settleToGameCap(fps, displayHz)
+        val settled = settleReading(fps, displayHz)
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = "the active presented layer"
@@ -903,7 +907,7 @@ class FpsSampler(
         // The counter sees the game plus the small compositor overhead, so a
         // 90 fps lobby can read 93 and a 120 fps match 129. Settle a small
         // overshoot onto the real cap; never push a low reading upward.
-        val settledFps = settleToGameCap(fps.toFloat(), refreshRateHz())
+        val settledFps = settleReading(fps.toFloat(), refreshRateHz())
         publish(
             fps = settledFps,
             frameTimeMs = if (settledFps > 0f) (1000f / settledFps).toFloat() else 0f,
@@ -1002,7 +1006,7 @@ class FpsSampler(
         if (!sceneResult.isSceneActive || sceneResult.fps <= 0) return null
         val fps = sceneResult.fps.toFloat()
         if (!isPlausibleFps(fps)) return null
-        val settled = settleToGameCap(fps, refreshRateHz())
+        val settled = settleReading(fps, refreshRateHz())
 
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = layer
@@ -1072,6 +1076,22 @@ class FpsSampler(
      * pulled down; a reading below a cap is never inflated, and a game running
      * at a rate that is not one of these steps is published as measured.
      */
+    /**
+     * The reading as it is published.
+     *
+     * A game is settled onto the cap it runs at, because the compositor adds a
+     * few frames on top of the game's own rate. An ordinary app is not: the
+     * frames it presented are the number, so 138 stays 138.
+     */
+    internal fun settleReading(fps: Float, displayHz: Float?, isGame: Boolean = measuringGame): Float {
+        if (isGame) return settleToGameCap(fps, displayHz)
+        // No screen presents more frames than it refreshes. A reading above the
+        // panel is held at the panel, and a reading below it is left alone.
+        val ceiling = displayHz?.takeIf { it > 0f }
+        if (ceiling != null && fps > ceiling) return ceiling
+        return fps
+    }
+
     internal fun settleToGameCap(fps: Float, displayHz: Float?): Float {
         val ceiling = displayHz?.takeIf { it > 0f }
         if (ceiling != null && fps > ceiling * 1.02f && fps <= ceiling * 1.5f) {
@@ -1131,17 +1151,6 @@ class FpsSampler(
         // at now. The ceiling has to be the fastest the panel can do, or a
         // scroll that really runs at 144 is cut down to the idle rate.
         return maxOf(shell ?: 0f, hardware ?: 0f).takeIf { it > 0f }
-    }
-
-    /**
-     * The fastest rate the display of the phone supports.
-     *
-     * This is the panel, not the mode the window of this app is held at.
-     */
-    private fun panelRateHz(): Float? {
-        val ctx = context ?: return null
-        return NativeCollectors(ctx.applicationContext).refreshRate().value
-            ?.takeIf { it > 0f }
     }
 
     /**
@@ -1352,7 +1361,7 @@ class FpsSampler(
         }
         // The presentation timestamps are exact, but this path used to bypass the
         // cap and let the overlay show 133 on a 120 Hz screen.
-        val fps = settleToGameCap(rawFps, refreshRateHz())
+        val fps = settleReading(rawFps, refreshRateHz())
 
         publish(
             fps = fps,
@@ -1486,7 +1495,7 @@ class FpsSampler(
 
         // A few compositor frames on top make 90 read as 93 and 120 as 129.
         // Settle a small overshoot onto the cap, never push a low reading up.
-        val settled = settleToGameCap(best.fps, refreshRateHz())
+        val settled = settleReading(best.fps, refreshRateHz())
         activeSource = FpsSourceKind.SURFACE_FLAINGER_LATENCY
         measuredLayer = best.layer
         pendingWarmUpReason = null
@@ -1569,7 +1578,7 @@ class FpsSampler(
         }
         // This path also used to publish the raw reading, so the overlay could
         // show more than the screen refreshes even after the other paths were fixed.
-        val fps = settleToGameCap(rawFps, refreshRateHz())
+        val fps = settleReading(rawFps, refreshRateHz())
 
         publish(
             fps = fps,

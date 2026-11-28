@@ -781,3 +781,29 @@ old" - and it told the reader about the measurement instead of about the
 game. The pill shows the reading and nothing else now: the number of
 frames a second and the time a frame took. How long ago the reading was
 taken is a detail of the report, where it belongs.
+
+## 1.2.26 - the number is what the app really drew
+
+### The 144 was not a measurement
+
+- Every app that was not a game published the rate the panel can do - a
+  constant 144 on this phone - as its frame rate. It was a fact about the
+  screen, not about the app, and every app read the same number whatever it
+  was doing.
+- The panel's rate is now only the ceiling of the reading, and it is shown
+  beside it. The reading itself is measured.
+
+### Scene's rule, for every app
+
+- A screen is measured from the frames the app in front actually presented:
+  the present timestamps of its own layer, and then the frames its graphics
+  pipeline drew over the last 550 ms.
+- A game is measured from its own layer exactly as before: BGMI at its 120 fps
+  cap reads 120, at 90 it reads 90, and the phone and the processor decide
+  whether it can hold that rate.
+- An ordinary app is measured the same way. A browser that really draws 144
+  reads 144, one that misses frames reads 138, a video reads 60 and a slow
+  screen reads 30. Nothing is rounded to a step: 138 stays 138.
+- The frames the display presented are the last resort now, and only for a
+  screen that is not a game: they belong to the screen, not to the app, so
+  they are published only when the app itself has no layer that can be read.

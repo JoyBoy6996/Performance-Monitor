@@ -616,22 +616,16 @@ class OverlayService : Service() {
             ?: settings.fpsThreshold.value
         val fpsVal = fpsState.fps
 
-        // A reading that is older than a couple of seconds is not a live reading, and
-        // it says so instead of looking like a current number.
-        val stale = fpsState.valid && OverlayFreshness.isStale(fpsState.sampleAgeMs)
+        // The age of a reading is never shown on the pill. The number is the
+        // reading; how long ago it was taken is a detail of the measurement,
+        // not of the game, and it kept appearing in the middle of a run.
 
         fpsText?.text = if (fpsState.valid) "%.1f".format(fpsVal) else "--"
-        fpsText?.setTextColor(
-            if (stale) STALE_COLOR else OverlayViews.fpsColor(fpsVal, target)
-        )
+        fpsText?.setTextColor(OverlayViews.fpsColor(fpsVal, target))
 
         // Cap changes are only written into the completed match record; the
         // live pill shows the measured FPS and frame time, not a cap guess.
-        frameText?.text = when {
-            !fpsState.valid -> ""
-            stale -> "%.1f ms - %d ms old".format(fpsState.frameTimeMs, fpsState.sampleAgeMs)
-            else -> "%.1f ms".format(fpsState.frameTimeMs)
-        }
+        frameText?.text = pillFrameTimeText(fpsState.frameTimeMs, fpsState.valid)
 
         // The rate of the panel. The number of the game and the number the
         // phone could show are two different things, and a phone that runs at
@@ -745,7 +739,6 @@ class OverlayService : Service() {
         private const val CHANNEL_ID = "framescope_overlay_channel"
         private const val NOTIFICATION_ID = 4040
 
-        /** The colour of a reading that is too old to be live. */
-        private val STALE_COLOR = Color.parseColor("#94A3B8")
+
     }
 }

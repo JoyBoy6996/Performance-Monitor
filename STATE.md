@@ -773,3 +773,11 @@ layer. Reading that layer gave 119 next to a label of 144, and it looked
 like a fault of the app while it was a fact about the layer. The pill
 reads 144 outside a game and 120 in BGMI, and the label says the rate the
 panel can do.
+
+## 1.2.25 - the pill never says how old the reading is
+
+The pill wrote the age of the reading into the middle of a run - "- 4497 ms
+old" - and it told the reader about the measurement instead of about the
+game. The pill shows the reading and nothing else now: the number of
+frames a second and the time a frame took. How long ago the reading was
+taken is a detail of the report, where it belongs.

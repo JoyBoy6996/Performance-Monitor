@@ -493,9 +493,14 @@ class MetricsEngine(
             ramPercent = memoryValue?.let {
                 if (it.totalBytes > 0L) (it.usedBytes * 100 / it.totalBytes).toInt() else null
             },
-            // The panel runs at its own rate; a window of this app can be held
-            // below it. The fastest of the two is what the screen can show.
-            refreshHz = maxOf(panelRefreshHz ?: 0f, refresh.value ?: 0f)
+            // Two rates, and they are not the same. The panel of an LTPO
+            // screen runs at 120 Hz while it is idle and at 144 Hz while a
+            // finger is on it; the fastest it can do is 144. The rate it is
+            // running at now is what a frame rate has to be judged against,
+            // and the fastest one is what the panel can do.
+            refreshHz = panelRefreshHz ?: maxOf(refresh.value ?: 0f, 0f)
+                .takeIf { it > 0f },
+            refreshHzMax = maxOf(panelRefreshHz ?: 0f, refresh.value ?: 0f)
                 .takeIf { it > 0f },
             updatedAt = System.currentTimeMillis(),
             availability = availability,

@@ -94,4 +94,23 @@ class ForegroundPackageTest {
         assertTrue("the query does not ask for the windowing mode",
             command.contains("windowingMode="))
     }
+
+    @Test
+    fun `the home screen is the app in front when it is the resumed activity`() {
+        val dump = """
+                topResumedActivity=ActivityRecord{9a3f u0 com.android.launcher3/.uioverrides.QuickstepLauncher t42}
+        """.trimIndent()
+
+        assertEquals("com.android.launcher3", Parsers.foregroundPackage(dump))
+    }
+
+    @Test
+    fun `the home screen seen through a floating window is still noise`() {
+        val dump = """
+                topResumedActivity=ActivityRecord{9a3f u0 com.pubg.imobile/.MainActivity t42}
+                mCurrentFocus=Window{4c1e u0 com.android.launcher3/com.android.launcher3.uioverrides.QuickstepLauncher}
+        """.trimIndent()
+
+        assertEquals("com.pubg.imobile", Parsers.foregroundPackage(dump))
+    }
 }

@@ -414,6 +414,21 @@ object Parsers {
     )
 
     /**
+     * The markers of the home screen.
+     *
+     * The home screen is the app in front when the user scrolls it, and its
+     * window draws the frames of that scroll at the rate of the panel. It is
+     * only noise when it is seen through a floating window or a task behind
+     * it - and the resumed activity, the most exact answer there is, says so
+     * on its own.
+     */
+    private val FOREGROUND_HOME_MARKERS = listOf(
+        "launcher",
+        "homescreen",
+        ".home"
+    )
+
+    /**
      * The app the user is looking at.
      *
      * A floating window can hold the focus while a game is drawn behind it: a
@@ -435,7 +450,10 @@ object Parsers {
         val resumed = dump.lineSequence()
             .filter { it.contains("topResumedActivity") || it.contains("mResumedActivity") }
             .mapNotNull { packageOf(it) }
-            .firstOrNull { isForegroundCandidate(it, floating) }
+            // The resumed activity is the app that really has the screen. The
+            // home screen is the app in front when the user scrolls it, and
+            // its window is the layer that carries those frames.
+            .firstOrNull { isForegroundCandidate(it, floating, allowHome = true) }
         if (resumed != null) return resumed
 
         val focused = dump.lineSequence()
@@ -469,9 +487,13 @@ object Parsers {
     /**
      * True when the package can be the app the user is looking at.
      */
-    fun isForegroundCandidate(packageName: String, floating: Set<String>): Boolean =
+    fun isForegroundCandidate(
+        packageName: String,
+        floating: Set<String>,
+        allowHome: Boolean = false
+    ): Boolean =
         packageName.isNotBlank() && packageName != "null" &&
-            packageName !in floating && !isForegroundNoise(packageName)
+            packageName !in floating && !isForegroundNoise(packageName, allowHome)
 
     /**
      * True when the package is never the app the user is looking at.
@@ -479,10 +501,15 @@ object Parsers {
      * The system bars, the launcher, the keyboard and this app itself are
      * never the app a run is about.
      */
-    fun isForegroundNoise(packageName: String): Boolean {
+    fun isForegroundNoise(packageName: String, allowHome: Boolean = false): Boolean {
         val name = packageName.lowercase(Locale.US)
         if (name in FOREGROUND_NOISE) return true
-        return FOREGROUND_NOISE_MARKERS.any { marker -> name.contains(marker) }
+        val markers = if (allowHome) {
+            FOREGROUND_NOISE_MARKERS.filterNot { it in FOREGROUND_HOME_MARKERS }
+        } else {
+            FOREGROUND_NOISE_MARKERS
+        }
+        return markers.any { marker -> name.contains(marker) }
     }
 
     /** The first package-like name in a line of the dump. */

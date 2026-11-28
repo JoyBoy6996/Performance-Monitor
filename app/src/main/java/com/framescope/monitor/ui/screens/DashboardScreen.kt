@@ -512,10 +512,11 @@ private fun HeroPanel(
                         // The rate of the panel itself. It is not the target of
                         // the game, and saying so keeps the two apart.
                         label = "Display",
-                        // The kernel gives the refresh rate as a float with four
-                        // decimals. "120.0000 Hz" is noise; "120 Hz" is the
-                        // number the user is looking for.
-                        value = system.refreshHz?.let { "${it.roundToInt()} Hz" } ?: "--",
+                        // The rate the panel can do. The kernel gives it as a
+                        // float with four decimals - "120.0000 Hz" is noise -
+                        // and a screen that can do 144 says so.
+                        value = (system.refreshHzMax ?: system.refreshHz)
+                            ?.let { "${it.roundToInt()} Hz" } ?: "--",
                         unit = "",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f)

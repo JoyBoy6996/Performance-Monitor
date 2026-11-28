@@ -738,3 +738,24 @@ the Monitor tab.
   was skipped is not a frame of the app.
 - The counter of a game is still the counter of its own layer, and the game
   still locks at 60, 90 and 120 frames a second.
+
+## 1.2.23 - the home screen is measured, and the panel says what it can do
+
+### The home screen was never the app in front
+
+- The home screen was dropped from the answer of the window manager, so on
+  the home screen the app fell back to the coarse usage access, measured
+  some other app and showed "-- FPS" with an age of four seconds. The
+  resumed activity is the app that really has the screen: the home screen
+  is the app in front when it is scrolled, and its window is the layer
+  that carries the frames of the scroll. It is still noise when it is seen
+  through a floating window.
+
+### Two rates, and the pill tells both
+
+- An LTPO screen runs at 120 Hz while it is idle and at 144 Hz while a
+  finger is on it; the home screen of this phone is run by the system at
+  120 Hz, which is why a scroll of it reads 119 frames a second and not
+  144. The pill says "120/144 Hz" while the screen runs at 120 and "144
+  Hz" when the panel is at its fastest, and the Monitor tab shows the
+  fastest rate the panel can do.

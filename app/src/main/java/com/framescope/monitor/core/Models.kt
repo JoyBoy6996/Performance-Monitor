@@ -117,6 +117,8 @@ data class SystemMetrics(
     /** How far the phone has cooled from that peak, in °C. */
     val tempCooledC: Float? = null,
     val refreshHz: Float? = null,
+    /** The fastest rate the display of the phone supports. */
+    val refreshHzMax: Float? = null,
     val updatedAt: Long = 0L,
     /** Why each metric is or is not available. A metric missing here is unavailable. */
     val availability: Map<SystemMetric, MetricAvailability> = emptyMap(),
